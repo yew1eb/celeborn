@@ -182,6 +182,15 @@ Apache Celeborn is an elastic, high-performance shuffle service for distributed 
 - Entry point: `RemoteShuffleServiceFactory` (standard) or `CelebornTierFactory` (hybrid shuffle)
 - Location: `client-flink/common/src/main/java/org/apache/celeborn/plugin/flink/`
 
+## Reference Documents
+
+| Document | Purpose |
+|----------|---------|
+| `AGENTS.md` | This file — AI coding assistant guide |
+| `ARCHITECTURE_ANALYSIS.md` | Deep architecture analysis of the system |
+| `PERFORMANCE_OPTIMIZATION_ANALYSIS.md` | Performance optimization guide covering Master/Worker/Client/Storage/Network layers |
+| `CLAUDE.md` | Claude-specific context and guidelines |
+
 ## PR Checklist
 
 1. Run `./dev/reformat` (format all code)
