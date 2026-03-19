@@ -1,474 +1,190 @@
-# Apache Celeborn™
+# Apache Celeborn — AI Coding Guide
+
+This file provides guidance to AI coding assistants (Claude Code, Cursor, Copilot, etc.) working in this repository.
 
 ## Project Overview
 
-Apache Celeborn is an elastic and high-performance service for shuffle and spilled data in distributed compute engines. It improves the efficiency and elasticity of map-reduce engines by providing an elastic, high-efficient management service for intermediate data including shuffle data, spilled data, and result data.
+Apache Celeborn is an elastic, high-performance shuffle service for distributed compute engines (Spark, Flink, MapReduce, Tez). It disaggregates compute from storage via a **Master-Worker-Client** architecture.
 
-### Key Features
-- **Disaggregated Computing and Storage**: Separates compute from storage for better resource utilization
-- **Push-based Shuffle Write and Merged Shuffle Read**: Reorganizes shuffle data for improved disk and network efficiency
-- **High Availability and Fault Tolerance**: Master nodes use Raft consensus for HA
-- **Multi-Engine Support**: Apache Spark (2.4/3.x/4.x), Apache Flink (1.16-2.2), Hadoop MapReduce, and Apache Tez
-- **Multi-Tenant Support**: Dynamic configuration at SYSTEM, TENANT, and TENANT_USER levels
+**Key Features:**
+- Push-based shuffle write with merged shuffle read
+- High availability via Raft consensus (Apache Ratis)
+- Multi-engine: Spark 2.4/3.x/4.x, Flink 1.16-2.2, Hadoop MapReduce, Tez
+- Multi-tenant dynamic configuration (SYSTEM < TENANT < TENANT_USER)
 
-### Architecture Components
+## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                         Apache Celeborn Cluster                        │
-│  ┌──────────────┐     ┌──────────────┐     ┌──────────────┐            │
-│  │    Master    │────▶│    Master    │────▶│    Master    │  (Raft HA) │
-│  │   (Leader)   │◀────│   (Follower) │◀────│   (Follower) │            │
-│  └──────────────┘     └──────────────┘     └──────────────┘            │
-│         │                                                             │
-│    ┌────┴────┬────────┬────────┐                                      │
-│    ▼         ▼        ▼        ▼                                      │
-│ ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐                                   │
-│ │Worker│ │Worker│ │Worker│ │Worker│                                   │
-│ │  1   │ │  2   │ │  3   │ │  4   │                                   │
-│ └──┬───┘ └──┬───┘ └──┬───┘ └──┬───┘                                   │
-└────┼────────┼────────┼────────┼────────────────────────────────────────┘
-     │        │        │        │
-     └────────┴────────┴────────┘
-              ▲
-              │ gRPC/Netty RPC
-┌─────────────┴──────────────────────────────────────────────────────────┐
-│                     Compute Engine (Spark/Flink/MR)                    │
-│  ┌─────────────────┐         ┌─────────────────────────────────────┐  │
-│  │ LifecycleManager│         │           ShuffleClient             │  │
-│  │ (Driver/JM)     │         │    (Executor/TaskManager)           │  │
-│  │ - Metadata mgmt │         │    - Push/Fetch data                │  │
-│  │ - Slot allocation│        │    - Handle failures                │  │
-│  └─────────────────┘         └─────────────────────────────────────┘  │
-└────────────────────────────────────────────────────────────────────────┘
-```
+### Core Components
 
-## Technology Stack
+| Component | Location | Role |
+|-----------|----------|------|
+| **Master** | `master/` | Cluster resource management, worker registration, slot allocation, HA via Raft |
+| **Worker** | `worker/` | Data push/fetch handling, storage management, partition flushing |
+| **LifecycleManager** | `client/` | Control plane in Driver/JobMaster — manages shuffle metadata and slot allocation |
+| **ShuffleClient** | `client/` | Data plane in Executor/TaskManager — handles read/write operations |
 
-### Core Technologies
-| Component | Technology | Version |
-|-----------|------------|---------|
-| Build Tool | Apache Maven | 3.9.12 |
-| Alternative Build | SBT | 1.9.4 |
-| Language | Java | 8/11/17/21 |
-| Language | Scala | 2.12.18 (default), 2.11, 2.13 |
-| RPC Framework | gRPC | 1.44.0 |
-| Netty | Netty | 4.2.10.Final |
-| Consensus | Apache Ratis | 3.2.1 |
-| Protocol Buffers | Protobuf | 3.25.5 |
-| Metrics | Dropwizard Metrics | 4.2.25 |
-
-### Client Support Matrix
-| Engine | Scala 2.11 | Scala 2.12 | Scala 2.13 |
-|--------|------------|------------|------------|
-| Spark 2.4 | Java 8 | Java 8/11 | ❌ |
-| Spark 3.0-3.5 | ❌ | Java 8/11/17 | Java 11/17 |
-| Spark 4.0-4.1 | ❌ | ❌ | Java 17 |
-| Flink 1.16-1.20 | ❌ | Java 8/11 | ❌ |
-| Flink 2.0-2.2 | ❌ | Java 11/17 | Java 11/17 |
-
-### Web UI
-| Technology | Purpose |
-|------------|---------|
-| Vue 3 | Frontend Framework |
-| TypeScript | Language |
-| Vite | Build Tool |
-| Naive UI | Component Library |
-| Pinia | State Management |
-| pnpm | Package Manager |
-
-## Project Structure
+### Shuffle Data Flow
 
 ```
-celeborn/
-├── pom.xml                          # Root Maven configuration
-├── version.sbt                      # SBT version definition
-├── build.sbt (generated)            # SBT build definition
-│
-├── bin/                             # Utility scripts
-├── sbin/                            # Daemon control scripts (start/stop/status)
-├── conf/                            # Configuration templates
-├── build/                           # Build scripts and tools
-│   ├── make-distribution.sh         # Main build script
-│   ├── mvn                          # Maven wrapper
-│   └── sbt                          # SBT wrapper
-│
-├── dev/                             # Development utilities
-│   ├── reformat                     # Code formatting script
-│   ├── merge_pr.py                  # PR merge script
-│   └── dependencies.sh              # Dependency management
-│
-├── docs/                            # Documentation (MkDocs)
-├── docker/                          # Dockerfile
-├── charts/                          # Helm charts for Kubernetes
-├── web/                             # Vue.js Web UI
-│
-├── project/                         # SBT build definitions
-│   ├── CelebornBuild.scala          # Main SBT build configuration
-│   └── plugins.sbt                  # SBT plugins
-│
-├── openapi/                         # OpenAPI specification and client
-│   └── openapi-client/              # Generated REST client
-│
-├── spi/                             # Service Provider Interface
-├── common/                          # Common utilities and protocols
-│   └── src/main/proto/              # Protobuf definitions
-│
-├── client/                          # Core client library (engine-agnostic)
-├── cli/                             # Command-line interface
-├── service/                         # HTTP REST service
-├── master/                          # Master server
-├── worker/                          # Worker server
-│
-├── client-spark/                    # Spark client modules
-│   ├── common/                      # Common Spark client code
-│   ├── spark-2/                     # Spark 2.x support
-│   ├── spark-3/                     # Spark 3.x support
-│   └── spark-3-columnar-shuffle/    # Columnar shuffle optimization
-│
-├── client-flink/                    # Flink client modules
-│   ├── common/                      # Common Flink client code
-│   ├── flink-1.16 to flink-2.2/     # Version-specific modules
-│   └── common-tiered/               # Tiered storage support
-│
-├── client-mr/                       # MapReduce client
-├── client-tez/                      # Apache Tez client
-│
-├── multipart-uploader/              # S3/OSS multipart upload support
-├── toolkit/                         # Utility toolkit
-├── cpp/                             # C++ native components
-└── tests/                           # Integration tests
-    ├── spark-it/                    # Spark integration tests
-    ├── flink-it/                    # Flink integration tests
-    ├── mr-it/                       # MapReduce integration tests
-    ├── tez-it/                      # Tez integration tests
-    └── kubernetes-it/               # Kubernetes integration tests
+1. Mapper  → LifecycleManager.registerShuffle()
+2. LifecycleManager → Master: requestSlots()
+3. Master  → Workers: reserveSlots(), create partition files
+4. Mappers → Workers: pushData() [Workers merge + optionally replicate]
+5. Workers → Disk/HDFS/OSS: flush
+6. Reducers → Workers: fetchChunk()
 ```
+
+### Module Structure
+
+| Module | Purpose |
+|--------|---------|
+| `common/` | Shared utilities, Netty RPC framework, Protobuf definitions, `CelebornConf` |
+| `client/` | Engine-agnostic core client (`LifecycleManager`, `ShuffleClientImpl`) |
+| `master/` | Master server (slot allocation, HA state machine) |
+| `worker/` | Worker server (storage, memory management, congestion control) |
+| `service/` | HTTP REST service base, dynamic config service |
+| `spi/` | Service Provider Interface |
+| `cli/` | Command-line interface |
+| `client-spark/` | Spark 2.x/3.x/4.x shuffle clients (Java + Scala) |
+| `client-flink/` | Flink 1.16–2.2 shuffle clients (Java) |
+| `client-mr/` | Hadoop MapReduce client |
+| `client-tez/` | Apache Tez client (experimental) |
+| `tests/` | Integration tests per engine |
+
+### Key Source Files
+
+| File | Notes |
+|------|-------|
+| `common/src/main/scala/org/apache/celeborn/common/CelebornConf.scala` | All config definitions (~5000 lines), use builder pattern |
+| `common/src/main/proto/TransportMessages.proto` | All RPC message definitions |
+| `common/src/main/scala/org/apache/celeborn/common/rpc/` | Netty-based RPC framework |
+| `master/src/main/scala/.../Master.scala` | Master entry point |
+| `master/src/main/scala/.../SlotsAllocator.scala` | Slot allocation algorithms |
+| `worker/src/main/scala/.../Worker.scala` | Worker entry point |
+| `worker/src/main/scala/.../storage/StorageManager.scala` | Storage backend management |
+| `client/src/main/scala/.../LifecycleManager.scala` | Shuffle lifecycle control plane |
+| `client/src/main/java/.../ShuffleClientImpl.java` | Data plane client implementation |
+| `client-spark/spark-3/src/main/java/org/apache/spark/shuffle/celeborn/SparkShuffleManager.java` | Spark entry point |
+| `client-flink/common/src/main/java/org/apache/celeborn/plugin/flink/RemoteShuffleServiceFactory.java` | Flink entry point |
 
 ## Build Commands
 
-### Maven Build (Primary)
+### Maven (Primary)
 
 ```bash
-# Build with default profile (Java 8, Scala 2.12)
+# Build core modules (master, worker, cli) — fastest
 ./build/mvn clean package -DskipTests
 
-# Build for specific Spark version
+# Build with compute engine client
+./build/mvn clean package -DskipTests -Pspark-3.5
+./build/mvn clean package -DskipTests -Pspark-4.0
+./build/mvn clean package -DskipTests -Pflink-1.20
+./build/mvn clean package -DskipTests -Pmr
+
+# Distribution package
 ./build/make-distribution.sh -Pspark-3.5
-./build/make-distribution.sh -Pspark-2.4
-./build/make-distribution.sh -Pspark-4.0
-
-# Build for specific Flink version
-./build/make-distribution.sh -Pflink-1.20
-./build/make-distribution.sh -Pflink-2.0
-
-# Build for MapReduce
-./build/make-distribution.sh -Pmr
-
-# Build with AWS S3 support
-./build/make-distribution.sh -Pspark-3.4 -Paws
-
-# Build with Aliyun OSS support
-./build/make-distribution.sh -Pspark-3.4 -Paliyun
-
-# Build for Java 21 (Spark 3.5/4.0 only)
-./build/make-distribution.sh -Pspark-3.5 -Pjdk-21
+./build/make-distribution.sh -Pflink-1.20 --sbt-enabled
+./build/make-distribution.sh -Pspark-3.4 -Paws    # AWS S3 support
+./build/make-distribution.sh -Pspark-3.5 -Pjdk-21 # Java 21
 ```
 
-### SBT Build (Alternative)
+### SBT (Alternative)
 
 ```bash
-# Enable SBT in make-distribution.sh
-./build/make-distribution.sh --sbt-enabled -Pspark-3.5
-
-# Direct SBT commands
 ./build/sbt clean package
-./build/sbt "project worker" run
+./build/sbt -Pspark-3.5 test
+./build/sbt -Pflink-1.20 celeborn-flink-group/test
 ```
 
-### Web UI Build
+## Testing
 
 ```bash
-cd web
-pnpm install
-pnpm run build
-pnpm run dev        # Development server
-```
-
-### Documentation Build
-
-```bash
-# Using Make (requires Docker)
-make docs
-make docs-serve     # Serve locally on port 8000
-
-# Or using Python directly
-pip install -r requirements.txt
-mkdocs build
-mkdocs serve
-```
-
-## Testing Commands
-
-### Unit Tests
-
-```bash
-# Run all unit tests
+# All unit tests
 ./build/mvn test
 
-# Run tests for specific module
+# Per module
 ./build/mvn test -pl common
 ./build/mvn test -pl master
 ./build/mvn test -pl worker
 
-# Run with specific profile
-./build/mvn test -Pspark-3.5 -pl client-spark/spark-3
-```
+# Single test class
+./build/mvn test -pl common -Dtest=ConfigurationSuite
 
-### Integration Tests
+# Single test method
+./build/mvn test -pl master -Dtest=SlotsAllocatorSuiteJ#testAllocateSlotsForSinglePartitionId
 
-```bash
-# Spark integration tests
+# Integration tests
 ./build/mvn -Pspark-3.5 -pl tests/spark-it test
-
-# Flink integration tests
 ./build/mvn -Pflink-1.20 -pl tests/flink-it test
-
-# MapReduce integration tests
 ./build/mvn -Pmr -pl tests/mr-it test
 ```
 
-### Test Coverage
+## Code Style
 
 ```bash
-# Generate coverage report (JaCoCo)
-./build/mvn clean test jacoco:report
-
-# Coverage config in codecov.yml
-# Reports uploaded to Codecov on CI
-```
-
-## Code Style Guidelines
-
-### Java/Scala Code Formatting
-
-The project uses **Spotless** with **Google Java Format** for code formatting.
-
-```bash
-# Apply formatting to all files
+# Format ALL code before committing (required)
 ./dev/reformat
 
-# Check formatting without applying
+# Format web UI code
+./dev/reformat --web
+
+# Verify formatting
 ./build/mvn spotless:check
 
-# Apply formatting to specific profile
-./build/mvn spotless:apply -Pspark-3.5
-```
-
-### Scala Style Configuration
-
-Scala formatting is controlled by `.scalafmt.conf`:
-- Max column width: 100
-- Runner dialect: scala212
-- Import grouping: java → scala → third-party → celeborn
-- Align: disabled (preset = none)
-
-### Web UI Code Style
-
-```bash
-# Format and lint web code
-cd web
-pnpm run format
-pnpm run lint
-```
-
-### Import Order
-
-Required import order (enforced by Spotless):
-1. `javax.*` / `java.*`
-2. `scala.*`
-3. Third-party libraries
-4. `org.apache.celeborn.*`
-
-### License Headers
-
-All source files must include Apache License 2.0 header. Use RAT plugin to check:
-```bash
+# Verify license headers
 ./build/mvn org.apache.rat:apache-rat-plugin:check
 ```
 
-## Configuration System
+**Import order** (enforced by Spotless): `javax.*`/`java.*` → `scala.*` → third-party → `org.apache.celeborn.*`
 
-### Static Configuration
+## Key Configuration
 
-- **Location**: `$CELEBORN_HOME/conf/celeborn-defaults.conf`
-- **Template**: `conf/celeborn-defaults.conf.template`
-- **Class**: `CelebornConf`
+- **Config class**: `common/src/main/scala/org/apache/celeborn/common/CelebornConf.scala`
+- **Main config file**: `conf/celeborn-defaults.conf`
+- **Dynamic config levels** (ascending precedence): `SYSTEM` < `TENANT` < `TENANT_USER`
+- **Dynamic config backends**: filesystem (`FS`) or database (`DB`)
 
-### Dynamic Configuration
+## RPC and Protocol Buffers
 
-Supports three levels (in order of precedence):
-1. **TENANT_USER**: Specific to tenant + user
-2. **TENANT**: Specific to tenant
-3. **SYSTEM**: System-wide defaults
+- RPC framework: Netty-based, lives in `common/src/main/scala/org/apache/celeborn/common/rpc/`
+- Protocol definitions: `common/src/main/proto/TransportMessages.proto`
+- Protobuf compiled automatically during Maven `compile` phase
 
-Storage backends:
-- **Filesystem**: `celeborn.dynamicConfig.store.backend=FS`
-- **Database**: `celeborn.dynamicConfig.store.backend=DB`
+## Development Patterns
 
-### Key Configuration Files
+### Adding a Config Entry
 
-| File | Purpose |
-|------|---------|
-| `conf/celeborn-defaults.conf` | Main server configuration |
-| `conf/celeborn-env.sh` | Environment variables (memory, JVM opts) |
-| `conf/log4j2.xml` | Logging configuration |
-| `conf/metrics.properties` | Metrics reporting configuration |
-| `conf/dynamicConfig.yaml` | Dynamic configuration (optional) |
-
-## Security
-
-### TLS/SSL Encryption
-
-Enable TLS for different transport modules:
-- `rpc_service`: Client ↔ Server communication
-- `rpc_app`: LifecycleManager ↔ Executors
-- `data`: Data push/fetch operations
-- `replicate`: Worker-to-worker replication
-
-```properties
-# Enable TLS for RPC service
-celeborn.ssl.rpc_service.enabled=true
-celeborn.ssl.rpc_service.keyStore=/path/to/server.jks
-celeborn.ssl.rpc_service.keyStorePassword=password
-celeborn.ssl.rpc_service.trustStore=/path/to/truststore.jks
-```
-
-### Authentication (SASL)
-
-```properties
-# Enable authentication
-celeborn.auth.enabled=true
-celeborn.internal.port.enabled=true
-```
-
-**Note**: SASL requires internal port to be enabled.
-
-## Deployment
-
-### Binary Package Layout
-
-```
-apache-celeborn-0.7.0-SNAPSHOT-bin/
-├── bin/                    # Utility scripts
-├── sbin/                   # Start/stop scripts
-├── conf/                   # Configuration files
-├── jars/                   # Common JARs
-├── master-jars/            # Master-specific JARs
-├── worker-jars/            # Worker-specific JARs
-├── cli-jars/               # CLI JARs
-├── spark/                  # Spark client JARs (if built)
-├── flink/                  # Flink client JARs (if built)
-├── mr/                     # MapReduce client JARs (if built)
-└── RELEASE                 # Release info
-```
-
-### Docker Deployment
-
-```bash
-# Build Docker image
-docker build -f docker/Dockerfile .
-
-# Base image: eclipse-temurin:8-jdk-noble
-# Default user: celeborn (uid=10006)
-# Default home: /opt/celeborn
-```
-
-### Kubernetes Deployment
-
-Helm charts available in `charts/celeborn/`:
-```bash
-helm install celeborn charts/celeborn
-```
-
-## Development Workflow
-
-### Creating a Pull Request
-
-1. **Format code**: Run `./dev/reformat` before submitting
-2. **Update docs**: If changing configs, run:
+1. Add to `CelebornConf.scala` using the builder pattern
+2. Regenerate config docs:
    ```bash
-   UPDATE=1 build/mvn clean test -pl common -am -Dtest=none \
-     -DwildcardSuites=org.apache.celeborn.ConfigurationSuite
+   UPDATE=1 build/mvn test -pl common -Dtest=ConfigurationSuite
    ```
-3. **Check licenses**: Ensure all files have proper headers
-4. **Run tests**: Ensure all relevant tests pass
-5. **Jira ticket**: Link to CELEBORN-XXXX ticket
 
-### Adding RPC Messages
+### Adding a Dependency
 
-When adding new RPC messages:
-- Follow Protobuf naming: `RegisterWorker` and `RegisterWorkerResponse`
-- Use `repeated` instead of `map` type fields
-- Add to `common/src/main/proto/` directory
+1. Add version to root `pom.xml` under `<dependencyManagement>`
+2. Update `LICENSE-binary` with the dependency's license info
 
-### Adding Dependencies
+### Adding an RPC Message
 
-When introducing new dependencies:
-1. Add to root `pom.xml` dependencyManagement
-2. Update `LICENSE-binary` with license info
-3. Ensure consistent versions across modules
+1. Add to `common/src/main/proto/TransportMessages.proto`
+2. Naming convention: `MessageName` + `MessageNameResponse`
+3. Use `repeated` instead of `map` fields (avoids reflection overhead)
 
-### Protocol Buffer Generation
+### Spark Client Integration
 
-Protobuf files are in `common/src/main/proto/`:
-```bash
-# Generated automatically during Maven compile phase
-# Or manually:
-./build/mvn protobuf:compile
-```
+- Entry point: `SparkShuffleManager` (implements Spark's `ShuffleManager`)
+- Location: `client-spark/spark-3/src/main/java/org/apache/spark/shuffle/celeborn/`
+- Two writers: `HashBasedShuffleWriter`, `SortBasedShuffleWriter`
 
-## REST API
+### Flink Client Integration
 
-Celeborn provides REST APIs for monitoring and management:
+- Entry point: `RemoteShuffleServiceFactory` (standard) or `CelebornTierFactory` (hybrid shuffle)
+- Location: `client-flink/common/src/main/java/org/apache/celeborn/plugin/flink/`
 
-| Endpoint | Description |
-|----------|-------------|
-| `/conf` | List configuration |
-| `/listDynamicConfigs` | List dynamic configs |
-| `/masterGroupInfo` | Master HA information |
-| `/workerInfo` | Worker status |
-| `/shuffles` | Active shuffle information |
+## PR Checklist
 
-OpenAPI specification is in `openapi/` directory.
-
-## Troubleshooting
-
-### Common Build Issues
-
-1. **Java version mismatch**: Ensure JAVA_HOME matches target profile
-2. **Scala version conflicts**: Use `-Dscala.binary.version=2.12`
-3. **Out of memory**: Increase MAVEN_OPTS: `-Xmx4g`
-
-### Test Failures
-
-Test logs are stored in:
-- `**/target/test-reports/`
-- `**/target/unit-tests.log`
-
-### CI/CD
-
-GitHub Actions workflows:
-- `maven.yml`: Main CI workflow (Java 8/11/17, Spark/Flink/MR tests)
-- `sbt.yml`: SBT build verification
-- `style.yml`: Code style checks
-- `cpp_integration.yml`: C++ components
-- `integration.yml`: Integration tests
-
-## Resources
-
-- **Website**: https://celeborn.apache.org/
-- **Documentation**: https://celeborn.apache.org/docs/
-- **Jira**: https://issues.apache.org/jira/projects/CELEBORN
-- **Slack**: https://join.slack.com/t/apachecelebor-kw08030/shared_invite/...
-- **Git Repository**: https://gitbox.apache.org/repos/asf/celeborn.git
+1. Run `./dev/reformat` (format all code)
+2. If configs changed, regenerate docs (see above)
+3. Ensure all relevant tests pass
+4. Link to a `CELEBORN-XXXX` Jira ticket in the PR description
