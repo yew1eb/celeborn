@@ -187,7 +187,6 @@ Apache Celeborn is an elastic, high-performance shuffle service for distributed 
 | Document | Description |
 |----------|-------------|
 | `ARCHITECTURE_ANALYSIS.md` | Deep dive into system architecture and component interactions |
-| `NEWBIE_GUIDE.md` | Onboarding guide for new contributors |
 | `PERFORMANCE_ANALYSIS.md` | Performance bottleneck analysis and optimization guide (40+ issues, covers transport, storage, memory, Master scheduling, Spark client) |
 
 ## PR Checklist
