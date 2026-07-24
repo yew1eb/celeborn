@@ -23,10 +23,15 @@ import com.codahale.metrics.{Reservoir, Snapshot, UniformSnapshot}
 
 class ResettableSlidingWindowReservoir(size: Int) extends Reservoir {
   var measurements: Array[Long] = new Array[Long](size)
-  var index: Int = 0
-  var full = false
+  // Volatile so size() can read them without taking the monitor; writers still synchronize on
+  // `this` for the array/index/full mutation, but the read-only size() path stays lock-free.
+  @volatile var index: Int = 0
+  @volatile var full = false
 
-  def size(): Int = this.synchronized {
+  def size(): Int = {
+    // Lock-free read: a racing update may advance index/full mid-call, but size is inherently an
+    // approximation of the current window — the synchronized version had the same observable
+    // imprecision across concurrent writers.
     if (!full) {
       Math.min(index, size)
     } else {
