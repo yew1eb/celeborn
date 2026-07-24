@@ -1,0 +1,159 @@
+#
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+openapi: 3.0.0
+servers:
+  - url: http://localhost:19090/
+    description: Localhost reference server
+security:
+  - basic: []
+info:
+  title: Celeborn Trogdor Agent REST API
+  license:
+    name: Apache 2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+  version: 1.0.0
+paths:
+  /api/v1/trogdor/agent/status:
+    get:
+      tags:
+        - Agent
+      operationId: getAgentStatus
+      description: Get the agent status.
+      responses:
+        "200":
+          description: The request was successful.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentStatusResponse'
+
+  /api/v1/trogdor/agent/uptime:
+    get:
+      tags:
+        - Agent
+      operationId: getAgentUptime
+      description: Get the agent uptime.
+      responses:
+        "200":
+          description: The request was successful.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UptimeResponse'
+
+  /api/v1/trogdor/agent/workers:
+    post:
+      tags:
+        - Agent
+      operationId: createWorker
+      description: Create a new worker on the agent.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateWorkerRequest'
+      responses:
+        "200":
+          description: The worker was created successfully.
+
+  /api/v1/trogdor/agent/workers/{workerId}/stop:
+    put:
+      tags:
+        - Agent
+      operationId: stopWorker
+      description: Stop a running worker.
+      parameters:
+        - name: workerId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        "200":
+          description: The stop request was accepted.
+
+  /api/v1/trogdor/agent/workers/{workerId}/destroy:
+    delete:
+      tags:
+        - Agent
+      operationId: destroyWorker
+      description: Destroy a worker and remove its state.
+      parameters:
+        - name: workerId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        "200":
+          description: The destroy request was accepted.
+
+components:
+  securitySchemes:
+    basic:
+      type: http
+      scheme: basic
+
+  schemas:
+    AgentStatusResponse:
+      type: object
+      properties:
+        serverStartMs:
+          type: integer
+          format: int64
+
+    UptimeResponse:
+      type: object
+      properties:
+        startMs:
+          type: integer
+          format: int64
+        nowMs:
+          type: integer
+          format: int64
+        uptimeMs:
+          type: integer
+          format: int64
+
+    CreateWorkerRequest:
+      type: object
+      properties:
+        workerId:
+          type: integer
+          format: int64
+        taskId:
+          type: string
+        spec:
+          $ref: '#/components/schemas/TaskSpec'
+
+    TaskSpec:
+      type: object
+      description: |
+        Polymorphic task specification. The `class` field contains the fully-qualified
+        Java class name of the concrete spec (e.g. org.apache.celeborn.trogdor.workload.PushBenchSpec).
+      properties:
+        class:
+          type: string
+        startMs:
+          type: integer
+          format: int64
+        durationMs:
+          type: integer
+          format: int64
+      additionalProperties: true

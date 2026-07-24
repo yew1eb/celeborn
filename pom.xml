@@ -40,6 +40,7 @@
     <module>worker</module>
     <module>lifecycle-manager</module>
     <module>cli</module>
+    <module>trogdor</module>
   </modules>
 
   <distributionManagement>

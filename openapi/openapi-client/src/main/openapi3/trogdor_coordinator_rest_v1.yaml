@@ -1,0 +1,284 @@
+#
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+openapi: 3.0.0
+servers:
+  - url: http://localhost:19091/
+    description: Localhost reference server
+security:
+  - basic: []
+info:
+  title: Celeborn Trogdor Coordinator REST API
+  license:
+    name: Apache 2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+  version: 1.0.0
+paths:
+  /api/v1/trogdor/coordinator/status:
+    get:
+      tags:
+        - Coordinator
+      operationId: getCoordinatorStatus
+      description: Get the coordinator status.
+      responses:
+        "200":
+          description: The request was successful.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CoordinatorStatusResponse'
+
+  /api/v1/trogdor/coordinator/uptime:
+    get:
+      tags:
+        - Coordinator
+      operationId: getCoordinatorUptime
+      description: Get the coordinator uptime.
+      responses:
+        "200":
+          description: The request was successful.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UptimeResponse'
+
+  /api/v1/trogdor/coordinator/tasks:
+    get:
+      tags:
+        - Coordinator
+      operationId: listTasks
+      description: List all tasks managed by the coordinator.
+      responses:
+        "200":
+          description: The request was successful.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TasksResponse'
+    post:
+      tags:
+        - Coordinator
+      operationId: createTask
+      description: Submit a new Trogdor task.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTaskRequest'
+      responses:
+        "200":
+          description: The task was created successfully.
+
+  /api/v1/trogdor/coordinator/tasks/{taskId}:
+    get:
+      tags:
+        - Coordinator
+      operationId: getTask
+      description: Get the state of a single task.
+      parameters:
+        - name: taskId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The request was successful.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskState'
+
+  /api/v1/trogdor/coordinator/tasks/{taskId}/stop:
+    put:
+      tags:
+        - Coordinator
+      operationId: stopTask
+      description: Stop a running task.
+      parameters:
+        - name: taskId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The stop request was accepted.
+
+  /api/v1/trogdor/coordinator/tasks/{taskId}/destroy:
+    delete:
+      tags:
+        - Coordinator
+      operationId: destroyTask
+      description: Destroy a task and remove its state.
+      parameters:
+        - name: taskId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The destroy request was accepted.
+
+  /api/v1/trogdor/coordinator/chaos/plans:
+    post:
+      tags:
+        - Chaos
+      operationId: submitChaosPlan
+      description: Submit a chaos verification plan to the orchestrator.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubmitChaosPlanRequest'
+      responses:
+        "200":
+          description: The chaos plan was accepted.
+
+  /api/v1/trogdor/coordinator/chaos/plans/{planId}:
+    get:
+      tags:
+        - Chaos
+      operationId: showChaosPlan
+      description: Show the current status of a chaos plan.
+      parameters:
+        - name: planId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The request was successful.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChaosPlanResponse'
+
+  /api/v1/trogdor/coordinator/chaos/plans/{planId}/stop:
+    put:
+      tags:
+        - Chaos
+      operationId: stopChaosPlan
+      description: Stop a running chaos plan.
+      parameters:
+        - name: planId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The stop request was accepted.
+
+components:
+  securitySchemes:
+    basic:
+      type: http
+      scheme: basic
+
+  schemas:
+    CoordinatorStatusResponse:
+      type: object
+      properties:
+        serverStartMs:
+          type: integer
+          format: int64
+
+    UptimeResponse:
+      type: object
+      properties:
+        startMs:
+          type: integer
+          format: int64
+        nowMs:
+          type: integer
+          format: int64
+        uptimeMs:
+          type: integer
+          format: int64
+
+    CreateTaskRequest:
+      type: object
+      properties:
+        id:
+          type: string
+        spec:
+          $ref: '#/components/schemas/TaskSpec'
+
+    TaskSpec:
+      type: object
+      description: |
+        Polymorphic task specification. The `class` field contains the fully-qualified
+        Java class name of the concrete spec (e.g. org.apache.celeborn.trogdor.workload.PushBenchSpec).
+      properties:
+        class:
+          type: string
+        startMs:
+          type: integer
+          format: int64
+        durationMs:
+          type: integer
+          format: int64
+      additionalProperties: true
+
+    TasksResponse:
+      type: object
+      properties:
+        tasks:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/TaskState'
+
+    TaskState:
+      type: object
+      description: |
+        Polymorphic task state. The `class` field contains the fully-qualified
+        Java class name of the concrete state (TaskPending, TaskRunning, TaskStopping, TaskDone).
+      properties:
+        class:
+          type: string
+        spec:
+          $ref: '#/components/schemas/TaskSpec'
+        state:
+          type: string
+          enum: [PENDING, RUNNING, STOPPING, DONE]
+        status:
+          type: object
+        error:
+          type: string
+      additionalProperties: true
+
+    SubmitChaosPlanRequest:
+      type: object
+      properties:
+        planId:
+          type: string
+        planJson:
+          type: string
+        targetNodes:
+          type: array
+          items:
+            type: string
+
+    ChaosPlanResponse:
+      type: object
+      properties:
+        planId:
+          type: string
+        status:
+          type: string

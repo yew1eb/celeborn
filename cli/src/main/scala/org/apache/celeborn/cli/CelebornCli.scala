@@ -21,13 +21,15 @@ import picocli.CommandLine.Command
 
 import org.apache.celeborn.cli.common.BaseCommand
 import org.apache.celeborn.cli.master.MasterSubcommandImpl
+import org.apache.celeborn.cli.trogdor.TrogdorSubcommand
 import org.apache.celeborn.cli.worker.WorkerSubcommandImpl
 @Command(
   name = "celeborn-cli",
   description = Array("@|bold Scala|@ Celeborn CLI"),
   subcommands = Array(
     classOf[MasterSubcommandImpl],
-    classOf[WorkerSubcommandImpl]))
+    classOf[WorkerSubcommandImpl],
+    classOf[TrogdorSubcommand]))
 class CelebornCli extends BaseCommand {
   override def run(): Unit = {
     logError(
