@@ -729,6 +729,22 @@ class CelebornConf(loadDefaults: Boolean) extends Cloneable with Logging with Se
 
   def masterHttpIdleTimeout: Long = get(MASTER_HTTP_IDLE_TIMEOUT)
 
+  def trogdorAgentHttpHost: String =
+    get(TROGDOR_AGENT_HTTP_HOST).replace("<localhost>", Utils.localHostName(this))
+
+  def trogdorAgentHttpPort: Int = get(TROGDOR_AGENT_HTTP_PORT)
+
+  def trogdorCoordinatorHttpHost: String =
+    get(TROGDOR_COORDINATOR_HTTP_HOST).replace("<localhost>", Utils.localHostName(this))
+
+  def trogdorCoordinatorHttpPort: Int = get(TROGDOR_COORDINATOR_HTTP_PORT)
+
+  def trogdorWorkloadMasterHost: String = get(TROGDOR_WORKLOAD_MASTER_HOST)
+
+  def trogdorWorkloadMasterPort: Int = get(TROGDOR_WORKLOAD_MASTER_PORT)
+
+  def trogdorWorkloadUserIdentifier: String = get(TROGDOR_WORKLOAD_USER_IDENTIFIER)
+
   def haEnabled: Boolean = get(HA_ENABLED)
   def haMasterGracefulShutdownEnabled: Boolean = get(HA_MASTER_GRACEFUL_SHUTDOWN_ENABLED)
   def haMasterGracefulShutdownTimeoutMs: Long = get(HA_MASTER_GRACEFUL_SHUTDOWN_TIMEOUT)
@@ -7074,5 +7090,65 @@ object CelebornConf extends Logging {
       .version("0.7.0")
       .booleanConf
       .createWithDefault(false)
+
+  val TROGDOR_AGENT_HTTP_HOST: ConfigEntry[String] =
+    buildConf("celeborn.trogdor.agent.http.host")
+      .categories("trogdor")
+      .version("0.7.0")
+      .doc("The host to bind the Trogdor agent HTTP server to.")
+      .stringConf
+      .createWithDefault("0.0.0.0")
+
+  val TROGDOR_AGENT_HTTP_PORT: ConfigEntry[Int] =
+    buildConf("celeborn.trogdor.agent.http.port")
+      .categories("trogdor")
+      .version("0.7.0")
+      .doc("The port to bind the Trogdor agent HTTP server to.")
+      .intConf
+      .checkValue(p => p >= 1024 && p < 65535, "Invalid port")
+      .createWithDefault(19090)
+
+  val TROGDOR_COORDINATOR_HTTP_HOST: ConfigEntry[String] =
+    buildConf("celeborn.trogdor.coordinator.http.host")
+      .categories("trogdor")
+      .version("0.7.0")
+      .doc("The host to bind the Trogdor coordinator HTTP server to.")
+      .stringConf
+      .createWithDefault("0.0.0.0")
+
+  val TROGDOR_COORDINATOR_HTTP_PORT: ConfigEntry[Int] =
+    buildConf("celeborn.trogdor.coordinator.http.port")
+      .categories("trogdor")
+      .version("0.7.0")
+      .doc("The port to bind the Trogdor coordinator HTTP server to.")
+      .intConf
+      .checkValue(p => p >= 1024 && p < 65535, "Invalid port")
+      .createWithDefault(19091)
+
+  val TROGDOR_WORKLOAD_MASTER_HOST: ConfigEntry[String] =
+    buildConf("celeborn.trogdor.workload.master.host")
+      .categories("trogdor")
+      .version("0.7.0")
+      .doc("Default Celeborn master host for Trogdor push/fetch benchmarks.")
+      .stringConf
+      .createWithDefault("localhost")
+
+  val TROGDOR_WORKLOAD_MASTER_PORT: ConfigEntry[Int] =
+    buildConf("celeborn.trogdor.workload.master.port")
+      .categories("trogdor")
+      .version("0.7.0")
+      .doc("Default Celeborn master port for Trogdor push/fetch benchmarks.")
+      .intConf
+      .checkValue(p => p >= 1024 && p < 65535, "Invalid port")
+      .createWithDefault(9097)
+
+  val TROGDOR_WORKLOAD_USER_IDENTIFIER: ConfigEntry[String] =
+    buildConf("celeborn.trogdor.workload.user.identifier")
+      .categories("trogdor")
+      .version("0.7.0")
+      .doc(
+        "Default Celeborn user identifier for Trogdor benchmarks, in the form `<tenant>:<name>`.")
+      .stringConf
+      .createWithDefault("default:default")
 
 }

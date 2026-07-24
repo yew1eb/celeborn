@@ -35,5 +35,13 @@ object OpenAPIConfig {
       "org.apache.celeborn.service.deploy.master.http.api"),
     Service.WORKER -> Seq(
       "org.apache.celeborn.server.common.http.api",
-      "org.apache.celeborn.service.deploy.worker.http.api"))
+      "org.apache.celeborn.service.deploy.worker.http.api"),
+    "trogdor-agent" -> Seq(
+      "org.apache.celeborn.server.common.http.api",
+      "org.apache.celeborn.trogdor.http",
+      "org.apache.celeborn.trogdor.agent.http"),
+    "trogdor-coordinator" -> Seq(
+      "org.apache.celeborn.server.common.http.api",
+      "org.apache.celeborn.trogdor.http",
+      "org.apache.celeborn.trogdor.coordinator.http"))
 }

@@ -228,6 +228,10 @@ abstract class HttpService extends Service with Logging {
           conf.masterHttpHost
         case Service.WORKER =>
           conf.workerHttpHost
+        case "trogdor-agent" =>
+          conf.trogdorAgentHttpHost
+        case "trogdor-coordinator" =>
+          conf.trogdorCoordinatorHttpHost
       }
     }
   }
@@ -238,6 +242,10 @@ abstract class HttpService extends Service with Logging {
         conf.masterHttpPort
       case Service.WORKER =>
         conf.workerHttpPort
+      case "trogdor-agent" =>
+        conf.trogdorAgentHttpPort
+      case "trogdor-coordinator" =>
+        conf.trogdorCoordinatorHttpPort
     }
   }
 
@@ -247,6 +255,8 @@ abstract class HttpService extends Service with Logging {
         conf.masterHttpMaxWorkerThreads
       case Service.WORKER =>
         conf.workerHttpMaxWorkerThreads
+      case "trogdor-agent" | "trogdor-coordinator" =>
+        8
     }
   }
 
@@ -256,6 +266,8 @@ abstract class HttpService extends Service with Logging {
         conf.masterHttpStopTimeout
       case Service.WORKER =>
         conf.workerHttpStopTimeout
+      case "trogdor-agent" | "trogdor-coordinator" =>
+        30000
     }
   }
 
@@ -265,6 +277,8 @@ abstract class HttpService extends Service with Logging {
         conf.masterHttpIdleTimeout
       case Service.WORKER =>
         conf.workerHttpIdleTimeout
+      case "trogdor-agent" | "trogdor-coordinator" =>
+        60000
     }
   }
 
@@ -274,6 +288,8 @@ abstract class HttpService extends Service with Logging {
         conf.get(CelebornConf.MASTER_HTTP_SSL_ENABLED)
       case Service.WORKER =>
         conf.get(CelebornConf.WORKER_HTTP_SSL_ENABLED)
+      case "trogdor-agent" | "trogdor-coordinator" =>
+        false
     }
   }
 
@@ -283,6 +299,8 @@ abstract class HttpService extends Service with Logging {
         conf.get(CelebornConf.MASTER_HTTP_SSL_KEYSTORE_PATH)
       case Service.WORKER =>
         conf.get(CelebornConf.WORKER_HTTP_SSL_KEYSTORE_PATH)
+      case "trogdor-agent" | "trogdor-coordinator" =>
+        None
     }
   }
 
@@ -292,6 +310,8 @@ abstract class HttpService extends Service with Logging {
         conf.get(CelebornConf.MASTER_HTTP_SSL_KEYSTORE_PASSWORD)
       case Service.WORKER =>
         conf.get(CelebornConf.WORKER_HTTP_SSL_KEYSTORE_PASSWORD)
+      case "trogdor-agent" | "trogdor-coordinator" =>
+        None
     }
   }
 
@@ -301,6 +321,8 @@ abstract class HttpService extends Service with Logging {
         conf.get(CelebornConf.MASTER_HTTP_SSL_KEYSTORE_TYPE)
       case Service.WORKER =>
         conf.get(CelebornConf.WORKER_HTTP_SSL_KEYSTORE_TYPE)
+      case "trogdor-agent" | "trogdor-coordinator" =>
+        None
     }
   }
 
@@ -310,6 +332,8 @@ abstract class HttpService extends Service with Logging {
         conf.get(CelebornConf.MASTER_HTTP_SSL_KEYSTORE_ALGORITHM)
       case Service.WORKER =>
         conf.get(CelebornConf.WORKER_HTTP_SSL_KEYSTORE_ALGORITHM)
+      case "trogdor-agent" | "trogdor-coordinator" =>
+        None
     }
   }
 
@@ -319,6 +343,8 @@ abstract class HttpService extends Service with Logging {
         conf.get(CelebornConf.MASTER_HTTP_SSL_DISALLOWED_PROTOCOLS)
       case Service.WORKER =>
         conf.get(CelebornConf.WORKER_HTTP_SSL_DISALLOWED_PROTOCOLS)
+      case "trogdor-agent" | "trogdor-coordinator" =>
+        Seq.empty
     }
   }
 
@@ -328,6 +354,8 @@ abstract class HttpService extends Service with Logging {
         conf.get(CelebornConf.MASTER_HTTP_SSL_INCLUDE_CIPHER_SUITES)
       case Service.WORKER =>
         conf.get(CelebornConf.WORKER_HTTP_SSL_INCLUDE_CIPHER_SUITES)
+      case "trogdor-agent" | "trogdor-coordinator" =>
+        Seq.empty
     }
   }
 

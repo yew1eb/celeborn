@@ -60,10 +60,13 @@ class AuthenticationFilter(conf: CelebornConf, serviceName: String) extends Filt
       conf.get(CelebornConf.MASTER_HTTP_AUTH_SUPPORTED_SCHEMES).map(HttpAuthSchemes.withName)
     case Service.WORKER =>
       conf.get(CelebornConf.WORKER_HTTP_AUTH_SUPPORTED_SCHEMES).map(HttpAuthSchemes.withName)
+    case _ =>
+      Seq.empty
   }
   private val proxyClientIpHeader: String = serviceName match {
     case Service.MASTER => conf.get(CelebornConf.MASTER_HTTP_PROXY_CLIENT_IP_HEADER)
     case Service.WORKER => conf.get(CelebornConf.WORKER_HTTP_PROXY_CLIENT_IP_HEADER)
+    case _ => ""
   }
 
   private val administrators: Set[String] = serviceName match {
@@ -71,6 +74,8 @@ class AuthenticationFilter(conf: CelebornConf, serviceName: String) extends Filt
       conf.get(CelebornConf.MASTER_HTTP_AUTH_ADMINISTERS).toSet
     case Service.WORKER =>
       conf.get(CelebornConf.WORKER_HTTP_AUTH_ADMINISTERS).toSet
+    case _ =>
+      Set.empty
   }
 
   private val bypassApiPaths: Set[String] =
