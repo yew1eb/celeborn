@@ -18,71 +18,69 @@ license: |
 
 # Celeborn Trogdor
 
-Celeborn Trogdor is a distributed testing and fault-injection framework inspired by
-[Apache Kafka Trogdor](https://kafka.apache.org/documentation/#trogdor). It runs as independent
-Coordinator and Agent processes and can submit long-running workloads or inject faults into a
-Celeborn cluster.
+Celeborn Trogdor 是一个分布式测试与故障注入框架,灵感来自
+[Apache Kafka Trogdor](https://kafka.apache.org/documentation/#trogdor)。它以独立的
+Coordinator 与 Agent 进程运行,可以向 Celeborn 集群提交长时运行的工作负载或注入故障。
 
-## Architecture
+## 架构
 
-- **Trogdor Coordinator** maintains the task state machine and schedules tasks onto agents.
-- **Trogdor Agent** runs on the target nodes and executes the actual workload/fault workers.
-- **TaskSpec** describes what to run; the JSON `class` field selects the concrete implementation.
-- **TaskController** (coordinator side) decides which agent nodes should run the task.
-- **TaskWorker** (agent side) performs the actual work in a background thread.
+- **Trogdor Coordinator**:维护任务状态机,将任务调度到 agent 上。
+- **Trogdor Agent**:运行在目标节点上,执行真正的 workload/fault worker。
+- **TaskSpec**:描述要运行什么;JSON 中的 `class` 字段选择具体实现类。
+- **TaskController**(coordinator 侧):决定任务应在哪些 agent 节点运行。
+- **TaskWorker**(agent 侧):在后台线程中执行真正的逻辑。
 
-The coordinator and agent communicate over HTTP. The coordinator polls each agent's status on a
-fixed heartbeat (1s by default), reconciles the desired set of workers with what the agent reports,
-and advances the task state machine once every worker for a task reaches `DONE`.
+Coordinator 与 agent 之间通过 HTTP 通信。Coordinator 以固定心跳(默认 1s)轮询每个 agent 的
+状态,把"期望运行的 worker 集合"与"agent 上报的实际集合"对账,当某个任务的所有 worker 都
+到达 `DONE` 时推进任务状态机。
 
-### Data flow
+### 数据流
 
 ```
                         createTask(TaskSpec)
    client ──────────────────────────────────────►  Coordinator
                                                        │
-                            heartbeat (1s)             │ runTask: assign workerId,
-                  ┌────────────────────────────────────│  schedule stop at endMs
+                            heartbeat (1s)             │ runTask: 分配 workerId,
+                  ┌────────────────────────────────────│  在 endMs 处调度 stopTask
                   ▼                                    ▼
                Agent  ◄────── createWorker ──────  NodeManager
-            (per node)           stopWorker          (per node)
+            (每节点)           stopWorker            (每节点)
                  │
                  │ WorkerManager.start(TaskWorker)
                  ▼
            TaskWorker ── haltFuture.complete("") ──►  worker DONE
                                                       │
-                  heartbeat reports worker states ◄──┘
-                  → maybeFinishTask when all DONE
+                  心跳上报 worker 状态 ◄──────────────┘
+                  → 所有 worker DONE 时 maybeFinishTask
 ```
 
-### Task state machine
+### 任务状态机
 
 ```
-   PENDING ──runTask──► RUNNING ──all workers DONE──► DONE
+   PENDING ──runTask──► RUNNING ──所有 worker DONE──► DONE
       │                    │
       │ stopTask           │ stopTask
       ▼                    ▼
    DONE(err=stopped)   STOPPING ──► DONE
 ```
 
-A task is `PENDING` until `runTask` fires (immediately when `startMs <= now`, the common case since
-the coordinator rebases a past `startMs` to `now` on submission). It becomes `RUNNING` once workers
-are assigned, `STOPPING` on `stopTask`, and `DONE` once every worker reports `DONE`. The task
-`error` field is non-empty when a worker fails or `runTask` throws (e.g. unknown target node).
+任务在 `runTask` 触发前处于 `PENDING`(由于 coordinator 在提交时会把过去的 `startMs` 重置为
+`now`,因此 `startMs <= now` 时会立即触发,这是常见情况)。worker 分配后转为 `RUNNING`,收到
+`stopTask` 转为 `STOPPING`,所有 worker 上报 `DONE` 后转为 `DONE`。当 worker 失败或 `runTask`
+抛异常(例如未知的目标节点)时,任务的 `error` 字段非空。
 
-## Quick Start
+## 快速开始
 
-### 1. Configure the cluster topology
+### 1. 配置集群拓扑
 
-Trogdor uses a JSON topology file to describe which nodes exist and how to reach their agents.
-Copy the template and edit it for your cluster:
+Trogdor 用一个 JSON 拓扑文件描述有哪些节点、如何访问其 agent。复制模板并按你的集群修改:
 
 ```shell
 cd $CELEBORN_HOME/conf
 cp trogdor.conf.template trogdor.conf
 ```
 
-`trogdor.conf` is a JSON document (lines starting with `#` are comments):
+`trogdor.conf` 是一个 JSON 文档(以 `#` 开头的行是注释):
 
 ```json
 {
@@ -98,60 +96,59 @@ cp trogdor.conf.template trogdor.conf
 }
 ```
 
-Each node entry carries a `hostname` and a `config` map. The `trogdor.agent.port` value must match
-the HTTP port the agent on that node binds to (see `celeborn.trogdor.agent.http.port`).
+每个节点条目包含 `hostname` 和一个 `config` map。`trogdor.agent.port` 的值必须与该节点 agent
+绑定的 HTTP 端口一致(见 `celeborn.trogdor.agent.http.port`)。
 
-### 2. Start the agent(s)
+### 2. 启动 agent
 
-Start an agent on every node listed in the topology:
+在拓扑中列出的每个节点上启动 agent:
 
 ```shell
 cd $CELEBORN_HOME
 ./sbin/start-trogdor-agent.sh
 ```
 
-By default the agent binds to `0.0.0.0:19090`. Override with the standard Celeborn config keys, for
-example in `$CELEBORN_HOME/conf/celeborn-defaults.conf`:
+默认绑定 `0.0.0.0:19090`。可用标准 Celeborn 配置项覆盖,例如写入
+`$CELEBORN_HOME/conf/celeborn-defaults.conf`:
 
 ```shell
 celeborn.trogdor.agent.http.host=0.0.0.0
 celeborn.trogdor.agent.http.port=19090
 ```
 
-### 3. Start the coordinator
+### 3. 启动 coordinator
 
-Start a single coordinator (it does not need to run on a Celeborn master/worker node):
+启动单个 coordinator(不必运行在 Celeborn master/worker 节点上):
 
 ```shell
 cd $CELEBORN_HOME
 ./sbin/start-trogdor-coordinator.sh
 ```
 
-By default the coordinator binds to `0.0.0.0:19091`:
+默认绑定 `0.0.0.0:19091`:
 
 ```shell
 celeborn.trogdor.coordinator.http.host=0.0.0.0
 celeborn.trogdor.coordinator.http.port=19091
 ```
 
-### 4. Verify the services are up
+### 4. 验证服务已启动
 
 ```shell
-# Agent status (lists workers running on the agent)
+# agent 状态(列出 agent 上正在运行的 worker)
 $ celeborn-cli trogdor agent -t localhost:19090 --status
 
-# Coordinator status
+# coordinator 状态
 $ celeborn-cli trogdor coordinator -t localhost:19091 --status
 
-# Or with plain curl
+# 或直接用 curl
 $ curl http://localhost:19090/api/v1/trogdor/agent/status
 $ curl http://localhost:19091/api/v1/trogdor/coordinator/status
 ```
 
-### 5. Submit a task
+### 5. 提交任务
 
-Write a task spec to a JSON file (the `class` field selects the worker implementation) and create it
-on the coordinator:
+将任务 spec 写入 JSON 文件(`class` 字段选择 worker 实现类),在 coordinator 上创建:
 
 ```shell
 $ cat > /tmp/noop.json <<'EOF'
@@ -169,29 +166,28 @@ $ celeborn-cli trogdor coordinator -t localhost:19091 \
 $ celeborn-cli trogdor coordinator -t localhost:19091 --show-task -i noop-1
 ```
 
-See [Built-in Workloads](#built-in-workloads), [Built-in Faults](#built-in-faults) and
-[Chaos Testing](#chaos-testing) for the available spec classes and their JSON shapes.
+可用的 spec 类与 JSON 形态见 [内置工作负载](#内置工作负载)、[内置故障](#内置故障)与
+[混沌测试](#混沌测试)。
 
-## Task spec conventions
+## Task spec 约定
 
-Every task spec is a polymorphic JSON object (see [Extending Trogdor](#extending-trogdor)):
+每个 task spec 都是一个多态 JSON 对象(见[扩展 Trogdor](#扩展-trogdor)):
 
-- `class` (required) — the fully-qualified implementation class, e.g.
-  `org.apache.celeborn.trogdor.workload.PushBenchSpec`. This selects the `TaskWorker`; the value
-  must exactly match the source package path or deserialization fails.
-- `startMs` (long) — start time in epoch milliseconds. Use `0` to start immediately; the
-  coordinator rebases a past `startMs` to `now` on submission.
-- `durationMs` (long) — how long the task runs, in milliseconds. Clamped to
-  `[0, 1000000000000000]`. The coordinator schedules an automatic `stopTask` at `startMs + durationMs`.
-- `targetNodes` (array of string) — the agent node names (from the topology) to run the task on.
+- `class`(必填):实现类的全限定名,例如 `org.apache.celeborn.trogdor.workload.PushBenchSpec`。
+  该字段用于选择 `TaskWorker`,值必须与源码包路径完全一致,否则反序列化失败。
+- `startMs`(`long`):起始时刻(epoch 毫秒)。用 `0` 表示立即开始;coordinator 提交时会把过去
+  的 `startMs` 重置为 `now`。
+- `durationMs`(`long`):任务运行时长(毫秒)。会被截断到 `[0, 1000000000000000]`。
+  coordinator 会在 `startMs + durationMs` 处自动调度 `stopTask`。
+- `targetNodes`(字符串数组):运行该任务的 agent 节点名(来自拓扑)。
 
-Fields marked *required* in the tables below have no default and must be present in the JSON.
+下文各字段表中标注为"必填"的字段没有默认值,JSON 中必须存在。
 
-## Built-in Workloads
+## 内置工作负载
 
 ### PushBench
 
-Pushes synthetic shuffle data to Celeborn as fast as possible.
+以尽可能快的速度向 Celeborn 推送合成的 shuffle 数据。
 
 ```json
 {
@@ -209,20 +205,20 @@ Pushes synthetic shuffle data to Celeborn as fast as possible.
 }
 ```
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `targetNodes` | `string[]` | yes | Agent node names to push from |
-| `masterHost` | `string` | yes | Celeborn master host |
-| `masterPort` | `int` | yes | Celeborn master port |
-| `numMappers` | `int` | yes | Concurrent mappers (clamped to `>= 1`) |
-| `numPartitions` | `int` | yes | Number of partitions (clamped to `>= 1`) |
-| `bytesPerPush` | `int` | yes | Bytes per push (clamped to `>= 1`) |
-| `totalPushes` | `long` | yes | Total push count (clamped to `>= 0`) |
-| `userIdentifier` | `string` | no | `<tenant>:<name>`; defaults to `"default"` |
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `targetNodes` | `string[]` | 是 | 执行 push 的 agent 节点名 |
+| `masterHost` | `string` | 是 | Celeborn master 主机名 |
+| `masterPort` | `int` | 是 | Celeborn master 端口 |
+| `numMappers` | `int` | 是 | 并发 mapper 数(截断到 `>= 1`) |
+| `numPartitions` | `int` | 是 | 分区数(截断到 `>= 1`) |
+| `bytesPerPush` | `int` | 是 | 每次 push 的字节数(截断到 `>= 1`) |
+| `totalPushes` | `long` | 是 | 总 push 次数(截断到 `>= 0`) |
+| `userIdentifier` | `string` | 否 | `<tenant>:<name>`;默认 `"default"` |
 
 ### FetchBench
 
-Writes a small seed record to every partition and then repeatedly fetches all partitions.
+向每个分区写入一条种子记录,然后反复拉取所有分区。
 
 ```json
 {
@@ -238,19 +234,18 @@ Writes a small seed record to every partition and then repeatedly fetches all pa
 }
 ```
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `targetNodes` | `string[]` | yes | Agent node names to fetch from |
-| `masterHost` | `string` | yes | Celeborn master host |
-| `masterPort` | `int` | yes | Celeborn master port |
-| `numPartitions` | `int` | yes | Number of partitions (clamped to `>= 1`) |
-| `fetchesPerPartition` | `long` | yes | Fetches per partition (clamped to `>= 0`) |
-| `userIdentifier` | `string` | no | `<tenant>:<name>`; defaults to `"default"` |
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `targetNodes` | `string[]` | 是 | 执行 fetch 的 agent 节点名 |
+| `masterHost` | `string` | 是 | Celeborn master 主机名 |
+| `masterPort` | `int` | 是 | Celeborn master 端口 |
+| `numPartitions` | `int` | 是 | 分区数(截断到 `>= 1`) |
+| `fetchesPerPartition` | `long` | 是 | 每个分区的 fetch 次数(截断到 `>= 0`) |
+| `userIdentifier` | `string` | 否 | `<tenant>:<name>`;默认 `"default"` |
 
 ### RpcBench
 
-Benchmarks Celeborn RPC round-trip latency by sending synchronous ask requests to a local echo
-endpoint.
+通过向本地 echo 端点发送同步 ask 请求,测量 Celeborn RPC 往返延迟。
 
 ```json
 {
@@ -263,25 +258,24 @@ endpoint.
 }
 ```
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `targetNodes` | `string[]` | yes | Agent node names to run on |
-| `totalRpcs` | `long` | yes | Total RPC count (clamped to `>= 0`) |
-| `payload` | `string` | no | Echo payload; defaults to `"hello"` |
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `targetNodes` | `string[]` | 是 | 执行 RPC bench 的 agent 节点名 |
+| `totalRpcs` | `long` | 是 | 总 RPC 次数(截断到 `>= 0`) |
+| `payload` | `string` | 否 | echo 请求的 payload;默认 `"hello"` |
 
-The `masterHost`/`masterPort`/`userIdentifier` fields on the push/fetch benchmarks fall back to the
-`celeborn.trogdor.workload.*` defaults when omitted.
+push/fetch 工作负载的 `masterHost`/`masterPort`/`userIdentifier` 字段省略时,会回退到
+`celeborn.trogdor.workload.*` 默认值。
 
-## Built-in Faults
+## 内置故障
 
-Faults share the same task-spec shape (the `class` field selects the fault) but run on the target
-agent's host rather than against the Celeborn cluster. See [Fault injection walkthrough](#fault-injection-walkthrough)
-for an end-to-end example.
+故障与工作负载使用相同的 task spec 形态(`class` 字段选择故障类型),但它在目标 agent 所在
+主机上运行,而非针对 Celeborn 集群。端到端示例见[故障注入实战](#故障注入实战)。
 
 ### ProcessStopFault
 
-Pauses and resumes a process matching the given name using `pgrep` and `kill -STOP` / `kill -CONT`.
-Requires Linux/Unix process management utilities.
+用 `pgrep` 和 `kill -STOP` / `kill -CONT` 暂停并恢复匹配名称的进程。依赖 Linux/Unix 进程管理
+工具。
 
 ```json
 {
@@ -293,15 +287,14 @@ Requires Linux/Unix process management utilities.
 }
 ```
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `targetNodes` | `string[]` | yes | Nodes to inject on |
-| `processName` | `string` | yes | Process name to pause/resume (matched via `pgrep`) |
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `targetNodes` | `string[]` | 是 | 注入故障的节点 |
+| `processName` | `string` | 是 | 要暂停/恢复的进程名(通过 `pgrep` 匹配) |
 
 ### NetworkPartitionFault
 
-Blocks outbound traffic to a set of nodes using `iptables`. This fault requires root privileges and
-only works on Linux with `iptables` available.
+用 `iptables` 阻断到一组节点的出站流量。仅 Linux 且有 `iptables` 时可用,且需要 root 权限。
 
 ```json
 {
@@ -313,15 +306,15 @@ only works on Linux with `iptables` available.
 }
 ```
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `targetNodes` | `string[]` | yes | Source nodes that will be partitioned |
-| `blockedNodes` | `string[]` | yes | Nodes that `targetNodes` cannot reach |
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `targetNodes` | `string[]` | 是 | 被隔离的源节点 |
+| `blockedNodes` | `string[]` | 是 | `targetNodes` 无法访问的节点 |
 
 ### DiskSlowFault
 
-Simulates slow disk IO. The current implementation logs the intended delay; production deployments
-should extend it to configure real block-device latency (for example via `device-mapper` or `tc`).
+模拟慢磁盘 IO。当前实现仅记录预期延迟;生产环境应扩展为真实的块设备延迟配置(例如
+`device-mapper` 或 `tc`)。
 
 ```json
 {
@@ -334,16 +327,15 @@ should extend it to configure real block-device latency (for example via `device
 }
 ```
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `targetNodes` | `string[]` | yes | Nodes to inject on |
-| `device` | `string` | yes | Block device path (e.g. `/dev/sda`) |
-| `delayMs` | `long` | yes | Simulated IO delay in milliseconds |
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `targetNodes` | `string[]` | 是 | 注入故障的节点 |
+| `device` | `string` | 是 | 块设备路径(如 `/dev/sda`) |
+| `delayMs` | `long` | 是 | 模拟的 IO 延迟毫秒数 |
 
 ### ExternalCommandFault
 
-Runs an arbitrary external command on the target agent. The command is executed with the optional
-environment variables and the worker completes when the process exits.
+在目标 agent 上执行任意外部命令。命令会带上可选的环境变量执行,进程退出时 worker 完成。
 
 ```json
 {
@@ -356,26 +348,26 @@ environment variables and the worker completes when the process exits.
 }
 ```
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `targetNodes` | `string[]` | yes | Nodes to run the command on |
-| `command` | `string[]` | yes | Command as an argv array |
-| `env` | `map<string,string>` | no | Environment variables for the process |
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `targetNodes` | `string[]` | 是 | 执行命令的节点 |
+| `command` | `string[]` | 是 | 命令的 argv 数组 |
+| `env` | `map<string,string>` | 否 | 进程的环境变量 |
 
-## Fault injection walkthrough
+## 故障注入实战
 
-This walks through injecting a `ProcessStopFault` against a running Celeborn worker, observing the
-effect, and cleaning up. The flow is the same for every fault — only the spec differs.
+本节演示向运行中的 Celeborn worker 注入 `ProcessStopFault`、观察效果并清理的全流程。所有
+故障的流程相同,只是 spec 不同。
 
-1. **Pick a target.** Suppose a Celeborn worker process named `celeborn-worker` is running on
-   topology node `node0`. Confirm the agent is up and the worker process exists:
+1. **选定目标。** 假设拓扑节点 `node0` 上运行着名为 `celeborn-worker` 的 Celeborn worker 进程。
+   确认 agent 已启动且 worker 进程存在:
 
    ```shell
    $ celeborn-cli trogdor agent -t localhost:19090 --status
-   $ pgrep -f celeborn-worker   # on node0
+   $ pgrep -f celeborn-worker   # 在 node0 上
    ```
 
-2. **Write the fault spec.** Pause the worker for 10 seconds (the fault auto-resumes when it ends):
+2. **编写故障 spec。** 暂停 worker 10 秒(故障结束时自动恢复):
 
    ```shell
    $ cat > /tmp/procstop.json <<'EOF'
@@ -389,7 +381,7 @@ effect, and cleaning up. The flow is the same for every fault — only the spec 
    EOF
    ```
 
-3. **Submit and watch the task state.**
+3. **提交并观察任务状态。**
 
    ```shell
    $ celeborn-cli trogdor coordinator -t localhost:19091 \
@@ -397,106 +389,104 @@ effect, and cleaning up. The flow is the same for every fault — only the spec 
    $ celeborn-cli trogdor coordinator -t localhost:19091 --show-task -i procstop-1
    ```
 
-   The task moves `PENDING → RUNNING → DONE`. While `RUNNING` the target process is stopped
-   (`T` state in `ps`/`top`); it resumes when the task reaches `DONE`.
+   任务会经历 `PENDING → RUNNING → DONE`。`RUNNING` 期间目标进程被停止(`ps`/`top` 中显示
+   `T` 状态);任务到达 `DONE` 时恢复。
 
-4. **Inspect the agent-side worker.** The agent status response lists the fault worker and its
-   state; `error` is empty on a clean run:
+4. **查看 agent 侧 worker。** agent 的 status 响应会列出该故障 worker 及其状态;正常运行时
+   `error` 为空:
 
    ```shell
    $ celeborn-cli trogdor agent -t localhost:19090 --status
    ```
 
-5. **Clean up.** Once `DONE` the task record stays on the coordinator for inspection; remove it
-   with `destroy`:
+5. **清理。** 任务到达 `DONE` 后,记录仍保留在 coordinator 上供查看;用 `destroy` 删除:
 
    ```shell
    $ celeborn-cli trogdor coordinator -t localhost:19091 --destroy-task -i procstop-1
    ```
 
-   To cut a fault short before its `durationMs` elapses, use `--stop-task` instead; the worker's
-   `stop()` resumes the process and the task moves to `STOPPING → DONE`.
+   若想在 `durationMs` 到期前提前结束故障,改用 `--stop-task`;worker 的 `stop()` 会恢复进程,
+   任务转为 `STOPPING → DONE`。
 
-> **Note:** `NetworkPartitionFault`/`DiskSlowFault` need root or capabilities — run the agent as
-> root (or grant `CAP_NET_ADMIN`) and confirm the OS tools exist; otherwise the worker errors with
-> a command-not-found message. See [Platform limitations](#platform-limitations).
+> **注意:** `NetworkPartitionFault`/`DiskSlowFault` 需要 root 或相关 capability——以 root
+> 运行 agent(或授予 `CAP_NET_ADMIN`)并确认 OS 工具存在;否则 worker 会以 command-not-found
+> 报错。见[平台限制](#平台限制)。
 
-## Chaos Testing
+## 混沌测试
 
-Celeborn Trogdor also integrates the chaos testing framework originally proposed in
-CELEBORN-1492. A chaos plan describes a sequence of actions (for example `occupy-cpu`,
-`stop-worker`, `hang-io`) together with a trigger and a checker. The coordinator-side
-`ChaosOrchestrator` parses the plan and compiles it into native Trogdor tasks:
+Celeborn Trogdor 还集成了最初在 CELEBORN-1492 中提出的混沌测试框架。一个混沌计划(plan)
+描述一组动作(action)序列(例如 `occupy-cpu`、`stop-worker`、`hang-io`),外加触发器
+(trigger)和校验器(checker)。coordinator 侧的 `ChaosOrchestrator` 解析计划并编译为原生
+Trogdor 任务:
 
-- One long-running `ChaosPlanSpec` participant task per target node.
-- One `ChaosOperationSpec` task for each operation selected by the current action.
+- 每个目标节点一个长时运行的 `ChaosPlanSpec` 参与者任务。
+- 当前 action 选中的每个 operation 生成一个 `ChaosOperationSpec` 任务。
 
-### Plan structure
+### 计划结构
 
-A chaos plan is a JSON object with three top-level keys. It is submitted as the `planJson` **string
-field** of a `ChaosPlanSpec` (or `SubmitChaosPlanRequest`) — i.e. it is embedded as an escaped JSON
-string, not as a nested object.
+混沌计划是一个含三个顶层字段的 JSON 对象。它以 `planJson` **字符串字段**的形式提交(属于
+`ChaosPlanSpec` 或 `SubmitChaosPlanRequest`),即作为转义后的 JSON 字符串内嵌,而非嵌套对象。
 
-| Field | Type | Required | Default | Description |
-|-------|------|----------|---------|-------------|
-| `actions` | array | yes | — | List of action objects |
-| `trigger` | object | yes | — | Trigger policy |
-| `checker` | string | no | `dummy` | Checker type: `dummy` or `resource` |
+| 字段 | 类型 | 必填 | 默认 | 说明 |
+|------|------|------|------|------|
+| `actions` | array | 是 | — | action 对象列表 |
+| `trigger` | object | 是 | — | 触发策略 |
+| `checker` | string | 否 | `dummy` | 校验器类型:`dummy` 或 `resource` |
 
-**action object:**
+**action 对象:**
 
-| Field | Type | Required | Default | Description |
-|-------|------|----------|---------|-------------|
-| `id` | string | yes | — | Action id (see below) |
-| `selector` | object | no | `dummySelector` | Node/disk selector |
-| `cores` | int | only `occupy-cpu` | — | CPU cores to occupy |
-| `duration` | string | only `occupy-cpu` | `10s` | Per-burst CPU occupation (capped by `chaos.plan.action.occupycpu.maxduration`) |
+| 字段 | 类型 | 必填 | 默认 | 说明 |
+|------|------|------|------|------|
+| `id` | string | 是 | — | action id(见下表) |
+| `selector` | object | 否 | `dummySelector` | 节点/磁盘选择器 |
+| `cores` | int | 仅 `occupy-cpu` | — | 占用的 CPU 核数 |
+| `duration` | string | 仅 `occupy-cpu` | `10s` | 每次突发占用 CPU 的时长(受 `chaos.plan.action.occupycpu.maxduration` 上限约束) |
 
-**selector object:**
+**selector 对象:**
 
-| Field | Type | Required | Default | Description |
-|-------|------|----------|---------|-------------|
-| `type` | string | no | `assign` | `assign` (fixed nodes) or `random` |
-| `interval` | string | no | `5s` | Selector interval (time string) |
-| `indices` | `int[]` | `assign` only | — | 0-based node indices |
-| `device` | `int[]` | no | `[]` | Disk indices (disk actions only) |
+| 字段 | 类型 | 必填 | 默认 | 说明 |
+|------|------|------|------|------|
+| `type` | string | 否 | `assign` | `assign`(固定节点)或 `random` |
+| `interval` | string | 否 | `5s` | 选择器间隔(时间字符串) |
+| `indices` | `int[]` | 仅 `assign` | — | 从 0 开始的节点索引 |
+| `device` | `int[]` | 否 | `[]` | 磁盘索引(仅磁盘类 action) |
 
-**trigger object:**
+**trigger 对象:**
 
-| Field | Type | Required | Default | Description |
-|-------|------|----------|---------|-------------|
-| `policy` | string | no | `random` | `random` or `sequence` |
-| `repeat` | int | no | `1` | Number of repetitions |
-| `interval` | object | yes | — | Interval object (see below) |
+| 字段 | 类型 | 必填 | 默认 | 说明 |
+|------|------|------|------|------|
+| `policy` | string | 否 | `random` | `random` 或 `sequence` |
+| `repeat` | int | 否 | `1` | 重复次数 |
+| `interval` | object | 是 | — | 间隔对象(见下) |
 
-trigger `interval` object:
+trigger 的 `interval` 对象:
 
-| `type` | Extra fields | Default | Description |
-|--------|--------------|---------|-------------|
-| `fix` | `value` (string) | `5s` | Fixed interval |
-| `range` | `start`, `end` (strings) | `5s`–`10s` | Random interval in `[start, end)` |
+| `type` | 额外字段 | 默认 | 说明 |
+|--------|----------|------|------|
+| `fix` | `value`(string) | `5s` | 固定间隔 |
+| `range` | `start`、`end`(string) | `5s`–`10s` | `[start, end)` 区间内的随机间隔 |
 
-### Action ids
+### Action id
 
-| id | Action class | Extra fields |
-|----|--------------|--------------|
-| `occupy-cpu` | `OccupyCpuAction` | `cores`, `duration` |
+| id | Action 类 | 额外字段 |
+|----|-----------|----------|
+| `occupy-cpu` | `OccupyCpuAction` | `cores`、`duration` |
 | `corrupt-disk` | `CorruptDiskAction` | — |
 | `resume-disk` | `ResumeDiskAction` | — |
 | `hang-io` | `HangIoAction` | — |
 | `resume-io` | `ResumeIoAction` | — |
 | `corrupt-meta` | `CorruptMetaAction` | — |
-| `start-master` | `StartMasterAction` | — (script from `ChaosConf`) |
-| `stop-master` | `StopMasterAction` | — (script from `ChaosConf`) |
-| `start-worker` | `StartWorkerAction` | — (script from `ChaosConf`) |
-| `stop-worker` | `StopWorkerAction` | — (script from `ChaosConf`) |
+| `start-master` | `StartMasterAction` | —(脚本来自 `ChaosConf`) |
+| `stop-master` | `StopMasterAction` | —(脚本来自 `ChaosConf`) |
+| `start-worker` | `StartWorkerAction` | —(脚本来自 `ChaosConf`) |
+| `stop-worker` | `StopWorkerAction` | —(脚本来自 `ChaosConf`) |
 
-Unknown ids are rejected with a `PlanInvalidException`. Random trigger combined with
-`corrupt-meta` is also rejected (it is not reversible).
+未知 id 会被拒绝并抛 `PlanInvalidException`。`random` 触发器与 `corrupt-meta` 组合也会被拒绝
+(该动作不可逆)。
 
-### Submitting a chaos plan
+### 提交混沌计划
 
-Minimal plan (one `occupy-cpu` burst, sequence trigger):
+最小计划(一次 `occupy-cpu` 突发,sequence 触发器):
 
 ```json
 {
@@ -517,20 +507,20 @@ Minimal plan (one `occupy-cpu` burst, sequence trigger):
 }
 ```
 
-Submit it through the dedicated REST endpoint:
+通过专用 REST 端点提交:
 
 ```bash
 curl -X POST http://localhost:19091/api/v1/trogdor/coordinator/chaos/plans \
   -H 'Content-Type: application/json' \
   -d '{
     "planId": "my-chaos-plan",
-    "planJson": "<plan-json-from-above-as-escaped-string>",
+    "planJson": "<上面的计划 JSON 作为转义字符串>",
     "targetNodes": ["node0"]
   }'
 ```
 
-Or with the CLI (`--submit-chaos-plan` reads a `SubmitChaosPlanRequest` JSON file containing
-`planId` / `planJson` / `targetNodes`):
+或用 CLI(`--submit-chaos-plan` 读取含 `planId`/`planJson`/`targetNodes` 的
+`SubmitChaosPlanRequest` JSON 文件):
 
 ```shell
 $ cat > /tmp/plan.json <<'EOF'
@@ -544,8 +534,8 @@ EOF
 $ celeborn-cli trogdor coordinator -t localhost:19091 --submit-chaos-plan /tmp/plan.json
 ```
 
-Alternatively, submit the plan as a `ChaosPlanSpec` task (the coordinator routes a `ChaosPlanSpec`
-to the orchestrator automatically):
+或者将计划作为 `ChaosPlanSpec` 任务提交(coordinator 会自动把 `ChaosPlanSpec` 路由到
+orchestrator):
 
 ```json
 {
@@ -557,7 +547,7 @@ to the orchestrator automatically):
 }
 ```
 
-Inspect and stop a plan (`-i` doubles as the plan id):
+查看与停止计划(`-i` 兼作 plan id):
 
 ```shell
 $ celeborn-cli trogdor coordinator -t localhost:19091 --show-chaos-plan -i my-chaos-plan
@@ -566,24 +556,24 @@ $ celeborn-cli trogdor coordinator -t localhost:19091 --stop-chaos-plan -i my-ch
 
 ## CLI
 
-The `trogdor` group is registered on `celeborn-cli` alongside `master` and `worker`. All trogdor
-subcommands share the standard `-h/--help` and `-V/--version` flags, and locate their target
-service with `-t, --target <host:port>` (the host portion may be an IPv6 literal).
+`trogdor` 命令组在 `celeborn-cli` 上与 `master`、`worker` 并列注册。所有 trogdor 子命令共享
+标准 `-h/--help` 与 `-V/--version` 标志,并用 `-t, --target <host:port>` 定位目标服务(host
+部分可为 IPv6 字面量)。
 
 ```
 celeborn-cli
 └── trogdor
-    ├── agent ...        # agent operations    (-t localhost:19090)
-    └── coordinator ... # coordinator ops    (-t localhost:19091)
+    ├── agent ...        # agent 操作    (-t localhost:19090)
+    └── coordinator ... # coordinator 操作 (-t localhost:19091)
 ```
 
 ### `celeborn-cli trogdor agent`
 
-| Flag | Description |
-|------|-------------|
-| `-t, --target <host:port>` | Agent host:port, e.g. `localhost:19090` (required) |
-| `--status` | Show agent status |
-| `--uptime` | Show agent uptime |
+| 标志 | 说明 |
+|------|------|
+| `-t, --target <host:port>` | agent 的 host:port,如 `localhost:19090`(必填) |
+| `--status` | 查看 agent 状态 |
+| `--uptime` | 查看 agent 运行时长 |
 
 ```shell
 $ celeborn-cli trogdor agent -t localhost:19090 --status
@@ -592,86 +582,84 @@ $ celeborn-cli trogdor agent -t localhost:19090 --uptime
 
 ### `celeborn-cli trogdor coordinator`
 
-| Flag | Description |
-|------|-------------|
-| `-t, --target <host:port>` | Coordinator host:port, e.g. `localhost:19091` (required) |
-| `--status` | Show coordinator status |
-| `--uptime` | Show coordinator uptime |
-| `--create-task <file>` | Create a task from a JSON spec file (requires `-i`) |
-| `-i, --task-id <id>` | Task id (also used as the plan id for chaos plan show/stop) |
-| `--show-task` | Show a single task (requires `-i`) |
-| `--show-tasks` | Show all tasks |
-| `--stop-task` | Stop a task (requires `-i`) |
-| `--destroy-task` | Destroy a task (requires `-i`) |
-| `--submit-chaos-plan <file>` | Submit a chaos plan from a `SubmitChaosPlanRequest` JSON file |
-| `--show-chaos-plan` | Show the status of a chaos plan (uses `-i` as the plan id) |
-| `--stop-chaos-plan` | Stop a chaos plan (uses `-i` as the plan id) |
+| 标志 | 说明 |
+|------|------|
+| `-t, --target <host:port>` | coordinator 的 host:port,如 `localhost:19091`(必填) |
+| `--status` | 查看 coordinator 状态 |
+| `--uptime` | 查看 coordinator 运行时长 |
+| `--create-task <file>` | 从 JSON spec 文件创建任务(需配合 `-i`) |
+| `-i, --task-id <id>` | 任务 id(混沌计划的 show/stop 也用它作为 plan id) |
+| `--show-task` | 查看单个任务(需 `-i`) |
+| `--show-tasks` | 查看所有任务 |
+| `--stop-task` | 停止任务(需 `-i`) |
+| `--destroy-task` | 销毁任务(需 `-i`) |
+| `--submit-chaos-plan <file>` | 从 `SubmitChaosPlanRequest` JSON 文件提交混沌计划 |
+| `--show-chaos-plan` | 查看混沌计划状态(以 `-i` 作为 plan id) |
+| `--stop-chaos-plan` | 停止混沌计划(以 `-i` 作为 plan id) |
 
 ```shell
-# create / inspect / stop / destroy a task
+# 创建 / 查看 / 停止 / 销毁任务
 $ celeborn-cli trogdor coordinator -t localhost:19091 --create-task /tmp/noop.json -i noop-1
 $ celeborn-cli trogdor coordinator -t localhost:19091 --show-tasks
 $ celeborn-cli trogdor coordinator -t localhost:19091 --show-task -i noop-1
 $ celeborn-cli trogdor coordinator -t localhost:19091 --stop-task -i noop-1
 $ celeborn-cli trogdor coordinator -t localhost:19091 --destroy-task -i noop-1
 
-# submit / inspect / stop a chaos plan (-i doubles as the plan id)
+# 提交 / 查看 / 停止混沌计划(-i 兼作 plan id)
 $ celeborn-cli trogdor coordinator -t localhost:19091 --submit-chaos-plan /tmp/plan.json
 $ celeborn-cli trogdor coordinator -t localhost:19091 --show-chaos-plan -i my-chaos-plan
 $ celeborn-cli trogdor coordinator -t localhost:19091 --stop-chaos-plan -i my-chaos-plan
 ```
 
-The `--create-task` file is deserialized as a polymorphic `TaskSpec` (the `class` field selects the
-implementation). The `--submit-chaos-plan` file is deserialized as a `SubmitChaosPlanRequest`
-(`planId`, `planJson`, `targetNodes`).
+`--create-task` 的文件按多态 `TaskSpec` 反序列化(`class` 字段选择实现类)。
+`--submit-chaos-plan` 的文件按 `SubmitChaosPlanRequest`(`planId`、`planJson`、`targetNodes`)
+反序列化。
 
 ## REST API
 
-All endpoints are JSON and live under `/api/v1/trogdor`. OpenAPI definitions are available at
-`openapi/openapi-client/src/main/openapi3/trogdor_coordinator_rest_v1.yaml` and
-`trogdor_agent_rest_v1.yaml`.
+所有端点均为 JSON,位于 `/api/v1/trogdor` 下。OpenAPI 定义见
+`openapi/openapi-client/src/main/openapi3/trogdor_coordinator_rest_v1.yaml` 与
+`trogdor_agent_rest_v1.yaml`。
 
 ### Coordinator — `http://<coordinator>:19091/api/v1/trogdor/coordinator`
 
-| Method | Path | Body / Param | Description |
-|--------|------|---------------|-------------|
-| GET | `/status` | — | Coordinator start time |
-| GET | `/uptime` | — | Server uptime |
-| POST | `/tasks` | `CreateTaskRequest` | Create a task from a spec |
-| GET | `/tasks` | — | List all tasks |
-| GET | `/tasks/{taskId}` | `taskId` | Show one task state |
-| PUT | `/tasks/{taskId}/stop` | `taskId` | Stop a task |
-| DELETE | `/tasks/{taskId}` | `taskId` | Destroy a task |
-| POST | `/chaos/plans` | `SubmitChaosPlanRequest` | Submit a chaos plan |
-| GET | `/chaos/plans/{planId}` | `planId` | Show chaos plan status |
-| PUT | `/chaos/plans/{planId}/stop` | `planId` | Stop a chaos plan |
+| 方法 | 路径 | Body / 参数 | 说明 |
+|------|------|-------------|------|
+| GET | `/status` | — | coordinator 启动时间 |
+| GET | `/uptime` | — | 服务运行时长 |
+| POST | `/tasks` | `CreateTaskRequest` | 根据 spec 创建任务 |
+| GET | `/tasks` | — | 列出所有任务 |
+| GET | `/tasks/{taskId}` | `taskId` | 查看单个任务状态 |
+| PUT | `/tasks/{taskId}/stop` | `taskId` | 停止任务 |
+| DELETE | `/tasks/{taskId}` | `taskId` | 销毁任务 |
+| POST | `/chaos/plans` | `SubmitChaosPlanRequest` | 提交混沌计划 |
+| GET | `/chaos/plans/{planId}` | `planId` | 查看混沌计划状态 |
+| PUT | `/chaos/plans/{planId}/stop` | `planId` | 停止混沌计划 |
 
 ### Agent — `http://<agent>:19090/api/v1/trogdor/agent`
 
-| Method | Path | Body / Param | Description |
-|--------|------|---------------|-------------|
-| GET | `/status` | — | Agent status and worker states |
-| GET | `/uptime` | — | Server uptime |
-| POST | `/workers` | `CreateWorkerRequest` | Create a worker on the agent |
-| PUT | `/workers/{workerId}/stop` | `workerId` | Stop a worker |
-| DELETE | `/workers/{workerId}` | `workerId` | Destroy a worker |
+| 方法 | 路径 | Body / 参数 | 说明 |
+|------|------|-------------|------|
+| GET | `/status` | — | agent 状态及 worker 状态 |
+| GET | `/uptime` | — | 服务运行时长 |
+| POST | `/workers` | `CreateWorkerRequest` | 在 agent 上创建 worker |
+| PUT | `/workers/{workerId}/stop` | `workerId` | 停止 worker |
+| DELETE | `/workers/{workerId}` | `workerId` | 销毁 worker |
 
-## Extending Trogdor
+## 扩展 Trogdor
 
-Trogdor is a framework: the built-in workloads and faults are just `TaskSpec` implementations. To
-add your own workload or fault, implement three pieces — a spec, a controller, and a worker — and
-register them by their fully-qualified class name (no separate registry is needed).
+Trogdor 是一个框架:内置的工作负载与故障都只是 `TaskSpec` 实现。要添加自己的工作负载或故障,
+实现三部分——spec、controller、worker——并用其全限定类名注册即可(无需单独的注册中心)。
 
 ### Spec
 
-Extend `TaskSpec` and annotate a single constructor with `@JsonCreator`. The first two parameters
-are conventionally `startMs`/`durationMs`, forwarded to `super(...)`. Every parameter gets a
-`@JsonProperty("...")` naming its JSON field, and every field you want serialized gets a
-`@JsonProperty` getter (otherwise it is dropped on the JSON round-trip — see the NoOpTaskSpec fix
-referenced in the changelog). Example shape, mirroring `PushBenchSpec`:
+继承 `TaskSpec`,用 `@JsonCreator` 标注唯一构造器。前两个参数按惯例是 `startMs`/`durationMs`,
+转发给 `super(...)`。每个参数用 `@JsonProperty("...")` 指定 JSON 字段名,每个要序列化的字段都要
+有带 `@JsonProperty` 的 getter(否则在 JSON 往返中会被丢弃——参见变更日志中 NoOpTaskSpec 的
+修复)。示例形态参考 `PushBenchSpec`:
 
 ```java
-@JsonTypeInfo(use = JsonTypeInfo.Id.CLASS, property = "class")  // inherited from TaskSpec
+@JsonTypeInfo(use = JsonTypeInfo.Id.CLASS, property = "class")  // 继承自 TaskSpec
 public class MyWorkloadSpec extends TaskSpec {
   private final Set<String> targetNodes;
   private final int rate;
@@ -707,7 +695,7 @@ public class MyWorkloadSpec extends TaskSpec {
 
 ### Controller
 
-`TaskController` is a single-method functional interface — return the target node names:
+`TaskController` 是单方法函数式接口——返回目标节点名:
 
 ```java
 public interface TaskController {
@@ -717,10 +705,10 @@ public interface TaskController {
 
 ### Worker
 
-`TaskWorker` has `start` and `stop`. `start` must return quickly — push long work onto a background
-thread — and complete `haltFuture` when done: an empty string means success, a non-empty string is
-treated as an error. `stop` releases all resources; it is always called if `start` returned
-successfully (even on failure), but **not** called if `start` itself threw.
+`TaskWorker` 有 `start` 与 `stop` 两个方法。`start` 必须快速返回——耗时操作放到后台线程——
+完成时 complete `haltFuture`:空字符串表示成功,非空字符串视为错误。`stop` 释放所有资源;
+若 `start` 成功返回则总会调用 `stop`(失败时也调);但若 `start` 自身抛异常,则**不会**调用
+`stop`。
 
 ```java
 public interface TaskWorker {
@@ -730,90 +718,81 @@ public interface TaskWorker {
 }
 ```
 
-Then submit a task with `"class": "<fqcn-of-your-spec>"` and it runs through the same coordinator →
-agent → worker pipeline as the built-ins.
+然后用 `"class": "<你的-spec-全限定类名>"` 提交任务,它会走与内置实现相同的 coordinator →
+agent → worker 管道。
 
-## Configuration
+## 配置
 
-### HTTP and workload defaults
+### HTTP 与工作负载默认值
 
-These are registered as standard Celeborn config entries (category `trogdor`, since 0.7.0) and can
-be set in `celeborn-defaults.conf`:
+以下为标准 Celeborn 配置项(类别 `trogdor`,自 0.7.0 起),可写入 `celeborn-defaults.conf`:
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `celeborn.trogdor.agent.http.host` | `0.0.0.0` | Host to bind the Trogdor agent HTTP server to. Use `<localhost>` to resolve the local hostname. |
-| `celeborn.trogdor.agent.http.port` | `19090` | Port to bind the Trogdor agent HTTP server to (1024–65535). |
-| `celeborn.trogdor.coordinator.http.host` | `0.0.0.0` | Host to bind the Trogdor coordinator HTTP server to. |
-| `celeborn.trogdor.coordinator.http.port` | `19091` | Port to bind the Trogdor coordinator HTTP server to (1024–65535). |
-| `celeborn.trogdor.workload.master.host` | `localhost` | Default Celeborn master host for push/fetch benchmarks. |
-| `celeborn.trogdor.workload.master.port` | `9097` | Default Celeborn master port for push/fetch benchmarks. |
-| `celeborn.trogdor.workload.user.identifier` | `default:default` | Default Celeborn user identifier for benchmarks, in the form `<tenant>:<name>`. |
+| 配置项 | 默认 | 说明 |
+|--------|------|------|
+| `celeborn.trogdor.agent.http.host` | `0.0.0.0` | Trogdor agent HTTP 服务绑定的主机。用 `<localhost>` 可解析为本机主机名。 |
+| `celeborn.trogdor.agent.http.port` | `19090` | Trogdor agent HTTP 服务绑定的端口(1024–65535)。 |
+| `celeborn.trogdor.coordinator.http.host` | `0.0.0.0` | Trogdor coordinator HTTP 服务绑定的主机。 |
+| `celeborn.trogdor.coordinator.http.port` | `19091` | Trogdor coordinator HTTP 服务绑定的端口(1024–65535)。 |
+| `celeborn.trogdor.workload.master.host` | `localhost` | push/fetch 工作负载默认的 Celeborn master 主机。 |
+| `celeborn.trogdor.workload.master.port` | `9097` | push/fetch 工作负载默认的 Celeborn master 端口。 |
+| `celeborn.trogdor.workload.user.identifier` | `default:default` | 工作负载默认的 Celeborn 用户标识,形如 `<tenant>:<name>`。 |
 
-### Chaos engine
+### 混沌引擎
 
-The chaos engine reads these keys at runtime (they are not registered as `ConfigEntry`s):
+混沌引擎在运行时读取以下键(它们未注册为 `ConfigEntry`):
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `celeborn.trogdor.chaos.plan.participant.duration` | `5m` | How long participant tasks stay alive. |
-| `celeborn.trogdor.chaos.plan.action.default.interval` | `5s` | Default interval between actions. |
-| `celeborn.trogdor.chaos.plan.action.selector.default.interval` | `5s` | Default selector interval. |
-| `celeborn.trogdor.chaos.plan.action.occupycpu.maxduration` | `120s` | Maximum CPU occupation duration. |
-| `celeborn.trogdor.chaos.plan.action.block.bad.inflight.location` | `/root/badblock/inflight` | Bad-block inflight marker file location. |
-| `celeborn.trogdor.chaos.runner.test.mode` | `false` | Run the chaos runner in test mode. |
-| `celeborn.trogdor.chaos.scripts.master.start.script` | `$CELEBORN_HOME/sbin/start-master.sh` | Script to start a master. |
-| `celeborn.trogdor.chaos.scripts.master.stop.script` | `$CELEBORN_HOME/sbin/stop-master.sh` | Script to stop a master. |
-| `celeborn.trogdor.chaos.scripts.worker.start.script` | `$CELEBORN_HOME/sbin/start-worker.sh` | Script to start a worker. |
-| `celeborn.trogdor.chaos.scripts.worker.stop.script` | `$CELEBORN_HOME/sbin/stop-worker.sh` | Script to stop a worker. |
+| 配置项 | 默认 | 说明 |
+|--------|------|------|
+| `celeborn.trogdor.chaos.plan.participant.duration` | `5m` | 参与者任务的存活时长。 |
+| `celeborn.trogdor.chaos.plan.action.default.interval` | `5s` | action 之间的默认间隔。 |
+| `celeborn.trogdor.chaos.plan.action.selector.default.interval` | `5s` | 选择器默认间隔。 |
+| `celeborn.trogdor.chaos.plan.action.occupycpu.maxduration` | `120s` | CPU 占用最大时长。 |
+| `celeborn.trogdor.chaos.plan.action.block.bad.inflight.location` | `/root/badblock/inflight` | 坏块 inflight 标记文件位置。 |
+| `celeborn.trogdor.chaos.runner.test.mode` | `false` | 以测试模式运行混沌 runner。 |
+| `celeborn.trogdor.chaos.scripts.master.start.script` | `$CELEBORN_HOME/sbin/start-master.sh` | 启动 master 的脚本。 |
+| `celeborn.trogdor.chaos.scripts.master.stop.script` | `$CELEBORN_HOME/sbin/stop-master.sh` | 停止 master 的脚本。 |
+| `celeborn.trogdor.chaos.scripts.worker.start.script` | `$CELEBORN_HOME/sbin/start-worker.sh` | 启动 worker 的脚本。 |
+| `celeborn.trogdor.chaos.scripts.worker.stop.script` | `$CELEBORN_HOME/sbin/stop-worker.sh` | 停止 worker 的脚本。 |
 
-The script defaults resolve to `$CELEBORN_HOME/sbin/...` when that directory exists, otherwise to
-`null`.
+脚本默认值在 `$CELEBORN_HOME/sbin` 目录存在时解析为 `$CELEBORN_HOME/sbin/...`,否则为 `null`。
 
-### Startup scripts
+### 启动脚本
 
-Both `sbin/start-trogdor-agent.sh` and `sbin/start-trogdor-coordinator.sh`:
+`sbin/start-trogdor-agent.sh` 与 `sbin/start-trogdor-coordinator.sh` 都会:
 
-- start a single instance via `celeborn-daemon.sh` (entry classes `TrogdorAgentApp` and
-  `TrogdorCoordinatorApp` respectively),
-- default to a `1g` heap, overridable via `CELEBORN_TROGDOR_AGENT_MEMORY` /
-  `CELEBORN_TROGDOR_COORDINATOR_MEMORY`,
-- accept extra JVM options via `CELEBORN_TROGDOR_AGENT_JAVA_OPTS` /
-  `CELEBORN_TROGDOR_COORDINATOR_JAVA_OPTS`,
-- load `$CELEBORN_HOME/sbin/load-celeborn-env.sh` for shared environment.
+- 通过 `celeborn-daemon.sh` 启动单实例(入口类分别为 `TrogdorAgentApp` 与 `TrogdorCoordinatorApp`),
+- 默认堆 `1g`,可用 `CELEBORN_TROGDOR_AGENT_MEMORY` / `CELEBORN_TROGDOR_COORDINATOR_MEMORY` 覆盖,
+- 通过 `CELEBORN_TROGDOR_AGENT_JAVA_OPTS` / `CELEBORN_TROGDOR_COORDINATOR_JAVA_OPTS` 追加 JVM 选项,
+- 加载 `$CELEBORN_HOME/sbin/load-celeborn-env.sh` 以获取共享环境变量。
 
-## Platform Limitations
+## 平台限制
 
-Several fault injections rely on OS-level tools that are only available on Linux and often require
-elevated privileges:
+若干故障注入依赖仅 Linux 可用、且常需提权的 OS 工具:
 
-| Fault | Required tools | Platform | Privileges |
-|-------|----------------|----------|------------|
-| ProcessStopFault | `pgrep`, `kill` | Linux/Unix | Usually none for the agent's own child processes; may need privileges for other users' processes. |
-| NetworkPartitionFault | `iptables` | Linux only | Requires `root` or `CAP_NET_ADMIN`. |
-| DiskSlowFault | `device-mapper` / `tc` (production) | Linux only | Requires `root`. |
-| ExternalCommandFault | User-specified | Depends on command | Depends on command. |
+| 故障 | 所需工具 | 平台 | 权限 |
+|------|----------|------|------|
+| ProcessStopFault | `pgrep`、`kill` | Linux/Unix | agent 自身子进程通常无需提权;其他用户进程可能需要提权。 |
+| NetworkPartitionFault | `iptables` | 仅 Linux | 需要 `root` 或 `CAP_NET_ADMIN`。 |
+| DiskSlowFault | `device-mapper` / `tc`(生产) | 仅 Linux | 需要 `root`。 |
+| ExternalCommandFault | 用户指定 | 取决于命令 | 取决于命令。 |
 
-On macOS and Windows these faults are either unsupported or require equivalent platform-specific
-implementations.
+在 macOS 与 Windows 上,这些故障要么不支持,要么需要等价的平台特定实现。
 
-## Troubleshooting
+## 故障排查
 
-| Symptom | Likely cause | Fix |
-|---------|--------------|-----|
-| Agent `--status` fails to connect | Agent not started, or `celeborn.trogdor.agent.http.port` mismatched between agent and topology | Start the agent; ensure the topology `trogdor.agent.port` equals the agent's `http.port`. |
-| `createTask` returns but task is stuck in `PENDING` | `startMs` is in the future, or `runTask` has not been scheduled yet | Use `startMs: 0` to start immediately; poll `--show-task` — a `PENDING → RUNNING` transition takes up to one heartbeat (1s). |
-| Task goes `DONE` with error `"No node names specified."` | `targetNodes` is missing/empty in the spec, or the spec lost fields in the JSON round-trip (a spec without a `@JsonProperty` getter) | Ensure `targetNodes` is present and matches a topology node name; for custom specs, give every field a `@JsonProperty` getter (see [Extending Trogdor](#extending-trogdor)). |
-| Task error `"Unknown node names: ..."` | A `targetNodes` entry is not in the topology | Use a node name defined in `trogdor.conf`. |
-| Fault worker errors with `iptables`/`pgrep` not found | OS tool missing or agent not running as root | Run the agent on Linux with the required tools and privileges (see [Platform limitations](#platform-limitations)). |
-| Coordinator never creates workers on the agent | Agent not in the topology, or coordinator cannot reach `trogdor.agent.port` on that node | Add the node to the topology with the correct `hostname`/`trogdor.agent.port`; check network/firewall between coordinator and agent. |
-| `ClassNotFoundException` on `createTask` | The `class` field in the spec does not match a real FQN, or the class is not on the classpath | Use the exact package path (e.g. `org.apache.celeborn.trogdor.workload.PushBenchSpec`); for custom specs, ensure the class is on the agent classpath. |
+| 现象 | 可能原因 | 处理 |
+|------|----------|------|
+| agent `--status` 连接失败 | agent 未启动,或 `celeborn.trogdor.agent.http.port` 在 agent 与拓扑间不一致 | 启动 agent;确保拓扑中的 `trogdor.agent.port` 等于 agent 的 `http.port`。 |
+| `createTask` 返回但任务卡在 `PENDING` | `startMs` 在未来,或 `runTask` 尚未调度 | 用 `startMs: 0` 立即开始;轮询 `--show-task`——`PENDING → RUNNING` 最多需要一个心跳(1s)。 |
+| 任务以 `"No node names specified."` 报错转 `DONE` | spec 中 `targetNodes` 缺失/为空,或 spec 在 JSON 往返中丢失字段(某字段缺少 `@JsonProperty` getter) | 确保 `targetNodes` 存在且匹配拓扑节点名;自定义 spec 要为每个字段加 `@JsonProperty` getter(见[扩展 Trogdor](#扩展-trogdor))。 |
+| 任务报 `"Unknown node names: ..."` | `targetNodes` 中有不在拓扑内的节点 | 使用 `trogdor.conf` 中定义的节点名。 |
+| 故障 worker 报 `iptables`/`pgrep` not found | 缺少 OS 工具或 agent 非 root 运行 | 在装有所需工具与权限的 Linux 上运行 agent(见[平台限制](#平台限制))。 |
+| coordinator 从不在 agent 上创建 worker | agent 不在拓扑中,或 coordinator 无法访问该节点的 `trogdor.agent.port` | 用正确的 `hostname`/`trogdor.agent.port` 将节点加入拓扑;检查 coordinator 与 agent 之间的网络/防火墙。 |
+| `createTask` 时 `ClassNotFoundException` | spec 的 `class` 字段与真实全限定名不符,或该类不在 classpath 上 | 使用精确的包路径(如 `org.apache.celeborn.trogdor.workload.PushBenchSpec`);自定义 spec 需确保类在 agent classpath 上。 |
 
-To see coordinator/agent internals, enable logging (the tests ship with an `slf4j-simple`
-binding; in production use the standard Celeborn log configuration).
+查看 coordinator/agent 内部日志:测试环境自带 `slf4j-simple` 绑定;生产环境使用标准 Celeborn 日志配置。
 
-## Metrics
+## 指标
 
-Both the Coordinator and the Agent register a Trogdor metrics source exposing the current number of
-tasks/workers and their states. Metrics are served via the standard Celeborn metrics endpoint when
-`celeborn.metrics.enabled` is `true`.
+Coordinator 与 Agent 都会注册一个 Trogdor 指标源,暴露当前任务/worker 数量及状态。当
+`celeborn.metrics.enabled` 为 `true` 时,通过标准 Celeborn 指标端点暴露。
