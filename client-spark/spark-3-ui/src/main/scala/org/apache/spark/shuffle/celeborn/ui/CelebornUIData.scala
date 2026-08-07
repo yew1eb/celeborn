@@ -51,6 +51,31 @@ private[celeborn] class CelebornFallbackStatsUIData(
   def id: String = classOf[CelebornFallbackStatsUIData].getName
 }
 
+/**
+ * Celeborn-related SparkConf properties (spark.celeborn.*) captured at job start.
+ *  Singleton, overwritten on each onJobStart. Mirrors Uniffle's UniffleProperties.
+ */
+private[celeborn] class CelebornPropertiesUIData(val info: Seq[(String, String)]) {
+  @JsonIgnore
+  @KVIndex
+  def id: String = classOf[CelebornPropertiesUIData].getName
+}
+
+/**
+ * Reassign status snapshot: whether partition split / block send failure / stage retry
+ *  have been triggered. Singleton, overwritten on each reassign event. Mirrors Uniffle's
+ *  ReassignInfoUIData.
+ */
+private[celeborn] class CelebornReassignStatsUIData(
+    val partitionSplit: Boolean,
+    val blockSendFailure: Boolean,
+    val stageRetry: Boolean,
+    val timestamp: Long) {
+  @JsonIgnore
+  @KVIndex
+  def id: String = classOf[CelebornReassignStatsUIData].getName
+}
+
 /** Per-shuffle write metrics aggregated from onTaskEnd TaskMetrics. Keyed by shuffleDepId. */
 private[celeborn] class CelebornAggregatedWriteMetricsUIData(
     val metrics: java.util.Map[Int, AggregatedShuffleWriteMetric]) {

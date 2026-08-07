@@ -58,8 +58,21 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
     val buildInfo = statusStore.buildInfo()
     val assignments = statusStore.assignmentInfos()
     val fallback = statusStore.fallbackStats()
+    val properties = statusStore.celebornProperties()
+    val reassign = statusStore.reassignStats()
     val writeMetrics = statusStore.aggregatedWriteMetrics()
     val taskInfo = statusStore.aggregatedTaskInfo()
+
+    // --- Summary derived from onTaskEnd TaskMetrics (a-class, plan A) ---
+    val writeBytes = taskInfo.shuffleWriteBytes
+    val readBytes = taskInfo.shuffleReadBytes
+    val writeMs = taskInfo.shuffleWriteTimeMs
+    val readMs = taskInfo.shuffleFetchWaitTimeMs
+    val cpuMs = taskInfo.taskCpuTimeMs
+    def mbps(bytes: Long, ms: Long): String =
+      if (ms <= 0) "N/A" else f"${bytes.toDouble / 1000.0 / 1000.0 / (ms.toDouble / 1000.0)}%.2f"
+    def pct(part: Long, total: Long): String =
+      if (total <= 0) "N/A" else f"${part.toDouble * 100.0 / total.toDouble}%.1f%%"
 
     val summary: Seq[Node] =
       <div>
@@ -67,8 +80,19 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
           <li>
             <strong>Celeborn Shuffle Service</strong>
           </li>
+          <li>Total Shuffle Write Bytes: {org.apache.spark.util.Utils.bytesToString(writeBytes)}</li>
+          <li>Total Shuffle Read Bytes: {org.apache.spark.util.Utils.bytesToString(readBytes)}</li>
+          <li>Client Observed Write Speed: {mbps(writeBytes, writeMs)} MB/s</li>
+          <li>Client Observed Read Speed: {mbps(readBytes, readMs)} MB/s</li>
+          <li>Shuffle Write Time / Task CPU Time: {pct(writeMs, cpuMs)}</li>
+          <li>Shuffle Read Time / Task CPU Time: {pct(readMs, cpuMs)}</li>
+          <li>Reassign Status: partitionSplit={reassign.partitionSplit},
+            blockSendFailure={reassign.blockSendFailure}, stageRetry={reassign.stageRetry}</li>
           <li>
             <a href="#buildinfo">Build Information</a>
+          </li>
+          <li>
+            <a href="#properties">Celeborn Properties</a> ({properties.info.length} entries)
           </li>
           <li>
             <a href="#assignments">Shuffle Assignments</a> ({assignments.length} shuffles)
@@ -89,6 +113,12 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
       propertyHeader,
       propertyRow,
       buildInfo.info,
+      fixedWidth = true)
+
+    val propertiesTable = UIUtils.listingTable(
+      propertyHeader,
+      propertyRow,
+      properties.info,
       fixedWidth = true)
 
     val assignmentRows = assignments.map { a =>
@@ -136,9 +166,13 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
       </table>
 
     val throughputRows = Seq(
-      ("Total Shuffle Write Bytes", taskInfo.shuffleWriteBytes),
+      (
+        "Total Shuffle Write Bytes",
+        org.apache.spark.util.Utils.bytesToString(taskInfo.shuffleWriteBytes)),
       ("Total Shuffle Write Time (ms)", taskInfo.shuffleWriteTimeMs),
-      ("Total Shuffle Read Bytes", taskInfo.shuffleReadBytes),
+      (
+        "Total Shuffle Read Bytes",
+        org.apache.spark.util.Utils.bytesToString(taskInfo.shuffleReadBytes)),
       ("Total Fetch Wait Time (ms)", taskInfo.shuffleFetchWaitTimeMs),
       ("Total Task CPU Time (ms)", taskInfo.taskCpuTimeMs))
     val throughputRowsXml = throughputRows.map { case (label, value) =>
@@ -187,6 +221,8 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
       <div><span>{summary}</span></div> ++
         <a name="buildinfo"></a> ++
         <h4><strong>Build Information</strong></h4> ++ buildInfoTable ++
+        <a name="properties"></a> ++
+        <h4><strong>Celeborn Properties</strong></h4> ++ propertiesTable ++
         <a name="assignments"></a> ++
         <h4><strong>Shuffle Assignments</strong></h4> ++ assignmentTable ++
         <a name="fallback"></a> ++

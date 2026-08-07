@@ -51,3 +51,16 @@ case class CelebornShuffleAssignmentEvent(
 case class CelebornFallbackEvent(
     fallbackCounts: java.util.Map[String, java.lang.Long],
     timestamp: Long) extends CelebornEvent
+
+/**
+ * Posted from LifecycleManager (via a driver-side callback registered by SparkShuffleManager)
+ *  the first time a partition split / block-send-failure revive / stage retry is triggered.
+ *  Uses AtomicBoolean dedup in LifecycleManager so only the first trigger per type is posted
+ *  (mirrors Uniffle's postReassignTriggeredEvent). stageRetry may be left false (placeholder)
+ *  if the fetch-failure rerun path is not wired.
+ */
+case class CelebornReassignEvent(
+    partitionSplit: Boolean,
+    blockSendFailure: Boolean,
+    stageRetry: Boolean,
+    timestamp: Long) extends CelebornEvent

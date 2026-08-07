@@ -70,6 +70,23 @@ class CelebornDriverPlugin extends DriverPlugin with Logging {
     // Prefer the appId passed to registerMetrics (reliable); fall back to sc.applicationId.
     info.put("Application Id", Option(appId).filter(_.nonEmpty).getOrElse(sc.applicationId))
     info.put("Celeborn UI Enabled", "true")
+    // Derive key Celeborn runtime config from CelebornConf (rebuild from sc.conf via SparkUtils).
+    // Celeborn has no ProjectConstants version class, so runtime config stands in for version —
+    // it is more useful for diagnosing shuffle behavior anyway.
+    try {
+      val celebornConf = org.apache.spark.shuffle.celeborn.SparkUtils.fromSparkConf(sc.conf)
+      info.put("Celeborn Compression Codec", celebornConf.shuffleCompressionCodec.toString)
+      info.put("Celeborn Shuffle Writer Mode", celebornConf.shuffleWriterMode.toString)
+      info.put("Celeborn Push Replicate Enabled", celebornConf.clientPushReplicateEnabled.toString)
+      info.put("Celeborn Partition Split Mode", celebornConf.shufflePartitionSplitMode.toString)
+      info.put(
+        "Celeborn Partition Split Threshold",
+        org.apache.spark.util.Utils.bytesToString(celebornConf.shufflePartitionSplitThreshold))
+      info.put("Celeborn Fallback Policy", celebornConf.sparkShuffleFallbackPolicy.toString)
+    } catch {
+      case e: Throwable =>
+        logWarning("Failed to derive Celeborn conf for build info", e)
+    }
     info.asScala.toMap
   }
 }

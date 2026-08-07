@@ -22,7 +22,7 @@ import java.util.concurrent.TimeUnit
 import org.apache.spark.{SparkConf, SparkContext}
 import org.apache.spark.internal.Logging
 import org.apache.spark.scheduler._
-import org.apache.spark.shuffle.celeborn.events.{CelebornBuildInfoEvent, CelebornFallbackEvent, CelebornShuffleAssignmentEvent}
+import org.apache.spark.shuffle.celeborn.events.{CelebornBuildInfoEvent, CelebornFallbackEvent, CelebornReassignEvent, CelebornShuffleAssignmentEvent}
 import org.apache.spark.status.ElementTrackingStore
 
 /**
@@ -73,6 +73,13 @@ class CelebornListener(conf: SparkConf, kvstore: ElementTrackingStore)
     mayUpdate(false)
   }
 
+  override def onJobStart(jobStart: SparkListenerJobStart): Unit = {
+    // Capture celeborn-related SparkConf properties for the UI (mirrors Uniffle's
+    // onJobStart capturing spark.rss.*). Pure driver-side, no executor RPC.
+    val props = conf.getAll.filter(_._1.startsWith("spark.celeborn.")).toSeq.sortBy(_._1)
+    kvstore.write(new CelebornPropertiesUIData(props))
+  }
+
   override def onStageCompleted(stageCompleted: SparkListenerStageCompleted): Unit = {
     mayUpdate(false)
   }
@@ -120,6 +127,13 @@ class CelebornListener(conf: SparkConf, kvstore: ElementTrackingStore)
       mayUpdate(false)
     case e: CelebornFallbackEvent =>
       kvstore.write(new CelebornFallbackStatsUIData(e.fallbackCounts))
+      mayUpdate(false)
+    case e: CelebornReassignEvent =>
+      kvstore.write(new CelebornReassignStatsUIData(
+        e.partitionSplit,
+        e.blockSendFailure,
+        e.stageRetry,
+        e.timestamp))
       mayUpdate(false)
     case _ => // ignore unknown events
   }

@@ -52,6 +52,27 @@ private[celeborn] class CelebornStatusStore(val store: KVStore) {
     }
   }
 
+  /** Celeborn properties (spark.celeborn.*) captured at job start, or empty if none. */
+  def celebornProperties(): CelebornPropertiesUIData = {
+    val kClass = classOf[CelebornPropertiesUIData]
+    try {
+      store.read(kClass, kClass.getName)
+    } catch {
+      case _: NoSuchElementException => new CelebornPropertiesUIData(Seq.empty)
+    }
+  }
+
+  /** Reassign status snapshot, or all-false if no reassign recorded. */
+  def reassignStats(): CelebornReassignStatsUIData = {
+    val kClass = classOf[CelebornReassignStatsUIData]
+    try {
+      store.read(kClass, kClass.getName)
+    } catch {
+      case _: NoSuchElementException =>
+        new CelebornReassignStatsUIData(false, false, false, 0L)
+    }
+  }
+
   /** Per-shuffle write metrics snapshot, or empty if none recorded. */
   def aggregatedWriteMetrics(): CelebornAggregatedWriteMetricsUIData = {
     val kClass = classOf[CelebornAggregatedWriteMetricsUIData]

@@ -430,6 +430,7 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
         epoch,
         oldPartition,
         isSegmentGranularityVisible = commitManager.isSegmentGranularityVisible(shuffleId))
+      maybeFireReassign(reassignPartitionSplitTriggered.compareAndSet(false, true))
 
     case MapperEnd(
           shuffleId,
@@ -903,6 +904,9 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
         false)
       return
     }
+    // A revive request means a mapper's push failed and asked for a new partition location.
+    // Mark blockSendFailure for the UI (deduped to the first trigger).
+    maybeFireReassign(reassignBlockSendFailureTriggered.compareAndSet(false, true))
     logDebug(
       s"[handleRevive] shuffle $shuffleId, $mapIds, $partitionIds, $oldEpochs, $oldPartitions, $causes")
     if (commitManager.isStageEnd(shuffleId)) {
@@ -2008,6 +2012,34 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
   def registerShuffleAssignmentCallback(
       callback: BiConsumer[java.lang.Integer, java.lang.Integer]): Unit = {
     shuffleAssignmentCallback = Some(callback)
+  }
+
+  // Reassign dedup flags: each type is posted only on its first trigger (mirrors Uniffle's
+  // postReassignTriggeredEvent AtomicBoolean.compareAndSet). The driver-side SparkShuffleManager
+  // registers a callback that posts a CelebornReassignEvent carrying the current 3-boolean state.
+  private val reassignPartitionSplitTriggered = new java.util.concurrent.atomic.AtomicBoolean(false)
+  private val reassignBlockSendFailureTriggered =
+    new java.util.concurrent.atomic.AtomicBoolean(false)
+  private val reassignStageRetryTriggered = new java.util.concurrent.atomic.AtomicBoolean(false)
+  @volatile private var reassignCallback
+      : Option[java.util.function.Consumer[java.util.List[java.lang.Boolean]]] = None
+  def registerReassignCallback(
+      callback: java.util.function.Consumer[java.util.List[java.lang.Boolean]]): Unit = {
+    reassignCallback = Some(callback)
+  }
+
+  /**
+   * Fire the reassign callback with the current state if any flag was just flipped.
+   *  Called from handleRevive (blockSendFailure) and handlePartitionSplit (partitionSplit).
+   */
+  private def maybeFireReassign(triggered: Boolean): Unit = {
+    if (triggered) {
+      val state = new java.util.ArrayList[java.lang.Boolean]()
+      state.add(reassignPartitionSplitTriggered.get(): java.lang.Boolean)
+      state.add(reassignBlockSendFailureTriggered.get(): java.lang.Boolean)
+      state.add(reassignStageRetryTriggered.get(): java.lang.Boolean)
+      reassignCallback.foreach(_.accept(state))
+    }
   }
 
   // expecting celeborn shuffle id and application shuffle identifier

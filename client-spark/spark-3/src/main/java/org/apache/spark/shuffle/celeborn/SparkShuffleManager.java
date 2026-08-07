@@ -27,6 +27,7 @@ import org.apache.spark.internal.config.package$;
 import org.apache.spark.launcher.SparkLauncher;
 import org.apache.spark.rdd.DeterministicLevel;
 import org.apache.spark.shuffle.*;
+import org.apache.spark.shuffle.celeborn.events.CelebornReassignEvent;
 import org.apache.spark.shuffle.celeborn.events.CelebornShuffleAssignmentEvent;
 import org.apache.spark.shuffle.sort.SortShuffleManager;
 import org.apache.spark.sql.internal.SQLConf;
@@ -181,6 +182,19 @@ public class SparkShuffleManager implements ShuffleManager {
                                 shuffleId,
                                 workerIds,
                                 numPartitions,
+                                System.currentTimeMillis()));
+                  }
+                });
+            lifecycleManager.registerReassignCallback(
+                state -> {
+                  SparkContext sc = SparkContext$.MODULE$.getActive().getOrElse(null);
+                  if (sc != null && state.size() >= 3) {
+                    sc.listenerBus()
+                        .post(
+                            new CelebornReassignEvent(
+                                state.get(0),
+                                state.get(1),
+                                state.get(2),
                                 System.currentTimeMillis()));
                   }
                 });
