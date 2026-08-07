@@ -24,6 +24,7 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.LongAdder;
 
 import scala.Tuple2;
 import scala.Tuple3;
@@ -114,6 +115,14 @@ public class ShuffleClientImpl extends ShuffleClient {
   // key: shuffleId, value: Set(mapId)
   protected final ConcurrentHashMap<Integer, Set<Integer>> mapperEndMap =
       JavaUtils.newConcurrentHashMap();
+
+  // key: mapKey (shuffleId-mapId-attemptId), value: (worker hostAndPushPort -> counters)
+  // Aggregated counts of push events (soft/hard split, congested) per map task,
+  // logged and cleared when the map task ends.
+  private final ConcurrentHashMap<String, ConcurrentHashMap<String, PushEventCounters>>
+      pushEventStats = JavaUtils.newConcurrentHashMap();
+
+  private final long slowPushThresholdNanos;
 
   // shuffleIds which have finished all map tasks
   protected final Set<Integer> stageEndShuffleSet = ConcurrentHashMap.newKeySet();
@@ -214,6 +223,7 @@ public class ShuffleClientImpl extends ShuffleClient {
     }
     authEnabled = conf.authEnabledOnClient();
     dataPushFailureTrackingEnabled = conf.clientAdaptiveOptimizeSkewedPartitionReadEnabled();
+    slowPushThresholdNanos = TimeUnit.MILLISECONDS.toNanos(conf.clientPushSlowPushThresholdMs());
 
     // init rpc env
     rpcEnv =
@@ -353,7 +363,8 @@ public class ShuffleClientImpl extends ShuffleClient {
     } else {
       PartitionLocation newLoc = reducePartitionMap.get(shuffleId).get(partitionId);
       logger.info(
-          "Revive for push data success, new location for shuffle {} map {} attempt {} partition {} batch {} is location {}.",
+          "Revive for push data success after waiting {} ms, new location for shuffle {} map {} attempt {} partition {} batch {} is location {}.",
+          accumulatedTime,
           shuffleId,
           mapId,
           attemptId,
@@ -509,6 +520,17 @@ public class ShuffleClientImpl extends ShuffleClient {
                         + ")")));
         return;
       }
+    }
+
+    if (accumulatedTime > 0) {
+      logger.info(
+          "Waited {} ms for revive results of {} batches for shuffle {} map {} attempt {} groupedBatch {}.",
+          accumulatedTime,
+          reviveRequests.length,
+          shuffleId,
+          mapId,
+          attemptId,
+          oldGroupedBatchId);
     }
 
     for (Map.Entry<Pair<String, String>, DataBatches> entry : newDataBatchesMap.entrySet()) {
@@ -1090,6 +1112,7 @@ public class ShuffleClientImpl extends ShuffleClient {
 
       // add inFlight requests
       pushState.addBatch(nextBatchId, body.length, loc.hostAndPushPort());
+      final long pushStartTime = System.nanoTime();
 
       // build PushData request
       NettyManagedBuffer buffer = new NettyManagedBuffer(Unpooled.wrappedBuffer(body));
@@ -1140,6 +1163,19 @@ public class ShuffleClientImpl extends ShuffleClient {
 
             @Override
             public void onSuccess(ByteBuffer response) {
+              long pushRttNanos = System.nanoTime() - pushStartTime;
+              pushState.recordPushRtt(pushRttNanos, slowPushThresholdNanos);
+              if (pushRttNanos > slowPushThresholdNanos) {
+                logger.warn(
+                    "Slow push data to {} for shuffle {} map {} attempt {} partition {} batch {}, rtt {} ms.",
+                    latest.hostAndPushPort(),
+                    shuffleId,
+                    mapId,
+                    attemptId,
+                    partitionId,
+                    nextBatchId,
+                    TimeUnit.NANOSECONDS.toMillis(pushRttNanos));
+              }
               if (response.remaining() > 0) {
                 byte reason = response.get();
                 if (reason == StatusCode.SOFT_SPLIT.getValue()) {
@@ -1164,6 +1200,8 @@ public class ShuffleClientImpl extends ShuffleClient {
                             StatusCode.SOFT_SPLIT);
                     reviveManager.addRequest(reviveRequest);
                   }
+                  recordPushEvent(
+                      shuffleId, mapId, attemptId, latest.hostAndPushPort(), PushEvent.SOFT_SPLIT);
                   pushState.onSuccess(latest.hostAndPushPort());
                   pushState.removeBatch(nextBatchId, latest.hostAndPushPort());
                   callback.onSuccess(response);
@@ -1190,6 +1228,8 @@ public class ShuffleClientImpl extends ShuffleClient {
                           latest,
                           StatusCode.HARD_SPLIT);
                   reviveManager.addRequest(reviveRequest);
+                  recordPushEvent(
+                      shuffleId, mapId, attemptId, latest.hostAndPushPort(), PushEvent.HARD_SPLIT);
                   long dueTime =
                       System.currentTimeMillis()
                           + conf.clientRpcRequestPartitionLocationAskTimeout()
@@ -1216,6 +1256,12 @@ public class ShuffleClientImpl extends ShuffleClient {
                       partitionId,
                       nextBatchId);
                   pushState.onCongestControl(latest.hostAndPushPort());
+                  recordPushEvent(
+                      shuffleId,
+                      mapId,
+                      attemptId,
+                      latest.hostAndPushPort(),
+                      PushEvent.PRIMARY_CONGESTED);
                   pushState.removeBatch(nextBatchId, latest.hostAndPushPort());
                   callback.onSuccess(response);
                 } else if (reason == StatusCode.PUSH_DATA_SUCCESS_REPLICA_CONGESTED.getValue()) {
@@ -1228,6 +1274,12 @@ public class ShuffleClientImpl extends ShuffleClient {
                       partitionId,
                       nextBatchId);
                   pushState.onCongestControl(latest.hostAndPushPort());
+                  recordPushEvent(
+                      shuffleId,
+                      mapId,
+                      attemptId,
+                      latest.hostAndPushPort(),
+                      PushEvent.REPLICA_CONGESTED);
                   pushState.removeBatch(nextBatchId, latest.hostAndPushPort());
                   callback.onSuccess(response);
                 } else {
@@ -1475,6 +1527,7 @@ public class ShuffleClientImpl extends ShuffleClient {
     String[] hostPortArr = Utils.parseColonSeparatedHostPorts(hostPort, 1);
     final String host = hostPortArr[0];
     final int port = Integer.parseInt(hostPortArr[1]);
+    final long pushStartTime = System.nanoTime();
 
     int groupedBatchId = pushState.nextBatchId();
     int groupedBatchBytesSize = batches.stream().mapToInt(batch -> batch.body.length).sum();
@@ -1557,6 +1610,20 @@ public class ShuffleClientImpl extends ShuffleClient {
         new RpcResponseCallback() {
           @Override
           public void onSuccess(ByteBuffer response) {
+            long pushRttNanos = System.nanoTime() - pushStartTime;
+            pushState.recordPushRtt(pushRttNanos, slowPushThresholdNanos);
+            if (pushRttNanos > slowPushThresholdNanos) {
+              logger.warn(
+                  "Slow push merged data to {} for shuffle {} map {} attempt {} partition {} groupedBatch {} batch {}, rtt {} ms.",
+                  addressPair,
+                  shuffleId,
+                  mapId,
+                  attemptId,
+                  Arrays.toString(partitionIds),
+                  groupedBatchId,
+                  Arrays.toString(batchIds),
+                  TimeUnit.NANOSECONDS.toMillis(pushRttNanos));
+            }
             byte reason = response.get();
             if (reason == StatusCode.HARD_SPLIT.getValue()
                 || reason == StatusCode.SOFT_SPLIT.getValue()) {
@@ -1598,6 +1665,8 @@ public class ShuffleClientImpl extends ShuffleClient {
                               StatusCode.SOFT_SPLIT);
                       reviveManager.addRequest(reviveRequest);
                     }
+                    recordPushEvent(
+                        shuffleId, mapId, attemptId, loc.hostAndPushPort(), PushEvent.SOFT_SPLIT);
                   } else {
                     batchesNeedResubmit.add(batches.get(partitionIndex));
                   }
@@ -1630,6 +1699,14 @@ public class ShuffleClientImpl extends ShuffleClient {
                 pushState.onSuccess(hostPort);
                 callback.onSuccess(ByteBuffer.wrap(new byte[] {StatusCode.SOFT_SPLIT.getValue()}));
               } else {
+                for (DataBatches.DataBatch resubmitBatch : batchesNeedResubmit) {
+                  recordPushEvent(
+                      shuffleId,
+                      mapId,
+                      attemptId,
+                      resubmitBatch.loc.hostAndPushPort(),
+                      PushEvent.HARD_SPLIT);
+                }
                 if (dataPushFailureTrackingEnabled && pushReplicateEnabled) {
                   for (DataBatches.DataBatch resubmitBatch : batchesNeedResubmit) {
                     pushState.recordFailedBatch(
@@ -1667,6 +1744,7 @@ public class ShuffleClientImpl extends ShuffleClient {
                   groupedBatchId,
                   Arrays.toString(batchIds));
               pushState.onCongestControl(hostPort);
+              recordPushEvent(shuffleId, mapId, attemptId, hostPort, PushEvent.PRIMARY_CONGESTED);
               callback.onSuccess(response);
             } else if (reason == StatusCode.PUSH_DATA_SUCCESS_REPLICA_CONGESTED.getValue()) {
               logger.debug(
@@ -1679,6 +1757,7 @@ public class ShuffleClientImpl extends ShuffleClient {
                   groupedBatchId,
                   Arrays.toString(batchIds));
               pushState.onCongestControl(hostPort);
+              recordPushEvent(shuffleId, mapId, attemptId, hostPort, PushEvent.REPLICA_CONGESTED);
               callback.onSuccess(response);
             } else if (reason == StatusCode.MAP_ENDED.getValue()) {
               pushState.onSuccess(hostPort);
@@ -1846,6 +1925,7 @@ public class ShuffleClientImpl extends ShuffleClient {
         throw new CelebornIOException("MapperEnd failed! StatusCode: " + response.status());
       }
     } finally {
+      logAndClearPushStats(mapKey, shuffleId, mapId, attemptId, pushState);
       pushStates.remove(mapKey);
     }
   }
@@ -1858,6 +1938,7 @@ public class ShuffleClientImpl extends ShuffleClient {
       pushState.exception.compareAndSet(null, new CelebornIOException("Cleaned Up"));
       pushState.cleanup();
     }
+    logAndClearPushStats(mapKey, shuffleId, mapId, attemptId, pushState);
   }
 
   @Override
@@ -1868,6 +1949,7 @@ public class ShuffleClientImpl extends ShuffleClient {
     mapperEndMap.remove(shuffleId);
     stageEndShuffleSet.remove(shuffleId);
     splitting.remove(shuffleId);
+    pushEventStats.keySet().removeIf(mapKey -> mapKey.startsWith(shuffleId + "-"));
 
     logger.info("Unregistered shuffle {}.", shuffleId);
     return true;
@@ -2136,6 +2218,95 @@ public class ShuffleClientImpl extends ShuffleClient {
     }
   }
 
+  private enum PushEvent {
+    SOFT_SPLIT,
+    HARD_SPLIT,
+    PRIMARY_CONGESTED,
+    REPLICA_CONGESTED
+  }
+
+  private static class PushEventCounters {
+    private final LongAdder softSplitCount = new LongAdder();
+    private final LongAdder hardSplitCount = new LongAdder();
+    private final LongAdder primaryCongestedCount = new LongAdder();
+    private final LongAdder replicaCongestedCount = new LongAdder();
+  }
+
+  private void recordPushEvent(
+      int shuffleId, int mapId, int attemptId, String hostAndPushPort, PushEvent event) {
+    PushEventCounters counters =
+        pushEventStats
+            .computeIfAbsent(
+                Utils.makeMapKey(shuffleId, mapId, attemptId), k -> new ConcurrentHashMap<>())
+            .computeIfAbsent(hostAndPushPort, k -> new PushEventCounters());
+    switch (event) {
+      case SOFT_SPLIT:
+        counters.softSplitCount.increment();
+        break;
+      case HARD_SPLIT:
+        counters.hardSplitCount.increment();
+        break;
+      case PRIMARY_CONGESTED:
+        counters.primaryCongestedCount.increment();
+        break;
+      case REPLICA_CONGESTED:
+        counters.replicaCongestedCount.increment();
+        break;
+    }
+  }
+
+  private void logAndClearPushStats(
+      String mapKey, int shuffleId, int mapId, int attemptId, PushState pushState) {
+    ConcurrentHashMap<String, PushEventCounters> workerStats = pushEventStats.remove(mapKey);
+    long queueWaitMs = 0;
+    long inflightWaitMs = 0;
+    long drainWaitMs = 0;
+    long slowPushes = 0;
+    long maxPushRttMs = 0;
+    if (pushState != null) {
+      queueWaitMs = pushState.getQueueWaitTimeMs();
+      inflightWaitMs = pushState.getInflightWaitTimeMs();
+      drainWaitMs = pushState.getDrainWaitTimeMs();
+      slowPushes = pushState.getSlowPushCount();
+      maxPushRttMs = pushState.getMaxPushRttMs();
+    }
+    boolean hasEvents = workerStats != null && !workerStats.isEmpty();
+    boolean hasSlowWrite = slowPushes > 0 || queueWaitMs + inflightWaitMs + drainWaitMs >= 1000;
+    if (!hasEvents && !hasSlowWrite) {
+      return;
+    }
+    StringBuilder sb = new StringBuilder();
+    if (hasEvents) {
+      workerStats.forEach(
+          (worker, counters) ->
+              sb.append("(")
+                  .append(worker)
+                  .append(", softSplit=")
+                  .append(counters.softSplitCount.sum())
+                  .append(", hardSplit=")
+                  .append(counters.hardSplitCount.sum())
+                  .append(", primaryCongested=")
+                  .append(counters.primaryCongestedCount.sum())
+                  .append(", replicaCongested=")
+                  .append(counters.replicaCongestedCount.sum())
+                  .append(")"));
+    }
+    logger.info(
+        "Write stats summary for shuffle {} map {} attempt {}: queueWait={}ms, "
+            + "inflightWait={}ms, drainWait={}ms, slowPush(>{}ms)={}, maxPushRtt={}ms, "
+            + "events=[{}]",
+        shuffleId,
+        mapId,
+        attemptId,
+        queueWaitMs,
+        inflightWaitMs,
+        drainWaitMs,
+        conf.clientPushSlowPushThresholdMs(),
+        slowPushes,
+        maxPushRttMs,
+        sb);
+  }
+
   boolean mapperEnded(int shuffleId, int mapId) {
     return (mapperEndMap.containsKey(shuffleId) && mapperEndMap.get(shuffleId).contains(mapId))
         || isStageEnded(shuffleId);
@@ -2198,6 +2369,11 @@ public class ShuffleClientImpl extends ShuffleClient {
         && fetchExcludeWorkerOnFailureEnabled
         && Utils.isCriticalCauseForFetch(e)) {
       fetchExcludedWorkers.put(hostAndFetchPort, System.currentTimeMillis());
+      logger.info(
+          "Excluded fetch location {} due to fetch failure, {} excluded fetch locations in total.",
+          hostAndFetchPort,
+          fetchExcludedWorkers.size(),
+          e);
     }
   }
 }

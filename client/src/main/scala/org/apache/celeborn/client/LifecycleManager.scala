@@ -1215,6 +1215,7 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
       return
     }
 
+    changePartitionManager.logReviveSummary(shuffleId)
     if (commitManager.tryFinalCommit(shuffleId)) {
       // Here we only clear PartitionLocation info in shuffleAllocatedWorkers.
       // Since rerun or speculation task may running after we handle StageEnd.

@@ -1029,6 +1029,7 @@ class CelebornConf(loadDefaults: Boolean) extends Cloneable with Logging with Se
   // //////////////////////////////////////////////////////
   def clientFetchTimeoutMs: Long = get(CLIENT_FETCH_TIMEOUT)
   def clientFetchPollChunkWaitTime: Long = get(CLIENT_FETCH_POLL_CHUNK_WAIT_TIME)
+  def clientFetchSlowChunkThresholdMs: Long = get(CLIENT_FETCH_SLOW_CHUNK_THRESHOLD)
   def clientFetchBufferSize: Int = get(CLIENT_FETCH_BUFFER_SIZE).toInt
   def clientFetchMaxReqsInFlight: Int = get(CLIENT_FETCH_MAX_REQS_IN_FLIGHT)
   def isPartitionReaderCheckpointEnabled: Boolean =
@@ -1108,6 +1109,7 @@ class CelebornConf(loadDefaults: Boolean) extends Cloneable with Logging with Se
         pushDataTimeoutMs * clientPushMaxReviveTimes * 2)
     }
   def clientPushLimitInFlightSleepDeltaMs: Long = get(CLIENT_PUSH_LIMIT_IN_FLIGHT_SLEEP_INTERVAL)
+  def clientPushSlowPushThresholdMs: Long = get(CLIENT_PUSH_SLOW_PUSH_THRESHOLD)
   def clientPushTakeTaskWaitIntervalMs: Long = get(CLIENT_PUSH_TAKE_TASK_WAIT_INTERVAL)
   def clientPushTakeTaskMaxWaitAttempts: Int = get(CLIENT_PUSH_TAKE_TASK_MAX_WAIT_ATTEMPTS)
   def clientPushSendBufferPoolExpireTimeout: Long = get(CLIENT_PUSH_SENDBUFFERPOOL_EXPIRETIMEOUT)
@@ -5112,6 +5114,16 @@ object CelebornConf extends Logging {
       .timeConf(TimeUnit.MILLISECONDS)
       .createWithDefaultString("50ms")
 
+  val CLIENT_PUSH_SLOW_PUSH_THRESHOLD: ConfigEntry[Long] =
+    buildConf("celeborn.client.push.slowPush.threshold")
+      .categories("client")
+      .doc("Threshold of the push data round trip time. If pushing a batch to a worker " +
+        "takes longer than this threshold, a warn log will be recorded with the target " +
+        "worker, partition and batch info.")
+      .version("0.7.0")
+      .timeConf(TimeUnit.MILLISECONDS)
+      .createWithDefaultString("5s")
+
   val CLIENT_PUSH_SORT_RANDOMIZE_PARTITION_ENABLED: ConfigEntry[Boolean] =
     buildConf("celeborn.client.push.sort.randomizePartitionId.enabled")
       .withAlternative("celeborn.push.sort.randomizePartitionId.enabled")
@@ -5195,6 +5207,16 @@ object CelebornConf extends Logging {
         "task getting stuck")
       .timeConf(TimeUnit.MILLISECONDS)
       .createWithDefault(500)
+
+  val CLIENT_FETCH_SLOW_CHUNK_THRESHOLD: ConfigEntry[Long] =
+    buildConf("celeborn.client.fetch.slowChunk.threshold")
+      .categories("client")
+      .version("0.7.0")
+      .doc("Threshold of the fetch chunk round trip time. If fetching a chunk from a worker " +
+        "takes longer than this threshold, a warn log will be recorded with the worker, " +
+        "stream and chunk info.")
+      .timeConf(TimeUnit.MILLISECONDS)
+      .createWithDefaultString("1s")
 
   val CLIENT_FETCH_BUFFER_SIZE: ConfigEntry[Long] =
     buildConf("celeborn.client.fetch.buffer.size")

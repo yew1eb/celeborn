@@ -38,6 +38,7 @@ license: |
 | celeborn.client.fetch.maxReqsInFlight | 3 | false | Amount of in-flight chunk fetch request. | 0.3.0 | celeborn.fetch.maxReqsInFlight | 
 | celeborn.client.fetch.maxRetriesForEachReplica | 3 | false | Max retry times of fetch chunk on each replica | 0.3.0 | celeborn.fetch.maxRetriesForEachReplica,celeborn.fetch.maxRetries | 
 | celeborn.client.fetch.pollChunk.wait | 500ms | false | The waiting time for shuffle client to read the empty chunk on the work side.when there are many empty chunk in the shuffle partition of a small task,the current value can be set small to avoid long waiting times and the illusion of thetask getting stuck | 0.6.1 |  | 
+| celeborn.client.fetch.slowChunk.threshold | 1s | false | Threshold of the fetch chunk round trip time. If fetching a chunk from a worker takes longer than this threshold, a warn log will be recorded with the worker, stream and chunk info. | 0.7.0 |  | 
 | celeborn.client.fetch.timeout | 600s | false | Timeout for a task to open stream and fetch chunk. | 0.3.0 | celeborn.fetch.timeout | 
 | celeborn.client.flink.compression.enabled | true | false | Whether to compress data in Flink plugin. | 0.3.0 | remote-shuffle.job.enable-data-compression | 
 | celeborn.client.flink.inputGate.concurrentReadings | 2147483647 | false | Max concurrent reading channels for a input gate. | 0.3.0 | remote-shuffle.job.concurrent-readings-per-gate | 
@@ -72,6 +73,7 @@ license: |
 | celeborn.client.push.revive.maxRetries | 5 | false | Max retry times for reviving when celeborn push data failed. | 0.3.0 |  | 
 | celeborn.client.push.sendBufferPool.checkExpireInterval | 30s | false | Interval to check expire for send buffer pool. If the pool has been idle for more than `celeborn.client.push.sendBufferPool.expireTimeout`, the pooled send buffers and push tasks will be cleaned up. | 0.3.1 |  | 
 | celeborn.client.push.sendBufferPool.expireTimeout | 60s | false | Timeout before clean up SendBufferPool. If SendBufferPool is idle for more than this time, the send buffers and push tasks will be cleaned up. | 0.3.1 |  | 
+| celeborn.client.push.slowPush.threshold | 5s | false | Threshold of the push data round trip time. If pushing a batch to a worker takes longer than this threshold, a warn log will be recorded with the target worker, partition and batch info. | 0.7.0 |  | 
 | celeborn.client.push.slowStart.initialSleepTime | 500ms | false | The initial sleep time if the current max in flight requests is 0 | 0.3.0 |  | 
 | celeborn.client.push.slowStart.maxSleepTime | 2s | false | If celeborn.client.push.limit.strategy is set to SLOWSTART, push side will take a sleep strategy for each batch of requests, this controls the max sleep time if the max in flight requests limit is 1 for a long time | 0.3.0 |  | 
 | celeborn.client.push.sort.randomizePartitionId.enabled | false | false | Whether to randomize partitionId in push sorter. If true, partitionId will be randomized when sort data to avoid skew when push to worker | 0.3.0 | celeborn.push.sort.randomizePartitionId.enabled | 
