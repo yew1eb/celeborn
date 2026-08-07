@@ -23,16 +23,32 @@ import org.apache.spark.status.{AppHistoryServerPlugin, ElementTrackingStore}
 import org.apache.spark.ui.SparkUI
 
 /**
- * HistoryServer integration: rebuilds the listener from the event log and reattaches
- *  the Celeborn tab. Registered via META-INF/services. Full implementation in step 6.
+ * HistoryServer integration. Rebuilds the Celeborn listener from the event log so the
+ *  Celeborn tab can be rendered for finished applications. Registered via SPI at
+ *  META-INF/services/org.apache.spark.status.AppHistoryServerPlugin.
  */
 class CelebornHistoryServerPlugin extends AppHistoryServerPlugin {
+
+  /** Rebuild a listener that consumes replayed events into the given store. */
   override def createListeners(
       conf: SparkConf,
-      store: ElementTrackingStore): Seq[SparkListener] = Nil
+      store: ElementTrackingStore): Seq[SparkListener] = {
+    Seq(new CelebornListener(conf, store))
+  }
 
+  /**
+   * Attach the Celeborn tab only if the application actually produced Celeborn data,
+   *  so non-Celeborn apps don't get an empty tab.
+   */
   override def setupUI(ui: SparkUI): Unit = {
-    // populated in step 6
+    val statusStore = new CelebornStatusStore(ui.store.store)
+    val hasData =
+      statusStore.assignmentInfos().nonEmpty ||
+        statusStore.buildInfo().info.nonEmpty ||
+        !statusStore.fallbackStats().counts.isEmpty
+    if (hasData) {
+      new CelebornUITab(statusStore, ui)
+    }
   }
 
   override def displayOrder: Int = 1
