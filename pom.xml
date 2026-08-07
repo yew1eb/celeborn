@@ -151,6 +151,7 @@
     <maven.plugin.rat.version>0.13</maven.plugin.rat.version>
     <maven.plugin.resources.version>3.3.1</maven.plugin.resources.version>
     <maven.plugin.scala.version>4.9.2</maven.plugin.scala.version>
+    <maven.plugin.build-helper.version>3.6.1</maven.plugin.build-helper.version>
     <maven.plugin.scalatest.version>2.1.0</maven.plugin.scalatest.version>
     <maven.plugin.shade.version>3.5.2</maven.plugin.shade.version>
     <maven.plugin.spotless.version>2.24.1</maven.plugin.spotless.version>
@@ -1394,6 +1395,11 @@
           <artifactId>openapi-generator-maven-plugin</artifactId>
           <version>${openapi.generator.version}</version>
         </plugin>
+        <plugin>
+          <groupId>org.codehaus.mojo</groupId>
+          <artifactId>build-helper-maven-plugin</artifactId>
+          <version>${maven.plugin.build-helper.version}</version>
+        </plugin>
       </plugins>
     </pluginManagement>
 
@@ -1506,6 +1512,34 @@
         <maven.plugin.silencer.version>1.6.0</maven.plugin.silencer.version>
         <commons-lang3.version>3.17.0</commons-lang3.version>
       </properties>
+      <build>
+        <plugins>
+          <!-- Add the Spark-version-specific TypeAlias source dir to the compile
+               set for the spark-3-ui module (other modules lack this dir and
+               build-helper skips it). Selected per spark profile so a single
+               spark-3-ui module serves both Spark 3.x (javax.servlet) and
+               Spark 4.x (jakarta.servlet). -->
+          <plugin>
+            <groupId>org.codehaus.mojo</groupId>
+            <artifactId>build-helper-maven-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>add-scala-spark3</id>
+                <goals>
+                  <goal>add-source</goal>
+                </goals>
+                <phase>generate-sources</phase>
+                <configuration>
+                  <sources>
+                    <source>src/main/scala-spark3</source>
+                  </sources>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+
     </profile>
 
     <profile>
@@ -1530,6 +1564,34 @@
         <maven.plugin.silencer.version>1.6.0</maven.plugin.silencer.version>
         <commons-lang3.version>3.17.0</commons-lang3.version>
       </properties>
+      <build>
+        <plugins>
+          <!-- Add the Spark-version-specific TypeAlias source dir to the compile
+               set for the spark-3-ui module (other modules lack this dir and
+               build-helper skips it). Selected per spark profile so a single
+               spark-3-ui module serves both Spark 3.x (javax.servlet) and
+               Spark 4.x (jakarta.servlet). -->
+          <plugin>
+            <groupId>org.codehaus.mojo</groupId>
+            <artifactId>build-helper-maven-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>add-scala-spark3</id>
+                <goals>
+                  <goal>add-source</goal>
+                </goals>
+                <phase>generate-sources</phase>
+                <configuration>
+                  <sources>
+                    <source>src/main/scala-spark3</source>
+                  </sources>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+
     </profile>
 
     <profile>
@@ -1553,6 +1615,34 @@
         <zstd-jni.version>1.5.0-4</zstd-jni.version>
         <commons-lang3.version>3.17.0</commons-lang3.version>
       </properties>
+      <build>
+        <plugins>
+          <!-- Add the Spark-version-specific TypeAlias source dir to the compile
+               set for the spark-3-ui module (other modules lack this dir and
+               build-helper skips it). Selected per spark profile so a single
+               spark-3-ui module serves both Spark 3.x (javax.servlet) and
+               Spark 4.x (jakarta.servlet). -->
+          <plugin>
+            <groupId>org.codehaus.mojo</groupId>
+            <artifactId>build-helper-maven-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>add-scala-spark3</id>
+                <goals>
+                  <goal>add-source</goal>
+                </goals>
+                <phase>generate-sources</phase>
+                <configuration>
+                  <sources>
+                    <source>src/main/scala-spark3</source>
+                  </sources>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+
     </profile>
 
     <profile>
@@ -1576,6 +1666,34 @@
         <zstd-jni.version>1.5.2-1</zstd-jni.version>
         <commons-lang3.version>3.17.0</commons-lang3.version>
       </properties>
+      <build>
+        <plugins>
+          <!-- Add the Spark-version-specific TypeAlias source dir to the compile
+               set for the spark-3-ui module (other modules lack this dir and
+               build-helper skips it). Selected per spark profile so a single
+               spark-3-ui module serves both Spark 3.x (javax.servlet) and
+               Spark 4.x (jakarta.servlet). -->
+          <plugin>
+            <groupId>org.codehaus.mojo</groupId>
+            <artifactId>build-helper-maven-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>add-scala-spark3</id>
+                <goals>
+                  <goal>add-source</goal>
+                </goals>
+                <phase>generate-sources</phase>
+                <configuration>
+                  <sources>
+                    <source>src/main/scala-spark3</source>
+                  </sources>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+
     </profile>
 
     <profile>
@@ -1599,6 +1717,34 @@
         <zstd-jni.version>1.5.2-5</zstd-jni.version>
         <commons-lang3.version>3.17.0</commons-lang3.version>
       </properties>
+      <build>
+        <plugins>
+          <!-- Add the Spark-version-specific TypeAlias source dir to the compile
+               set for the spark-3-ui module (other modules lack this dir and
+               build-helper skips it). Selected per spark profile so a single
+               spark-3-ui module serves both Spark 3.x (javax.servlet) and
+               Spark 4.x (jakarta.servlet). -->
+          <plugin>
+            <groupId>org.codehaus.mojo</groupId>
+            <artifactId>build-helper-maven-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>add-scala-spark3</id>
+                <goals>
+                  <goal>add-source</goal>
+                </goals>
+                <phase>generate-sources</phase>
+                <configuration>
+                  <sources>
+                    <source>src/main/scala-spark3</source>
+                  </sources>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+
     </profile>
 
     <profile>
@@ -1622,6 +1768,34 @@
         <zstd-jni.version>1.5.5-4</zstd-jni.version>
         <commons-lang3.version>3.17.0</commons-lang3.version>
       </properties>
+      <build>
+        <plugins>
+          <!-- Add the Spark-version-specific TypeAlias source dir to the compile
+               set for the spark-3-ui module (other modules lack this dir and
+               build-helper skips it). Selected per spark profile so a single
+               spark-3-ui module serves both Spark 3.x (javax.servlet) and
+               Spark 4.x (jakarta.servlet). -->
+          <plugin>
+            <groupId>org.codehaus.mojo</groupId>
+            <artifactId>build-helper-maven-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>add-scala-spark3</id>
+                <goals>
+                  <goal>add-source</goal>
+                </goals>
+                <phase>generate-sources</phase>
+                <configuration>
+                  <sources>
+                    <source>src/main/scala-spark3</source>
+                  </sources>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+
     </profile>
 
     <profile>
@@ -1629,7 +1803,7 @@
       <modules>
         <module>client-spark/common</module>
         <module>client-spark/spark-3</module>
-        <module>client-spark/spark-4-ui</module>
+        <module>client-spark/spark-3-ui</module>
         <module>client-spark/spark-3-columnar-common</module>
         <module>client-spark/spark-4-columnar-shuffle</module>
         <module>client-spark/spark-4-shaded</module>
@@ -1644,6 +1818,34 @@
         <celeborn.ui.servlet>jakarta</celeborn.ui.servlet>
         <zstd-jni.version>1.5.6-9</zstd-jni.version>
       </properties>
+      <build>
+        <plugins>
+          <!-- Add the Spark-version-specific TypeAlias source dir to the compile
+               set for the spark-3-ui module (other modules lack this dir and
+               build-helper skips it). Selected per spark profile so a single
+               spark-3-ui module serves both Spark 3.x (javax.servlet) and
+               Spark 4.x (jakarta.servlet). -->
+          <plugin>
+            <groupId>org.codehaus.mojo</groupId>
+            <artifactId>build-helper-maven-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>add-scala-spark4</id>
+                <goals>
+                  <goal>add-source</goal>
+                </goals>
+                <phase>generate-sources</phase>
+                <configuration>
+                  <sources>
+                    <source>src/main/scala-spark4</source>
+                  </sources>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+
     </profile>
 
     <profile>
@@ -1651,7 +1853,7 @@
       <modules>
         <module>client-spark/common</module>
         <module>client-spark/spark-3</module>
-        <module>client-spark/spark-4-ui</module>
+        <module>client-spark/spark-3-ui</module>
         <module>client-spark/spark-3-columnar-common</module>
         <module>client-spark/spark-4-columnar-shuffle</module>
         <module>client-spark/spark-4-shaded</module>
@@ -1682,7 +1884,7 @@
       <modules>
         <module>client-spark/common</module>
         <module>client-spark/spark-3</module>
-        <module>client-spark/spark-4-ui</module>
+        <module>client-spark/spark-3-ui</module>
         <module>client-spark/spark-3-columnar-common</module>
         <module>client-spark/spark-4-columnar-shuffle</module>
         <module>client-spark/spark-4-shaded</module>
@@ -1747,6 +1949,34 @@
       <properties>
         <java.version>11</java.version>
       </properties>
+      <build>
+        <plugins>
+          <!-- Add the Spark-version-specific TypeAlias source dir to the compile
+               set for the spark-3-ui module (other modules lack this dir and
+               build-helper skips it). Selected per spark profile so a single
+               spark-3-ui module serves both Spark 3.x (javax.servlet) and
+               Spark 4.x (jakarta.servlet). -->
+          <plugin>
+            <groupId>org.codehaus.mojo</groupId>
+            <artifactId>build-helper-maven-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>add-scala-spark4</id>
+                <goals>
+                  <goal>add-source</goal>
+                </goals>
+                <phase>generate-sources</phase>
+                <configuration>
+                  <sources>
+                    <source>src/main/scala-spark4</source>
+                  </sources>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+
     </profile>
 
     <profile>
@@ -1887,6 +2117,34 @@
         <flink.clients.artifact>flink-clients</flink.clients.artifact>
         <flink.runtime.web.artifact>flink-runtime-web</flink.runtime.web.artifact>
       </properties>
+      <build>
+        <plugins>
+          <!-- Add the Spark-version-specific TypeAlias source dir to the compile
+               set for the spark-3-ui module (other modules lack this dir and
+               build-helper skips it). Selected per spark profile so a single
+               spark-3-ui module serves both Spark 3.x (javax.servlet) and
+               Spark 4.x (jakarta.servlet). -->
+          <plugin>
+            <groupId>org.codehaus.mojo</groupId>
+            <artifactId>build-helper-maven-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>add-scala-spark4</id>
+                <goals>
+                  <goal>add-source</goal>
+                </goals>
+                <phase>generate-sources</phase>
+                <configuration>
+                  <sources>
+                    <source>src/main/scala-spark4</source>
+                  </sources>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+
     </profile>
 
     <profile>
