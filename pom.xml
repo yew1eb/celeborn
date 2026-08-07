@@ -69,6 +69,7 @@
 
     <flink.version>1.20.5</flink.version>
     <spark.version>3.3.4</spark.version>
+    <celeborn.ui.servlet>javax</celeborn.ui.servlet>
 
     <!-- use hadoop-3 as default  -->
     <hadoop.version>3.3.6</hadoop.version>
@@ -1488,6 +1489,7 @@
       <modules>
         <module>client-spark/common</module>
         <module>client-spark/spark-3</module>
+        <module>client-spark/spark-3-ui</module>
         <module>client-spark/spark-3-columnar-common</module>
         <module>client-spark/spark-3-columnar-shuffle</module>
         <module>client-spark/spark-3-shaded</module>
@@ -1499,6 +1501,7 @@
         <scala.version>2.12.10</scala.version>
         <scala.binary.version>2.12</scala.binary.version>
         <spark.version>3.0.3</spark.version>
+        <celeborn.ui.servlet>javax</celeborn.ui.servlet>
         <zstd-jni.version>1.4.4-3</zstd-jni.version>
         <maven.plugin.silencer.version>1.6.0</maven.plugin.silencer.version>
         <commons-lang3.version>3.17.0</commons-lang3.version>
@@ -1510,6 +1513,7 @@
       <modules>
         <module>client-spark/common</module>
         <module>client-spark/spark-3</module>
+        <module>client-spark/spark-3-ui</module>
         <module>client-spark/spark-3-columnar-common</module>
         <module>client-spark/spark-3-columnar-shuffle</module>
         <module>client-spark/spark-3-shaded</module>
@@ -1521,6 +1525,7 @@
         <scala.version>2.12.10</scala.version>
         <scala.binary.version>2.12</scala.binary.version>
         <spark.version>3.1.3</spark.version>
+        <celeborn.ui.servlet>javax</celeborn.ui.servlet>
         <zstd-jni.version>1.4.8-1</zstd-jni.version>
         <maven.plugin.silencer.version>1.6.0</maven.plugin.silencer.version>
         <commons-lang3.version>3.17.0</commons-lang3.version>
@@ -1532,6 +1537,7 @@
       <modules>
         <module>client-spark/common</module>
         <module>client-spark/spark-3</module>
+        <module>client-spark/spark-3-ui</module>
         <module>client-spark/spark-3-columnar-common</module>
         <module>client-spark/spark-3-columnar-shuffle</module>
         <module>client-spark/spark-3-shaded</module>
@@ -1543,6 +1549,7 @@
         <scala.version>2.12.15</scala.version>
         <scala.binary.version>2.12</scala.binary.version>
         <spark.version>3.2.4</spark.version>
+        <celeborn.ui.servlet>javax</celeborn.ui.servlet>
         <zstd-jni.version>1.5.0-4</zstd-jni.version>
         <commons-lang3.version>3.17.0</commons-lang3.version>
       </properties>
@@ -1553,6 +1560,7 @@
       <modules>
         <module>client-spark/common</module>
         <module>client-spark/spark-3</module>
+        <module>client-spark/spark-3-ui</module>
         <module>client-spark/spark-3-columnar-common</module>
         <module>client-spark/spark-3-columnar-shuffle</module>
         <module>client-spark/spark-3-shaded</module>
@@ -1564,6 +1572,7 @@
         <scala.version>2.12.15</scala.version>
         <scala.binary.version>2.12</scala.binary.version>
         <spark.version>3.3.4</spark.version>
+        <celeborn.ui.servlet>javax</celeborn.ui.servlet>
         <zstd-jni.version>1.5.2-1</zstd-jni.version>
         <commons-lang3.version>3.17.0</commons-lang3.version>
       </properties>
@@ -1574,6 +1583,7 @@
       <modules>
         <module>client-spark/common</module>
         <module>client-spark/spark-3</module>
+        <module>client-spark/spark-3-ui</module>
         <module>client-spark/spark-3-columnar-common</module>
         <module>client-spark/spark-3-columnar-shuffle</module>
         <module>client-spark/spark-3-shaded</module>
@@ -1585,6 +1595,7 @@
         <scala.version>2.12.17</scala.version>
         <scala.binary.version>2.12</scala.binary.version>
         <spark.version>3.4.4</spark.version>
+        <celeborn.ui.servlet>javax</celeborn.ui.servlet>
         <zstd-jni.version>1.5.2-5</zstd-jni.version>
         <commons-lang3.version>3.17.0</commons-lang3.version>
       </properties>
@@ -1595,6 +1606,7 @@
       <modules>
         <module>client-spark/common</module>
         <module>client-spark/spark-3</module>
+        <module>client-spark/spark-3-ui</module>
         <module>client-spark/spark-3-columnar-common</module>
         <module>client-spark/spark-3.5-columnar-shuffle</module>
         <module>client-spark/spark-3-shaded</module>
@@ -1606,6 +1618,7 @@
         <scala.version>2.12.18</scala.version>
         <scala.binary.version>2.12</scala.binary.version>
         <spark.version>3.5.8</spark.version>
+        <celeborn.ui.servlet>javax</celeborn.ui.servlet>
         <zstd-jni.version>1.5.5-4</zstd-jni.version>
         <commons-lang3.version>3.17.0</commons-lang3.version>
       </properties>
@@ -1616,6 +1629,7 @@
       <modules>
         <module>client-spark/common</module>
         <module>client-spark/spark-3</module>
+        <module>client-spark/spark-4-ui</module>
         <module>client-spark/spark-3-columnar-common</module>
         <module>client-spark/spark-4-columnar-shuffle</module>
         <module>client-spark/spark-4-shaded</module>
@@ -1627,6 +1641,7 @@
         <scala.version>2.13.16</scala.version>
         <scala.binary.version>2.13</scala.binary.version>
         <spark.version>4.0.3</spark.version>
+        <celeborn.ui.servlet>jakarta</celeborn.ui.servlet>
         <zstd-jni.version>1.5.6-9</zstd-jni.version>
       </properties>
     </profile>
@@ -1636,6 +1651,7 @@
       <modules>
         <module>client-spark/common</module>
         <module>client-spark/spark-3</module>
+        <module>client-spark/spark-4-ui</module>
         <module>client-spark/spark-3-columnar-common</module>
         <module>client-spark/spark-4-columnar-shuffle</module>
         <module>client-spark/spark-4-shaded</module>
@@ -1647,6 +1663,7 @@
         <scala.version>2.13.17</scala.version>
         <scala.binary.version>2.13</scala.binary.version>
         <spark.version>4.1.2</spark.version>
+        <celeborn.ui.servlet>jakarta</celeborn.ui.servlet>
         <zstd-jni.version>1.5.7-6</zstd-jni.version>
       </properties>
       <dependencyManagement>
@@ -1665,6 +1682,7 @@
       <modules>
         <module>client-spark/common</module>
         <module>client-spark/spark-3</module>
+        <module>client-spark/spark-4-ui</module>
         <module>client-spark/spark-3-columnar-common</module>
         <module>client-spark/spark-4-columnar-shuffle</module>
         <module>client-spark/spark-4-shaded</module>
@@ -1676,6 +1694,7 @@
         <scala.version>2.13.18</scala.version>
         <scala.binary.version>2.13</scala.binary.version>
         <spark.version>4.2.0</spark.version>
+        <celeborn.ui.servlet>jakarta</celeborn.ui.servlet>
         <zstd-jni.version>1.5.7-7</zstd-jni.version>
       </properties>
       <dependencyManagement>
