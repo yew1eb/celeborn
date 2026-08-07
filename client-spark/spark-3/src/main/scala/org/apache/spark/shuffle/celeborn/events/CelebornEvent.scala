@@ -30,3 +30,22 @@ sealed trait CelebornEvent extends SparkListenerEvent
 
 /** Posted once from the driver plugin at initialization with build/version info. */
 case class CelebornBuildInfoEvent(info: Map[String, String]) extends CelebornEvent
+
+/**
+ * Posted from SparkShuffleManager.registerShuffle after a successful Celeborn slot assignment,
+ *  carrying the shuffle -> worker topology.
+ */
+case class CelebornShuffleAssignmentEvent(
+    appShuffleId: Int,
+    celebornShuffleId: Int,
+    workers: Seq[String],
+    numPartitions: Int,
+    timestamp: Long) extends CelebornEvent
+
+/**
+ * Posted from CelebornShuffleFallbackPolicyRunner when a shuffle falls back to
+ *  SortShuffleManager, carrying a snapshot of per-policy fallback counts.
+ */
+case class CelebornFallbackEvent(
+    fallbackCounts: Map[String, Long],
+    timestamp: Long) extends CelebornEvent

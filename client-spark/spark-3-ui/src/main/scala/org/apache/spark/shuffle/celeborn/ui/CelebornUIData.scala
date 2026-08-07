@@ -17,9 +17,15 @@
 
 package org.apache.spark.shuffle.celeborn.ui
 
+import com.fasterxml.jackson.annotation.JsonIgnore
+import org.apache.spark.util.kvstore.KVIndex
+
 /**
- * KVStore entity classes for the Celeborn UI, written by [[CelebornListener]] and read by
- *  [[CelebornStatusStore]]. `@KVIndex`/`@KVIndexParam` annotations and fields are added in
- *  step 2+ as each UI section is implemented.
+ * KVStore entity holding Celeborn build/version info for the UI summary.
+ *  Singleton: keyed by the class name.
  */
-private[celeborn] object CelebornUIData
+private[celeborn] class CelebornBuildInfoUIData(val info: Seq[(String, String)]) {
+  @JsonIgnore
+  @KVIndex
+  def id: String = classOf[CelebornBuildInfoUIData].getName
+}

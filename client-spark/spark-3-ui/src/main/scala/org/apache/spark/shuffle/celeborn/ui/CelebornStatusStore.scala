@@ -21,6 +21,17 @@ import org.apache.spark.status.ElementTrackingStore
 
 /**
  * Thin wrapper over Spark's status KVStore exposing typed read accessors for the
- *  Celeborn UI entities written by [[CelebornListener]]. Read methods are filled in step 2+.
+ *  Celeborn UI entities written by [[CelebornListener]].
  */
-private[celeborn] class CelebornStatusStore(val store: ElementTrackingStore)
+private[celeborn] class CelebornStatusStore(val store: ElementTrackingStore) {
+
+  /** Build info summary, or an empty entity if not yet written. */
+  def buildInfo(): CelebornBuildInfoUIData = {
+    val kClass = classOf[CelebornBuildInfoUIData]
+    try {
+      store.read(kClass, kClass.getName)
+    } catch {
+      case _: NoSuchElementException => new CelebornBuildInfoUIData(Seq.empty)
+    }
+  }
+}

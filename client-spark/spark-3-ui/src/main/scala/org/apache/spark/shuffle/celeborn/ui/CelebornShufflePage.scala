@@ -20,12 +20,11 @@ package org.apache.spark.shuffle.celeborn.ui
 import scala.xml.Node
 
 import org.apache.spark.internal.Logging
-import org.apache.spark.ui.WebUIPage
+import org.apache.spark.ui.{UIUtils, WebUIPage}
 
 /**
  * Page rendered under the Celeborn tab. Uses [[TypeAlias]] to bridge the
  *  javax.servlet (Spark 3.x) / jakarta.servlet (Spark 4.x) parameter type.
- *  Sections are filled in step 2+; this skeleton renders a placeholder.
  */
 private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
   extends WebUIPage("") with Logging {
@@ -34,12 +33,43 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
   private val statusStore = parent.statusStore
 
   override def render(request: HttpServletRequest): Seq[Node] = {
+    val buildInfo = statusStore.buildInfo()
+
+    val summary: Seq[Node] =
+      <div>
+        <ul class="list-unstyled">
+          <li>
+            <strong>Celeborn Shuffle Service</strong>
+          </li>
+        </ul>
+      </div>
+
+    val buildInfoTable = UIUtils.listingTable(
+      propertyHeader,
+      propertyRow,
+      buildInfo.info,
+      fixedWidth = true)
+
     val content =
       <div>
-        <h5>Celeborn Shuffle Service</h5>
-        <div>UI sections (build info, shuffle assignments, fallback stats, per-shuffle
-        metrics) are populated as the implementation progresses.</div>
+        <span>
+          {summary}
+        </span>
+        <h4>
+          <strong>Build Information</strong>
+        </h4> ++ buildInfoTable
       </div>
-    content
+
+    UIUtils.headerSparkPage(request, "Celeborn Shuffle Service", content, parent)
   }
+
+  private def propertyHeader: Seq[String] = Seq("Property", "Value")
+
+  private def propertyRow(kv: (String, String)): Seq[Node] =
+    <td>
+      {kv._1}
+    </td>
+      <td>
+        {kv._2}
+      </td>
 }

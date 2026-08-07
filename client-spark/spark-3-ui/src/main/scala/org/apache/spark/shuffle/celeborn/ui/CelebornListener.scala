@@ -19,12 +19,10 @@ package org.apache.spark.shuffle.celeborn.ui
 
 import java.util.concurrent.TimeUnit
 
-import scala.collection.JavaConverters._
-
 import org.apache.spark.{SparkConf, SparkContext}
 import org.apache.spark.internal.Logging
 import org.apache.spark.scheduler._
-import org.apache.spark.shuffle.celeborn.events.CelebornBuildInfoEvent
+import org.apache.spark.shuffle.celeborn.events.{CelebornBuildInfoEvent, CelebornFallbackEvent, CelebornShuffleAssignmentEvent}
 import org.apache.spark.status.ElementTrackingStore
 
 /**
@@ -64,8 +62,14 @@ class CelebornListener(conf: SparkConf, kvstore: ElementTrackingStore)
   }
 
   override def onOtherEvent(event: SparkListenerEvent): Unit = event match {
-    case _: CelebornBuildInfoEvent =>
-      // persisted in step 2
+    case e: CelebornBuildInfoEvent =>
+      kvstore.write(new CelebornBuildInfoUIData(e.info.toSeq.sortBy(_._1)))
+      mayUpdate(true)
+    case _: CelebornShuffleAssignmentEvent =>
+      // persisted in step 3
+      mayUpdate(true)
+    case _: CelebornFallbackEvent =>
+      // persisted in step 4
       mayUpdate(true)
     case _ => // ignore unknown events
   }
@@ -75,7 +79,7 @@ class CelebornListener(conf: SparkConf, kvstore: ElementTrackingStore)
     val now = System.nanoTime()
     if (force || now - lastUpdateNanos > TimeUnit.MILLISECONDS.toNanos(updateIntervalMillis)) {
       lastUpdateNanos = now
-      // KVStore writes filled in step 2+
+      // aggregated metric entities (step 5) are written here
     }
   }
 }
