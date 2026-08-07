@@ -41,6 +41,17 @@ private[celeborn] class CelebornStatusStore(val store: ElementTrackingStore) {
     viewToSeq(store.view(classOf[CelebornShuffleAssignmentUIData]))
   }
 
+  /** Per-policy fallback counts snapshot, or empty if no fallback recorded. */
+  def fallbackStats(): CelebornFallbackStatsUIData = {
+    val kClass = classOf[CelebornFallbackStatsUIData]
+    try {
+      store.read(kClass, kClass.getName)
+    } catch {
+      case _: NoSuchElementException =>
+        new CelebornFallbackStatsUIData(new java.util.HashMap[String, java.lang.Long]())
+    }
+  }
+
   private def viewToSeq[T](view: KVStoreView[T]): Seq[T] = {
     import scala.collection.JavaConverters._
     org.apache.spark.util.Utils.tryWithResource(view.closeableIterator())(iter =>

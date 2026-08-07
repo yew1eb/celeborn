@@ -73,8 +73,8 @@ class CelebornListener(conf: SparkConf, kvstore: ElementTrackingStore)
         e.numPartitions,
         e.timestamp))
       mayUpdate(true)
-    case _: CelebornFallbackEvent =>
-      // persisted in step 4
+    case e: CelebornFallbackEvent =>
+      kvstore.write(new CelebornFallbackStatsUIData(e.fallbackCounts))
       mayUpdate(true)
     case _ => // ignore unknown events
   }

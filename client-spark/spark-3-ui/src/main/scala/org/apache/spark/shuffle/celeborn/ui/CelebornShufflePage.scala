@@ -36,6 +36,7 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
   override def render(request: HttpServletRequest): Seq[Node] = {
     val buildInfo = statusStore.buildInfo()
     val assignments = statusStore.assignmentInfos()
+    val fallback = statusStore.fallbackStats()
 
     val summary: Seq[Node] =
       <div>
@@ -48,6 +49,9 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
           </li>
           <li>
             <a href="#assignments">Shuffle Assignments</a> ({assignments.length} shuffles)
+          </li>
+          <li>
+            <a href="#fallback">Fallback Statistics</a>
           </li>
         </ul>
       </div>
@@ -83,6 +87,25 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
         </tbody>
       </table>
 
+    val fallbackRows = fallback.counts.asScala.toSeq.sortBy(_._1).map { case (policy, count) =>
+      <tr>
+        <td>{policy}</td>
+        <td>{count}</td>
+      </tr>
+    }
+    val fallbackTable =
+      <table class="table table-bordered table-striped table-sm">
+        <thead>
+          <tr>
+            <th>Fallback Policy</th>
+            <th>Count</th>
+          </tr>
+        </thead>
+        <tbody>
+          {fallbackRows}
+        </tbody>
+      </table>
+
     val content =
       <div>
         <span>{summary}</span>
@@ -93,7 +116,11 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
         <a name="assignments"></a>
         <h4>
           <strong>Shuffle Assignments</strong>
-        </h4> ++ assignmentTable
+        </h4> ++ assignmentTable ++
+        <a name="fallback"></a>
+        <h4>
+          <strong>Fallback Statistics</strong>
+        </h4> ++ fallbackTable
       </div>
 
     UIUtils.headerSparkPage(request, "Celeborn Shuffle Service", content, parent)

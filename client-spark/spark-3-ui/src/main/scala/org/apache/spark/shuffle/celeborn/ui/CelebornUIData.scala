@@ -42,3 +42,11 @@ private[celeborn] class CelebornShuffleAssignmentUIData(
   @KVIndex
   def id: String = classOf[CelebornShuffleAssignmentUIData].getName + "-" + appShuffleId
 }
+
+/** Snapshot of per-policy fallback counts. Singleton, overwritten on each fallback. */
+private[celeborn] class CelebornFallbackStatsUIData(
+    val counts: java.util.Map[String, java.lang.Long]) {
+  @JsonIgnore
+  @KVIndex
+  def id: String = classOf[CelebornFallbackStatsUIData].getName
+}
