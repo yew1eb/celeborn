@@ -60,7 +60,9 @@ class CelebornListener(conf: SparkConf, kvstore: ElementTrackingStore)
   // persisted on store close / replay end, mirroring AppStatusListener's onFlush hook. Without
   // this, the trailing TaskMetrics would be lost from both the live store rebuild and the
   // HistoryServer replay.
-  kvstore.onFlush(() => mayUpdate(true))
+  kvstore.onFlush {
+    mayUpdate(true)
+  }
 
   override def onStageSubmitted(stageSubmitted: SparkListenerStageSubmitted): Unit = {
     // ShuffleMapStage carries shuffleDepId = the Spark shuffle dependency id; result stages
