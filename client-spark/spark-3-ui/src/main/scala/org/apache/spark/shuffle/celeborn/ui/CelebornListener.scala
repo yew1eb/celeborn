@@ -38,8 +38,6 @@ import org.apache.spark.status.ElementTrackingStore
 class CelebornListener(conf: SparkConf, kvstore: ElementTrackingStore)
   extends SparkListener with Logging {
 
-  import CelebornListener._
-
   // Per-shuffle write aggregation (key = shuffleDepId, only ShuffleMapStage has one).
   private val perShuffleWrite =
     new java.util.concurrent.ConcurrentHashMap[Int, AggregatedShuffleWriteMetric]
@@ -49,9 +47,20 @@ class CelebornListener(conf: SparkConf, kvstore: ElementTrackingStore)
   private val totalReadBytes = new java.util.concurrent.atomic.AtomicLong(0)
   private val totalFetchWaitTimeMs = new java.util.concurrent.atomic.AtomicLong(0)
   private val totalTaskCpuTimeMs = new java.util.concurrent.atomic.AtomicLong(0)
+  // stageId -> shuffleDepId (only ShuffleMapStage has a shuffleDepId). Instance-level (not
+  // companion-object static) so that different applications replayed on a shared HistoryServer
+  // do not cross-contaminate each other's stageId namespace.
+  private val stageToShuffleMappings =
+    new java.util.concurrent.ConcurrentHashMap[Int, Int]()
 
   private val updateIntervalMillis = 5000L
   @volatile private var lastUpdateNanos: Long = -1L
+
+  // Register a final flush so the last <=5s of aggregations (within the throttle window) are
+  // persisted on store close / replay end, mirroring AppStatusListener's onFlush hook. Without
+  // this, the trailing TaskMetrics would be lost from both the live store rebuild and the
+  // HistoryServer replay.
+  kvstore.onFlush(() => mayUpdate(true))
 
   override def onStageSubmitted(stageSubmitted: SparkListenerStageSubmitted): Unit = {
     // ShuffleMapStage carries shuffleDepId = the Spark shuffle dependency id; result stages
@@ -98,7 +107,7 @@ class CelebornListener(conf: SparkConf, kvstore: ElementTrackingStore)
   override def onOtherEvent(event: SparkListenerEvent): Unit = event match {
     case e: CelebornBuildInfoEvent =>
       kvstore.write(new CelebornBuildInfoUIData(e.info.toSeq.sortBy(_._1)))
-      mayUpdate(true)
+      mayUpdate(false)
     case e: CelebornShuffleAssignmentEvent =>
       kvstore.write(new CelebornShuffleAssignmentUIData(
         e.appShuffleId,
@@ -106,11 +115,17 @@ class CelebornListener(conf: SparkConf, kvstore: ElementTrackingStore)
         e.workers,
         e.numPartitions,
         e.timestamp))
-      mayUpdate(true)
+      mayUpdate(false)
     case e: CelebornFallbackEvent =>
       kvstore.write(new CelebornFallbackStatsUIData(e.fallbackCounts))
-      mayUpdate(true)
+      mayUpdate(false)
     case _ => // ignore unknown events
+  }
+
+  override def onApplicationEnd(applicationEnd: SparkListenerApplicationEnd): Unit = {
+    // Force a final flush so the live UI's in-memory aggregations are persisted before the
+    // application context tears down.
+    mayUpdate(true)
   }
 
   /** Throttle KVStore writes: at most one flush per updateIntervalMillis unless force. */
@@ -142,9 +157,6 @@ class CelebornListener(conf: SparkConf, kvstore: ElementTrackingStore)
 }
 
 object CelebornListener extends Logging {
-  // stageId -> shuffleDepId (only ShuffleMapStage has a shuffleDepId)
-  private[ui] val stageToShuffleMappings =
-    new java.util.concurrent.ConcurrentHashMap[Int, Int]()
 
   /** Register a listener to the status queue so its events enter the event log. */
   def register(sc: SparkContext): Unit = {

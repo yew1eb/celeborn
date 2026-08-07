@@ -34,6 +34,27 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
   private val statusStore = parent.statusStore
 
   override def render(request: HttpServletRequest): Seq[Node] = {
+    try {
+      renderBody(request)
+    } catch {
+      case e: Throwable =>
+        logError("Failed to render Celeborn Shuffle page", e)
+        val errorContent =
+          <div class="row-fluid">
+            <div class="span12">
+              <h4>
+                <strong>Celeborn Shuffle Service</strong>
+              </h4>
+              <div class="alert alert-error">
+                <pre>Failed to render the Celeborn page: {e.getMessage}</pre>
+              </div>
+            </div>
+          </div>
+        UIUtils.headerSparkPage(request, "Celeborn Shuffle Service", errorContent, parent)
+    }
+  }
+
+  private def renderBody(request: HttpServletRequest): Seq[Node] = {
     val buildInfo = statusStore.buildInfo()
     val assignments = statusStore.assignmentInfos()
     val fallback = statusStore.fallbackStats()
