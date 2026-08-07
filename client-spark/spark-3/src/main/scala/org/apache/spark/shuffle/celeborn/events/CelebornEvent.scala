@@ -33,19 +33,21 @@ case class CelebornBuildInfoEvent(info: Map[String, String]) extends CelebornEve
 
 /**
  * Posted from SparkShuffleManager.registerShuffle after a successful Celeborn slot assignment,
- *  carrying the shuffle -> worker topology.
+ *  carrying the shuffle -> worker topology. workers is a java.util.List (not Scala Seq) so the
+ *  Java SparkShuffleManager can construct it without Scala collection interop.
  */
 case class CelebornShuffleAssignmentEvent(
     appShuffleId: Int,
     celebornShuffleId: Int,
-    workers: Seq[String],
+    workers: java.util.List[String],
     numPartitions: Int,
     timestamp: Long) extends CelebornEvent
 
 /**
  * Posted from CelebornShuffleFallbackPolicyRunner when a shuffle falls back to
- *  SortShuffleManager, carrying a snapshot of per-policy fallback counts.
+ *  SortShuffleManager, carrying a snapshot of per-policy fallback counts. Counts use
+ *  java.util.Map so Java callers don't need Scala collection interop.
  */
 case class CelebornFallbackEvent(
-    fallbackCounts: Map[String, Long],
+    fallbackCounts: java.util.Map[String, java.lang.Long],
     timestamp: Long) extends CelebornEvent

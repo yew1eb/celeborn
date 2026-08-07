@@ -18,6 +18,7 @@
 package org.apache.spark.shuffle.celeborn.ui
 
 import org.apache.spark.status.ElementTrackingStore
+import org.apache.spark.util.kvstore.KVStoreView
 
 /**
  * Thin wrapper over Spark's status KVStore exposing typed read accessors for the
@@ -33,5 +34,16 @@ private[celeborn] class CelebornStatusStore(val store: ElementTrackingStore) {
     } catch {
       case _: NoSuchElementException => new CelebornBuildInfoUIData(Seq.empty)
     }
+  }
+
+  /** All recorded shuffle assignments (shuffle -> worker topology), newest last. */
+  def assignmentInfos(): Seq[CelebornShuffleAssignmentUIData] = {
+    viewToSeq(store.view(classOf[CelebornShuffleAssignmentUIData]))
+  }
+
+  private def viewToSeq[T](view: KVStoreView[T]): Seq[T] = {
+    import scala.collection.JavaConverters._
+    org.apache.spark.util.Utils.tryWithResource(view.closeableIterator())(iter =>
+      iter.asScala.toList)
   }
 }

@@ -18,6 +18,7 @@
 package org.apache.spark.shuffle.celeborn.ui
 
 import com.fasterxml.jackson.annotation.JsonIgnore
+import org.apache.spark.status.KVUtils.KVIndexParam
 import org.apache.spark.util.kvstore.KVIndex
 
 /**
@@ -28,4 +29,16 @@ private[celeborn] class CelebornBuildInfoUIData(val info: Seq[(String, String)])
   @JsonIgnore
   @KVIndex
   def id: String = classOf[CelebornBuildInfoUIData].getName
+}
+
+/** Per-shuffle assignment record. `appShuffleId` is the natural key (multiple rows). */
+private[celeborn] class CelebornShuffleAssignmentUIData(
+    @KVIndexParam val appShuffleId: Int,
+    val celebornShuffleId: Int,
+    val workers: java.util.List[String],
+    val numPartitions: Int,
+    val timestamp: Long) {
+  @JsonIgnore
+  @KVIndex
+  def id: String = classOf[CelebornShuffleAssignmentUIData].getName + "-" + appShuffleId
 }

@@ -65,8 +65,13 @@ class CelebornListener(conf: SparkConf, kvstore: ElementTrackingStore)
     case e: CelebornBuildInfoEvent =>
       kvstore.write(new CelebornBuildInfoUIData(e.info.toSeq.sortBy(_._1)))
       mayUpdate(true)
-    case _: CelebornShuffleAssignmentEvent =>
-      // persisted in step 3
+    case e: CelebornShuffleAssignmentEvent =>
+      kvstore.write(new CelebornShuffleAssignmentUIData(
+        e.appShuffleId,
+        e.celebornShuffleId,
+        e.workers,
+        e.numPartitions,
+        e.timestamp))
       mayUpdate(true)
     case _: CelebornFallbackEvent =>
       // persisted in step 4

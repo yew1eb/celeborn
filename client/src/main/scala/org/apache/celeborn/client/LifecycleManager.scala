@@ -867,6 +867,11 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
         isSegmentGranularityVisible,
         numPartitions)
 
+      // Notify the driver-side UI listener that slots are reserved for this shuffle so it can
+      // post a CelebornShuffleAssignmentEvent with the worker topology. No-op if no callback
+      // registered (UI disabled).
+      shuffleAssignmentCallback.foreach { cb => cb.accept(shuffleId, numPartitions) }
+
       // Fifth, reply the allocated partition location to ShuffleClient.
       logInfo(s"Handle RegisterShuffle Success for $shuffleId.")
       val allPrimaryPartitionLocations = slots.asScala.flatMap(_._2._1.asScala).toArray
@@ -1992,6 +1997,17 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
   @volatile private var appShuffleTrackerCallback: Option[Consumer[Integer]] = None
   def registerShuffleTrackerCallback(callback: Consumer[Integer]): Unit = {
     appShuffleTrackerCallback = Some(callback)
+  }
+
+  // Fired after a successful slot reservation in handleRegisterShuffle, carrying the
+  // celeborn shuffle id and numPartitions. The driver-side SparkShuffleManager registers a
+  // callback here to post a CelebornShuffleAssignmentEvent (with the allocated worker ids)
+  // to the Spark listener bus for the UI.
+  @volatile private var shuffleAssignmentCallback
+      : Option[BiConsumer[java.lang.Integer, java.lang.Integer]] = None
+  def registerShuffleAssignmentCallback(
+      callback: BiConsumer[java.lang.Integer, java.lang.Integer]): Unit = {
+    shuffleAssignmentCallback = Some(callback)
   }
 
   // expecting celeborn shuffle id and application shuffle identifier

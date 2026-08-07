@@ -27,6 +27,7 @@ import org.apache.spark.internal.config.package$;
 import org.apache.spark.launcher.SparkLauncher;
 import org.apache.spark.rdd.DeterministicLevel;
 import org.apache.spark.shuffle.*;
+import org.apache.spark.shuffle.celeborn.events.CelebornShuffleAssignmentEvent;
 import org.apache.spark.shuffle.sort.SortShuffleManager;
 import org.apache.spark.sql.internal.SQLConf;
 import org.slf4j.Logger;
@@ -162,6 +163,28 @@ public class SparkShuffleManager implements ShuffleManager {
           lifecycleManager = new LifecycleManager(appUniqueId, celebornConf);
           lifecycleManager.applicationCount().increment();
           lifecycleManager.registerCancelShuffleCallback(SparkUtils::cancelShuffle);
+          if (celebornConf.clientSparkUIEnabled()) {
+            lifecycleManager.registerShuffleAssignmentCallback(
+                (shuffleId, numPartitions) -> {
+                  SparkContext sc = SparkContext$.MODULE$.getActive().getOrElse(null);
+                  if (sc != null) {
+                    java.util.Map<String, ?> workers =
+                        lifecycleManager.shuffleAllocatedWorkers().get(shuffleId);
+                    java.util.List<String> workerIds = new java.util.ArrayList<>();
+                    if (workers != null) {
+                      workerIds.addAll(workers.keySet());
+                    }
+                    sc.listenerBus()
+                        .post(
+                            new CelebornShuffleAssignmentEvent(
+                                shuffleId,
+                                shuffleId,
+                                workerIds,
+                                numPartitions,
+                                System.currentTimeMillis()));
+                  }
+                });
+          }
           if (celebornConf.clientStageRerunEnabled()) {
             MapOutputTrackerMaster mapOutputTracker =
                 (MapOutputTrackerMaster) SparkEnv.get().mapOutputTracker();
