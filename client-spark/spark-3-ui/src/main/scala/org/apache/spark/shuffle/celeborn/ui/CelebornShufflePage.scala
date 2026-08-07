@@ -183,30 +183,18 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
         </tbody>
       </table>
 
-    val content =
-      <div>
-        <span>{summary}</span>
-        <a name="buildinfo"></a>
-        <h4>
-          <strong>Build Information</strong>
-        </h4> ++ buildInfoTable ++
-        <a name="assignments"></a>
-        <h4>
-          <strong>Shuffle Assignments</strong>
-        </h4> ++ assignmentTable ++
-        <a name="fallback"></a>
-        <h4>
-          <strong>Fallback Statistics</strong>
-        </h4> ++ fallbackTable ++
-        <a name="throughput"></a>
-        <h4>
-          <strong>Shuffle Throughput</strong>
-        </h4> ++ throughputTable ++
-        <a name="write"></a>
-        <h4>
-          <strong>Per-shuffle Write Metrics</strong>
-        </h4> ++ writeTable
-      </div>
+    val content: Seq[Node] =
+      <div><span>{summary}</span></div> ++
+        <a name="buildinfo"></a> ++
+        <h4><strong>Build Information</strong></h4> ++ buildInfoTable ++
+        <a name="assignments"></a> ++
+        <h4><strong>Shuffle Assignments</strong></h4> ++ assignmentTable ++
+        <a name="fallback"></a> ++
+        <h4><strong>Fallback Statistics</strong></h4> ++ fallbackTable ++
+        <a name="throughput"></a> ++
+        <h4><strong>Shuffle Throughput</strong></h4> ++ throughputTable ++
+        <a name="write"></a> ++
+        <h4><strong>Per-shuffle Write Metrics</strong></h4> ++ writeTable
 
     UIUtils.headerSparkPage(request, "Celeborn Shuffle Service", content, parent)
   }
@@ -214,6 +202,8 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
   private def propertyHeader: Seq[String] = Seq("Property", "Value")
 
   private def propertyRow(kv: (String, String)): Seq[Node] =
-    <td>{kv._1}</td>
+    <tr>
+      <td>{kv._1}</td>
       <td>{kv._2}</td>
+    </tr>
 }

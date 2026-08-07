@@ -31,17 +31,17 @@ private[celeborn] class CelebornBuildInfoUIData(val info: Seq[(String, String)])
   def id: String = classOf[CelebornBuildInfoUIData].getName
 }
 
-/** Per-shuffle assignment record. `appShuffleId` is the natural key (multiple rows). */
+/**
+ * Per-shuffle assignment record. `appShuffleId` is the natural key (multiple rows).
+ *  @KVIndexParam makes appShuffleId the primary index; no separate @KVIndex id needed
+ *  (having both causes "Duplicate index __main__").
+ */
 private[celeborn] class CelebornShuffleAssignmentUIData(
     @KVIndexParam val appShuffleId: Int,
     val celebornShuffleId: Int,
     val workers: java.util.List[String],
     val numPartitions: Int,
-    val timestamp: Long) {
-  @JsonIgnore
-  @KVIndex
-  def id: String = classOf[CelebornShuffleAssignmentUIData].getName + "-" + appShuffleId
-}
+    val timestamp: Long)
 
 /** Snapshot of per-policy fallback counts. Singleton, overwritten on each fallback. */
 private[celeborn] class CelebornFallbackStatsUIData(

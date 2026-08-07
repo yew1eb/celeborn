@@ -21,39 +21,54 @@ import java.util.{Collections, LinkedHashMap => JLinkedHashMap}
 
 import scala.collection.JavaConverters._
 
-import org.apache.spark.{SparkConf, SparkContext}
+import org.apache.spark.SparkContext
 import org.apache.spark.api.plugin.{DriverPlugin, PluginContext}
 import org.apache.spark.internal.Logging
 import org.apache.spark.shuffle.celeborn.events.CelebornBuildInfoEvent
 
 /**
- * Driver-side plugin. On init it registers the Celeborn listener to the status queue,
- *  attaches the Celeborn UI tab, and posts a build-info event. The LifecycleManager is
- *  created lazily later in [[org.apache.spark.shuffle.celeborn.SparkShuffleManager.registerShuffle]],
- *  so build info only carries SparkConf-derivable data; shuffle topology and fallback
- *  stats arrive later via assignment/fallback events.
+ * Driver-side plugin. [[init]] registers the Celeborn listener to the status queue and posts a
+ *  build-info event — these don't touch the Jetty server, so they are safe to run during plugin
+ *  init (before SparkContext.attachAllHandlers). The UI tab is attached later in
+ *  [[registerMetrics]], which Spark invokes AFTER attachAllHandlers, so the tab's page
+ *  servlets are added once the server is fully started and Spark's own handlers are in place
+ *  (mirrors Gluten's attachUI timing — see SubstraitBackend.registerMetrics). Attaching during
+ *  init would race attachAllHandlers and throw IllegalStateException: STARTED on some Spark
+ *  builds.
  */
 class CelebornDriverPlugin extends DriverPlugin with Logging {
+  private var _sc: Option[SparkContext] = None
 
   override def init(
       sc: SparkContext,
       ctx: PluginContext): java.util.Map[String, String] = {
+    _sc = Some(sc)
     if (CelebornUIUtils.isUIEnabled(sc.conf)) {
       CelebornListener.register(sc)
-      CelebornUIUtils.attachUI(sc)
-      sc.listenerBus.post(CelebornBuildInfoEvent(buildInfoMap(sc)))
     } else {
       logInfo("Celeborn Spark UI extension is disabled, skipping.")
     }
     Collections.emptyMap[String, String]
   }
 
+  override def registerMetrics(appId: String, ctx: PluginContext): Unit = {
+    _sc.foreach { sc =>
+      if (CelebornUIUtils.isUIEnabled(sc.conf)) {
+        // registerMetrics runs after SparkContext is fully initialized, so applicationId is
+        // available here (it's null during init). Post the build-info event now and attach UI.
+        sc.listenerBus.post(CelebornBuildInfoEvent(buildInfoMap(sc, appId)))
+        CelebornUIUtils.attachUI(sc)
+      }
+    }
+  }
+
   override def shutdown(): Unit = {}
 
-  private def buildInfoMap(sc: SparkContext): Map[String, String] = {
+  private def buildInfoMap(sc: SparkContext, appId: String): Map[String, String] = {
     val info = new JLinkedHashMap[String, String]()
     info.put("Spark Version", sc.version)
-    info.put("Application Id", sc.applicationId)
+    // Prefer the appId passed to registerMetrics (reliable); fall back to sc.applicationId.
+    info.put("Application Id", Option(appId).filter(_.nonEmpty).getOrElse(sc.applicationId))
     info.put("Celeborn UI Enabled", "true")
     info.asScala.toMap
   }
