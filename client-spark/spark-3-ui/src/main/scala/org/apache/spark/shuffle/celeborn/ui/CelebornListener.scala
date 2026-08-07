@@ -40,6 +40,16 @@ class CelebornListener(conf: SparkConf, kvstore: ElementTrackingStore)
 
   import CelebornListener._
 
+  // Per-shuffle write aggregation (key = shuffleDepId, only ShuffleMapStage has one).
+  private val perShuffleWrite =
+    new java.util.concurrent.ConcurrentHashMap[Int, AggregatedShuffleWriteMetric]
+  // Global totals (write + read) across all tasks.
+  private val totalWriteBytes = new java.util.concurrent.atomic.AtomicLong(0)
+  private val totalWriteTimeMs = new java.util.concurrent.atomic.AtomicLong(0)
+  private val totalReadBytes = new java.util.concurrent.atomic.AtomicLong(0)
+  private val totalFetchWaitTimeMs = new java.util.concurrent.atomic.AtomicLong(0)
+  private val totalTaskCpuTimeMs = new java.util.concurrent.atomic.AtomicLong(0)
+
   private val updateIntervalMillis = 5000L
   @volatile private var lastUpdateNanos: Long = -1L
 
@@ -57,8 +67,32 @@ class CelebornListener(conf: SparkConf, kvstore: ElementTrackingStore)
   }
 
   override def onTaskEnd(taskEnd: SparkListenerTaskEnd): Unit = {
+    val tm = taskEnd.taskMetrics
+    if (tm != null) {
+      val write = tm.shuffleWriteMetrics
+      val read = tm.shuffleReadMetrics
+      // Write: per-shuffle (ShuffleMapStage only) + global. Read: global only (result stage
+      // has no shuffleDepId, so per-shuffle attribution is unreliable per plan A).
+      totalWriteBytes.addAndGet(write.bytesWritten)
+      totalWriteTimeMs.addAndGet(write.writeTime / 1000000)
+      totalReadBytes.addAndGet(read.remoteBytesRead + read.localBytesRead)
+      totalFetchWaitTimeMs.addAndGet(read.fetchWaitTime)
+      if (taskEnd.taskInfo != null) {
+        totalTaskCpuTimeMs.addAndGet(taskEnd.taskInfo.duration)
+      }
+      // ShuffleMapTask carries shuffle write; ShuffleMapStage has a shuffleDepId mapped above.
+      if (stageToShuffleMappings.containsKey(taskEnd.stageId)
+        && taskEnd.taskType == "ShuffleMapTask") {
+        val shuffleId = stageToShuffleMappings.get(taskEnd.stageId)
+        val metric = perShuffleWrite.computeIfAbsent(
+          shuffleId,
+          _ => new AggregatedShuffleWriteMetric(0L, 0L, 0L))
+        metric.bytesWritten += write.bytesWritten
+        metric.recordsWritten += write.recordsWritten
+        metric.writeTimeMs += write.writeTime / 1000000
+      }
+    }
     mayUpdate(false)
-    // Per-shuffle write + global read/write metric aggregation is filled in step 5.
   }
 
   override def onOtherEvent(event: SparkListenerEvent): Unit = event match {
@@ -84,8 +118,26 @@ class CelebornListener(conf: SparkConf, kvstore: ElementTrackingStore)
     val now = System.nanoTime()
     if (force || now - lastUpdateNanos > TimeUnit.MILLISECONDS.toNanos(updateIntervalMillis)) {
       lastUpdateNanos = now
-      // aggregated metric entities (step 5) are written here
+      flushAggregations()
     }
+  }
+
+  /** Snapshot the in-memory aggregations into the KVStore. */
+  private def flushAggregations(): Unit = {
+    import scala.collection.JavaConverters._
+    val writeSnapshot = new java.util.HashMap[Int, AggregatedShuffleWriteMetric]()
+    perShuffleWrite.asScala.foreach { case (k, v) =>
+      writeSnapshot.put(
+        k,
+        new AggregatedShuffleWriteMetric(v.bytesWritten, v.recordsWritten, v.writeTimeMs))
+    }
+    kvstore.write(new CelebornAggregatedWriteMetricsUIData(writeSnapshot))
+    kvstore.write(new CelebornAggregatedTaskInfoUIData(
+      totalWriteBytes.get(),
+      totalWriteTimeMs.get(),
+      totalReadBytes.get(),
+      totalFetchWaitTimeMs.get(),
+      totalTaskCpuTimeMs.get()))
   }
 }
 

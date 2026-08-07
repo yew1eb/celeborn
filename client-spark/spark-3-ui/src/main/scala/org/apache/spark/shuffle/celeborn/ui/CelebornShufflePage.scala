@@ -37,6 +37,8 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
     val buildInfo = statusStore.buildInfo()
     val assignments = statusStore.assignmentInfos()
     val fallback = statusStore.fallbackStats()
+    val writeMetrics = statusStore.aggregatedWriteMetrics()
+    val taskInfo = statusStore.aggregatedTaskInfo()
 
     val summary: Seq[Node] =
       <div>
@@ -52,6 +54,12 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
           </li>
           <li>
             <a href="#fallback">Fallback Statistics</a>
+          </li>
+          <li>
+            <a href="#throughput">Shuffle Throughput</a>
+          </li>
+          <li>
+            <a href="#write">Per-shuffle Write Metrics</a>
           </li>
         </ul>
       </div>
@@ -106,6 +114,54 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
         </tbody>
       </table>
 
+    val throughputRows = Seq(
+      ("Total Shuffle Write Bytes", taskInfo.shuffleWriteBytes),
+      ("Total Shuffle Write Time (ms)", taskInfo.shuffleWriteTimeMs),
+      ("Total Shuffle Read Bytes", taskInfo.shuffleReadBytes),
+      ("Total Fetch Wait Time (ms)", taskInfo.shuffleFetchWaitTimeMs),
+      ("Total Task CPU Time (ms)", taskInfo.taskCpuTimeMs))
+    val throughputRowsXml = throughputRows.map { case (label, value) =>
+      <tr>
+        <td>{label}</td>
+        <td>{value.toString}</td>
+      </tr>
+    }
+    val throughputTable =
+      <table class="table table-bordered table-striped table-sm">
+        <thead>
+          <tr>
+            <th>Metric</th>
+            <th>Value</th>
+          </tr>
+        </thead>
+        <tbody>
+          {throughputRowsXml}
+        </tbody>
+      </table>
+
+    val writeRows = writeMetrics.metrics.asScala.toSeq.sortBy(_._1).map { case (sid, m) =>
+      <tr>
+        <td>{sid}</td>
+        <td>{org.apache.spark.util.Utils.bytesToString(m.bytesWritten)}</td>
+        <td>{m.recordsWritten}</td>
+        <td>{m.writeTimeMs}</td>
+      </tr>
+    }
+    val writeTable =
+      <table class="table table-bordered table-striped table-sm">
+        <thead>
+          <tr>
+            <th>Shuffle Id</th>
+            <th>Bytes Written</th>
+            <th>Records Written</th>
+            <th>Write Time (ms)</th>
+          </tr>
+        </thead>
+        <tbody>
+          {writeRows}
+        </tbody>
+      </table>
+
     val content =
       <div>
         <span>{summary}</span>
@@ -120,7 +176,15 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
         <a name="fallback"></a>
         <h4>
           <strong>Fallback Statistics</strong>
-        </h4> ++ fallbackTable
+        </h4> ++ fallbackTable ++
+        <a name="throughput"></a>
+        <h4>
+          <strong>Shuffle Throughput</strong>
+        </h4> ++ throughputTable ++
+        <a name="write"></a>
+        <h4>
+          <strong>Per-shuffle Write Metrics</strong>
+        </h4> ++ writeTable
       </div>
 
     UIUtils.headerSparkPage(request, "Celeborn Shuffle Service", content, parent)

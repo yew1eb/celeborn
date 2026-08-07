@@ -52,6 +52,29 @@ private[celeborn] class CelebornStatusStore(val store: ElementTrackingStore) {
     }
   }
 
+  /** Per-shuffle write metrics snapshot, or empty if none recorded. */
+  def aggregatedWriteMetrics(): CelebornAggregatedWriteMetricsUIData = {
+    val kClass = classOf[CelebornAggregatedWriteMetricsUIData]
+    try {
+      store.read(kClass, kClass.getName)
+    } catch {
+      case _: NoSuchElementException =>
+        new CelebornAggregatedWriteMetricsUIData(new java.util.HashMap[
+          Int,
+          AggregatedShuffleWriteMetric]())
+    }
+  }
+
+  /** Global read/write totals snapshot, or zeros if none recorded. */
+  def aggregatedTaskInfo(): CelebornAggregatedTaskInfoUIData = {
+    val kClass = classOf[CelebornAggregatedTaskInfoUIData]
+    try {
+      store.read(kClass, kClass.getName)
+    } catch {
+      case _: NoSuchElementException => new CelebornAggregatedTaskInfoUIData(0L, 0L, 0L, 0L, 0L)
+    }
+  }
+
   private def viewToSeq[T](view: KVStoreView[T]): Seq[T] = {
     import scala.collection.JavaConverters._
     org.apache.spark.util.Utils.tryWithResource(view.closeableIterator())(iter =>

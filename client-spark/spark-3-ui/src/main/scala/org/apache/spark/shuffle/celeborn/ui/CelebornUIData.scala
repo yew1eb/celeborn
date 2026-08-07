@@ -50,3 +50,34 @@ private[celeborn] class CelebornFallbackStatsUIData(
   @KVIndex
   def id: String = classOf[CelebornFallbackStatsUIData].getName
 }
+
+/** Per-shuffle write metrics aggregated from onTaskEnd TaskMetrics. Keyed by shuffleDepId. */
+private[celeborn] class CelebornAggregatedWriteMetricsUIData(
+    val metrics: java.util.Map[Int, AggregatedShuffleWriteMetric]) {
+  @JsonIgnore
+  @KVIndex
+  def id: String = classOf[CelebornAggregatedWriteMetricsUIData].getName
+}
+
+/**
+ * Per-shuffle write metrics (sourced from Spark native ShuffleWriteMetrics).
+ *  Mutable fields updated by the single status-queue thread; serialized as a snapshot.
+ */
+private[celeborn] class AggregatedShuffleWriteMetric(
+    var bytesWritten: Long,
+    var recordsWritten: Long,
+    var writeTimeMs: Long) {
+  def this() = this(0L, 0L, 0L)
+}
+
+/** Global read/write totals aggregated from onTaskEnd TaskMetrics. Singleton. */
+private[celeborn] class CelebornAggregatedTaskInfoUIData(
+    val shuffleWriteBytes: Long,
+    val shuffleWriteTimeMs: Long,
+    val shuffleReadBytes: Long,
+    val shuffleFetchWaitTimeMs: Long,
+    val taskCpuTimeMs: Long) {
+  @JsonIgnore
+  @KVIndex
+  def id: String = classOf[CelebornAggregatedTaskInfoUIData].getName
+}
