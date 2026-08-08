@@ -51,6 +51,7 @@ import org.apache.celeborn.common.network.protocol.{SerdeVersion, TransportMessa
 import org.apache.celeborn.common.network.sasl.registration.RegistrationInfo
 import org.apache.celeborn.common.protocol._
 import org.apache.celeborn.common.protocol.RpcNameConstants.WORKER_EP
+import org.apache.celeborn.common.protocol.message.{PushWorkerStats, WriteMetrics}
 import org.apache.celeborn.common.protocol.message.ControlMessages._
 import org.apache.celeborn.common.protocol.message.StatusCode
 import org.apache.celeborn.common.rpc._
@@ -460,7 +461,9 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
             numPartitions,
             crc32PerPartition,
             bytesWrittenPerPartition,
-            serdeVersion)
+            serdeVersion,
+            writeMetrics,
+            pushWorkerStats)
         case PartitionType.MAP =>
           handleMapPartitionEnd(
             context,
@@ -951,7 +954,15 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
       numPartitions: Int,
       crc32PerPartition: Array[Int],
       bytesWrittenPerPartition: Array[Long],
-      serdeVersion: SerdeVersion): Unit = {
+      serdeVersion: SerdeVersion,
+      writeMetrics: Option[WriteMetrics],
+      pushWorkerStats: util.List[PushWorkerStats]): Unit = {
+    // Forward write-path timing breakdown + per-worker push stats to the driver-side UI
+    // listener (registered by SparkShuffleManager). No aggregation here — the listener
+    // accumulates per-shuffle, matching the assignment/fallback event pattern.
+    writeMetrics.foreach { w =>
+      mapperEndMetricsCallback.foreach { cb => cb.apply(shuffleId, w, pushWorkerStats) }
+    }
 
     val (mapperAttemptFinishedSuccess, allMapperFinished) =
       commitManager.finishMapperAttempt(
@@ -2028,6 +2039,25 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
   def registerReassignCallback(
       callback: java.util.function.Consumer[java.util.List[java.lang.Boolean]]): Unit = {
     reassignCallback = Some(callback)
+  }
+
+  // Fired from handleMapperEnd when the executor populated write metrics (UI enabled), carrying
+  // the shuffleId + write-path timing breakdown + per-worker push stats. The driver-side
+  // SparkShuffleManager registers a callback that posts a CelebornWriteMetricsEvent to the Spark
+  // listener bus. Function3 so the 3 args flow without a wrapper tuple (Java implements
+  // scala.Function3).
+  @volatile private var mapperEndMetricsCallback: Option[scala.Function3[
+    java.lang.Integer,
+    WriteMetrics,
+    util.List[PushWorkerStats],
+    Unit]] = None
+  def registerMapperEndMetricsCallback(
+      callback: scala.Function3[
+        java.lang.Integer,
+        WriteMetrics,
+        util.List[PushWorkerStats],
+        Unit]): Unit = {
+    mapperEndMetricsCallback = Some(callback)
   }
 
   /**
