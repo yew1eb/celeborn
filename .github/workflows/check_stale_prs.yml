@@ -34,10 +34,13 @@ jobs:
     permissions:
       pull-requests: write
     steps:
-      - uses: actions/stale@v5
+      - uses: actions/stale@v9
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
+          # Only govern PRs; issue lifecycle is left to maintainers.
+          days-before-issue-stale: -1
+          days-before-issue-close: -1
           days-before-pr-stale: 20
           days-before-pr-close: 10
-          stale-pr-message: 'This PR is stale because it has been open 20 days with no activity. Remove stale label or comment or this will be closed in 10 days.'
-          close-pr-message: 'This issue was closed because it has been staled for 10 days with no activity.'
+          stale-pr-message: 'This PR is stale because it has been open 20 days with no activity. Remove the stale label or comment, or this will be closed in 10 days.'
+          close-pr-message: 'This PR was closed because it has been stale for 10 days with no activity.'

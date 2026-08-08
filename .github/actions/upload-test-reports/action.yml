@@ -1,0 +1,50 @@
+#
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+name: Upload test reports
+description: >
+  Always upload surefire/junit XML reports (consumed by test-results.yml to publish per-PR test summaries)
+  and, on failure, upload the full test logs. Shared by maven.yml / sbt.yml jobs.
+
+inputs:
+  artifact-name:
+    description: Base name for the uploaded artifacts (a `-log` suffix is appended for failure logs).
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Upload test reports
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: |
+          **/target/surefire-reports/**/*.xml
+          **/target/test-reports/**/*.xml
+        if-no-files-found: ignore
+      continue-on-error: true
+    - name: Upload test log
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}-log
+        path: |
+          **/target/test-reports/**
+          **/target/unit-tests.log
+        if-no-files-found: ignore
+      continue-on-error: true

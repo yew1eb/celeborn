@@ -15,7 +15,6 @@
 # limitations under the License.
 #
 
-
 name: Celeborn SBT CI
 
 on:
@@ -27,13 +26,67 @@ on:
     branches:
       - main
       - branch-*
+    paths-ignore:
+      # Pure documentation / metadata changes do not affect the build.
+      - '**/*.md'
+      - 'docs/**'
+      - 'assets/diagram/**'
+      - 'LICENSE'
+      - 'NOTICE'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Detects which top-level modules changed so that per-module test jobs can be skipped
+  # when unrelated files are touched. See maven.yml for the same setup.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      service: ${{ steps.filter.outputs.service }}
+      spark: ${{ steps.filter.outputs.spark }}
+      flink: ${{ steps.filter.outputs.flink }}
+      mr: ${{ steps.filter.outputs.mr }}
+      common: ${{ steps.filter.outputs.common }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d
+        id: filter
+        with:
+          filters: |
+            service:
+              - 'service/**'
+            spark:
+              - 'client-spark/**'
+              - 'assets/spark-patch/**'
+            flink:
+              - 'client-flink/**'
+            mr:
+              - 'client-mr/**'
+              - 'client-tez/**'
+            common:
+              - 'common/**'
+              - 'spi/**'
+              - 'build/**'
+              - 'project/**'
+              - '**/pom.xml'
+              - '.mvn/**'
+              - 'version.sbt'
+
+  event_file:
+    name: "Event File"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: Event File
+          path: ${{ github.event_path }}
+
   service:
+    needs: changes
+    if: needs.changes.outputs.service == 'true' || needs.changes.outputs.common == 'true' || github.event_name == 'push'
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
@@ -46,26 +99,21 @@ jobs:
           - '2.12.18'
           - '2.13.16'
     steps:
-    - uses: actions/checkout@v4
-    - name: Setup JDK ${{ matrix.java }}
-      uses: actions/setup-java@v4
-      with:
-        distribution: zulu
-        java-version: ${{ matrix.java }}
-        check-latest: false
-    - name: Test Service with SBT
-      run: |
-        build/sbt ++${{ matrix.scala }} "clean; test"
-    - name: Upload test log
-      if: failure()
-      uses: actions/upload-artifact@v4
-      with:
-          name: service-java-${{ matrix.java }}-scala-${{ matrix.scala }}-unit-test-log
-          path: |
-              **/target/test-reports/**
-              **/target/unit-tests.log
+      - uses: ./.github/actions/setup-test
+        with:
+          java-version: ${{ matrix.java }}
+          cache: sbt
+      - name: Test Service with SBT
+        run: |
+          build/sbt ++${{ matrix.scala }} "clean; test"
+      - uses: ./.github/actions/upload-test-reports
+        if: always()
+        with:
+          artifact-name: service-java-${{ matrix.java }}-scala-${{ matrix.scala }}
 
   spark3:
+    needs: changes
+    if: needs.changes.outputs.spark == 'true' || needs.changes.outputs.common == 'true' || github.event_name == 'push'
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
@@ -150,26 +198,21 @@ jobs:
             scala-binary: '2.13'
             scala: '2.13.8'
     steps:
-    - uses: actions/checkout@v4
-    - name: Setup JDK ${{ matrix.java }}
-      uses: actions/setup-java@v4
-      with:
-        distribution: zulu
-        java-version: ${{ matrix.java }}
-        check-latest: false
-    - name: Test with SBT
-      run: |
-        build/sbt -Dspark.shuffle.plugin.class=${{ matrix.shuffle-plugin-class }} -Pspark-${{ matrix.spark }} ++${{ matrix.scala }} "clean; celeborn-spark-group/test"
-    - name: Upload test log
-      if: failure()
-      uses: actions/upload-artifact@v4
-      with:
-          name: spark-${{ matrix.spark }}-java-${{ matrix.java }}-scala-${{ matrix.scala }}-unit-test-log
-          path: |
-              **/target/test-reports/**
-              **/target/unit-tests.log
+      - uses: ./.github/actions/setup-test
+        with:
+          java-version: ${{ matrix.java }}
+          cache: sbt
+      - name: Test with SBT
+        run: |
+          build/sbt -Dspark.shuffle.plugin.class=${{ matrix.shuffle-plugin-class }} -Pspark-${{ matrix.spark }} ++${{ matrix.scala }} "clean; celeborn-spark-group/test"
+      - uses: ./.github/actions/upload-test-reports
+        if: always()
+        with:
+          artifact-name: spark-${{ matrix.spark }}-java-${{ matrix.java }}-scala-${{ matrix.scala }}
 
   spark4:
+    needs: changes
+    if: needs.changes.outputs.spark == 'true' || needs.changes.outputs.common == 'true' || github.event_name == 'push'
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
@@ -192,26 +235,21 @@ jobs:
           - spark: '4.2'
             scala: '2.13.18'
     steps:
-      - uses: actions/checkout@v4
-      - name: Setup JDK ${{ matrix.java }}
-        uses: actions/setup-java@v4
+      - uses: ./.github/actions/setup-test
         with:
-          distribution: zulu
           java-version: ${{ matrix.java }}
-          check-latest: false
+          cache: sbt
       - name: Test with SBT
         run: |
           build/sbt -Dspark.shuffle.plugin.class=${{ matrix.shuffle-plugin-class }} -Pspark-${{ matrix.spark }} ++${{ matrix.scala }} "clean; celeborn-spark-group/test"
-      - name: Upload test log
-        if: failure()
-        uses: actions/upload-artifact@v4
+      - uses: ./.github/actions/upload-test-reports
+        if: always()
         with:
-          name: spark-${{ matrix.spark }}-java-${{ matrix.java }}-scala-${{ matrix.scala }}-unit-test-log
-          path: |
-            **/target/test-reports/**
-            **/target/unit-tests.log
+          artifact-name: spark-${{ matrix.spark }}-java-${{ matrix.java }}-scala-${{ matrix.scala }}
 
   flink1:
+    needs: changes
+    if: needs.changes.outputs.flink == 'true' || needs.changes.outputs.common == 'true' || github.event_name == 'push'
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
@@ -224,26 +262,21 @@ jobs:
           - '1.19'
           - '1.20'
     steps:
-      - uses: actions/checkout@v4
-      - name: Setup JDK ${{ matrix.java }}
-        uses: actions/setup-java@v4
+      - uses: ./.github/actions/setup-test
         with:
-          distribution: zulu
           java-version: ${{ matrix.java }}
-          check-latest: false
+          cache: sbt
       - name: Test with SBT
         run: |
           build/sbt -Pflink-${{ matrix.flink }} "clean; celeborn-flink-group/test"
-      - name: Upload test log
-        if: failure()
-        uses: actions/upload-artifact@v4
+      - uses: ./.github/actions/upload-test-reports
+        if: always()
         with:
-            name: flink-${{ matrix.flink }}-java-${{ matrix.java }}-unit-test-log
-            path: |
-                **/target/test-reports/**
-                **/target/unit-tests.log
+          artifact-name: flink-${{ matrix.flink }}-java-${{ matrix.java }}
 
   flink2:
+    needs: changes
+    if: needs.changes.outputs.flink == 'true' || needs.changes.outputs.common == 'true' || github.event_name == 'push'
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
@@ -257,26 +290,21 @@ jobs:
           - '2.2'
           - '2.3'
     steps:
-      - uses: actions/checkout@v4
-      - name: Setup JDK ${{ matrix.java }}
-        uses: actions/setup-java@v4
+      - uses: ./.github/actions/setup-test
         with:
-          distribution: zulu
           java-version: ${{ matrix.java }}
-          check-latest: false
+          cache: sbt
       - name: Test with SBT
         run: |
           build/sbt -Pflink-${{ matrix.flink }} "clean; celeborn-flink-group/test"
-      - name: Upload test log
-        if: failure()
-        uses: actions/upload-artifact@v4
+      - uses: ./.github/actions/upload-test-reports
+        if: always()
         with:
-          name: flink-${{ matrix.flink }}-java-${{ matrix.java }}-unit-test-log
-          path: |
-            **/target/test-reports/**
-            **/target/unit-tests.log
+          artifact-name: flink-${{ matrix.flink }}-java-${{ matrix.java }}
 
   mr:
+    needs: changes
+    if: needs.changes.outputs.mr == 'true' || needs.changes.outputs.common == 'true' || github.event_name == 'push'
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
@@ -285,25 +313,17 @@ jobs:
           - 8
           - 11
     steps:
-      - uses: actions/checkout@v4
-      - name: Setup JDK ${{ matrix.java }}
-        uses: actions/setup-java@v4
+      - uses: ./.github/actions/setup-test
         with:
-          distribution: zulu
           java-version: ${{ matrix.java }}
-          check-latest: false
+          cache: sbt
       - name: Test with SBT
         run: |
           build/sbt -Pmr "clean; celeborn-mr-group/test"
-      - name: Upload test log
-        if: failure()
-        uses: actions/upload-artifact@v4
+      - uses: ./.github/actions/upload-test-reports
+        if: always()
         with:
-          name: mr-java-${{ matrix.java }}-unit-test-log
-          path: |
-            **/target/test/
-            **/target/test-reports/**
-            **/target/unit-tests.log
+          artifact-name: mr-java-${{ matrix.java }}
 
   openapi-codegen-check:
     runs-on: ubuntu-22.04
@@ -313,13 +333,10 @@ jobs:
         java:
           - 11
     steps:
-      - uses: actions/checkout@v4
-      - name: Setup JDK ${{ matrix.java }}
-        uses: actions/setup-java@v4
+      - uses: ./.github/actions/setup-test
         with:
-          distribution: zulu
           java-version: ${{ matrix.java }}
-          check-latest: false
+          cache: sbt
       - name: Test with SBT
         run: |
           build/sbt "clean;celeborn-openapi-client/check"
