@@ -377,6 +377,31 @@ message PbMapperEnd {
   int32 numPartitions = 7;
   repeated int32 crc32PerPartition = 8;
   repeated int64 bytesWrittenPerPartition = 9;
+  // Write-path timing breakdown (ms) for the UI. Optional — populated only when
+  // celeborn.client.spark.ui.enabled. Field numbers 10-19 reserved for write times.
+  int64 copyTimeMs = 10;
+  int64 serializeTimeMs = 11;
+  int64 compressTimeMs = 12;
+  int64 queueWaitTimeMs = 13;
+  int64 queueStallTimeMs = 14;
+  int64 inflightWaitTimeMs = 15;
+  int64 drainWaitTimeMs = 16;
+  int64 slowPushCount = 17;
+  int64 maxPushRttMs = 18;
+  repeated PbPushWorkerStats pushWorkerStats = 19;
+}
+
+// Per-(shuffle,mapId,attemptId,worker) push cost for the UI's Shuffle Servers section.
+message PbPushWorkerStats {
+  string workerId = 1;
+  int64 pushCount = 2;
+  int64 pushBytes = 3;
+  int64 totalPushRttNanos = 4;
+  int64 softSplitCount = 5;
+  int64 hardSplitCount = 6;
+  int64 primaryCongestedCount = 7;
+  int64 replicaCongestedCount = 8;
+  string lastPushFailureReason = 9;
 }
 
 message PbLocationPushFailedBatches {

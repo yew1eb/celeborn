@@ -52,6 +52,31 @@ sealed trait WorkerMessage extends Message
 
 sealed trait ClientMessage extends Message
 
+// Write-path timing breakdown carried in MapperEnd for the UI (all in ms). Populated only
+// when celeborn.client.spark.ui.enabled.
+case class WriteMetrics(
+    copyTimeMs: Long,
+    serializeTimeMs: Long,
+    compressTimeMs: Long,
+    queueWaitTimeMs: Long,
+    queueStallTimeMs: Long,
+    inflightWaitTimeMs: Long,
+    drainWaitTimeMs: Long,
+    slowPushCount: Long,
+    maxPushRttMs: Long)
+
+// Per-(shuffle,mapId,attemptId,worker) push cost carried in MapperEnd for the UI.
+case class PushWorkerStats(
+    workerId: String,
+    pushCount: Long,
+    pushBytes: Long,
+    totalPushRttNanos: Long,
+    softSplitCount: Long,
+    hardSplitCount: Long,
+    primaryCongestedCount: Long,
+    replicaCongestedCount: Long,
+    lastPushFailureReason: String)
+
 object ControlMessages extends Logging {
   val ZERO_UUID = new UUID(0L, 0L).toString
 
@@ -218,7 +243,9 @@ object ControlMessages extends Logging {
       numPartitions: Int,
       crc32PerPartition: Array[Int],
       bytesWrittenPerPartition: Array[Long],
-      serdeVersion: SerdeVersion)
+      serdeVersion: SerdeVersion,
+      writeMetrics: Option[WriteMetrics] = None,
+      pushWorkerStats: util.List[PushWorkerStats] = util.Collections.emptyList())
     extends MasterMessage
 
   case class ReadReducerPartitionEnd(
@@ -737,12 +764,14 @@ object ControlMessages extends Logging {
           numPartitions,
           crc32PerPartition,
           bytesWrittenPerPartition,
-          serdeVersion) =>
+          serdeVersion,
+          writeMetrics,
+          pushWorkerStats) =>
       val pushFailedMap = pushFailedBatch.asScala.map { case (k, v) =>
         val resultValue = PbSerDeUtils.toPbLocationPushFailedBatches(v)
         (k, resultValue)
       }.toMap.asJava
-      val payload = PbMapperEnd.newBuilder()
+      val builder = PbMapperEnd.newBuilder()
         .setShuffleId(shuffleId)
         .setMapId(mapId)
         .setAttemptId(attemptId)
@@ -753,7 +782,32 @@ object ControlMessages extends Logging {
         .addAllCrc32PerPartition(crc32PerPartition.map(Integer.valueOf).toSeq.asJava)
         .addAllBytesWrittenPerPartition(bytesWrittenPerPartition.map(
           java.lang.Long.valueOf).toSeq.asJava)
-        .build().toByteArray
+      writeMetrics.foreach { w =>
+        builder.setCopyTimeMs(w.copyTimeMs)
+          .setSerializeTimeMs(w.serializeTimeMs)
+          .setCompressTimeMs(w.compressTimeMs)
+          .setQueueWaitTimeMs(w.queueWaitTimeMs)
+          .setQueueStallTimeMs(w.queueStallTimeMs)
+          .setInflightWaitTimeMs(w.inflightWaitTimeMs)
+          .setDrainWaitTimeMs(w.drainWaitTimeMs)
+          .setSlowPushCount(w.slowPushCount)
+          .setMaxPushRttMs(w.maxPushRttMs)
+      }
+      pushWorkerStats.asScala.foreach { s =>
+        builder.addPushWorkerStats(
+          PbPushWorkerStats.newBuilder()
+            .setWorkerId(s.workerId)
+            .setPushCount(s.pushCount)
+            .setPushBytes(s.pushBytes)
+            .setTotalPushRttNanos(s.totalPushRttNanos)
+            .setSoftSplitCount(s.softSplitCount)
+            .setHardSplitCount(s.hardSplitCount)
+            .setPrimaryCongestedCount(s.primaryCongestedCount)
+            .setReplicaCongestedCount(s.replicaCongestedCount)
+            .setLastPushFailureReason(s.lastPushFailureReason)
+            .build())
+      }
+      val payload = builder.build().toByteArray
       new TransportMessage(MessageType.MAPPER_END, payload, serdeVersion)
 
     case MapperEndResponse(status, serdeVersion) =>
@@ -1248,7 +1302,40 @@ object ControlMessages extends Logging {
           pbMapperEnd.getNumPartitions,
           crc32Array,
           bytesWrittenPerPartitionArray,
-          message.getSerdeVersion)
+          message.getSerdeVersion,
+          // Reconstruct WriteMetrics only if the producer populated it (any field > 0). proto3
+          // scalars default to 0, so absent == all-zero; the producer only sets them when
+          // celeborn.client.spark.ui.enabled.
+          {
+            val w = WriteMetrics(
+              pbMapperEnd.getCopyTimeMs,
+              pbMapperEnd.getSerializeTimeMs,
+              pbMapperEnd.getCompressTimeMs,
+              pbMapperEnd.getQueueWaitTimeMs,
+              pbMapperEnd.getQueueStallTimeMs,
+              pbMapperEnd.getInflightWaitTimeMs,
+              pbMapperEnd.getDrainWaitTimeMs,
+              pbMapperEnd.getSlowPushCount,
+              pbMapperEnd.getMaxPushRttMs)
+            if (w.copyTimeMs == 0 && w.serializeTimeMs == 0 && w.compressTimeMs == 0 &&
+              w.queueWaitTimeMs == 0 && w.drainWaitTimeMs == 0 && w.slowPushCount == 0) {
+              None
+            } else {
+              Some(w)
+            }
+          },
+          pbMapperEnd.getPushWorkerStatsList.asScala.map { s =>
+            PushWorkerStats(
+              s.getWorkerId,
+              s.getPushCount,
+              s.getPushBytes,
+              s.getTotalPushRttNanos,
+              s.getSoftSplitCount,
+              s.getHardSplitCount,
+              s.getPrimaryCongestedCount,
+              s.getReplicaCongestedCount,
+              s.getLastPushFailureReason)
+          }.asJava)
 
       case READ_REDUCER_PARTITION_END_VALUE =>
         val pbReadReducerPartitionEnd = PbReadReducerPartitionEnd.parseFrom(message.getPayload)
