@@ -61,6 +61,49 @@ public class PushState {
     failedBatchMap = JavaUtils.newConcurrentHashMap();
   }
 
+  // Time push thread stalls in DataPushQueue.takePushTasks because no target worker
+  // has remaining push allowance (per-worker in-flight limit reached).
+  private final LongAdder queueStallTimeNanos = new LongAdder();
+
+  // CPU cost of compressing push data (ShuffleClientImpl.pushOrMergeData).
+  private final LongAdder compressTimeNanos = new LongAdder();
+  // CPU cost of serializing records in the engine shuffle writer.
+  private final LongAdder serializeTimeNanos = new LongAdder();
+  // CPU cost of copying serialized records into the push buffer (writer write0 / fastWrite0).
+  private final LongAdder copyTimeNanos = new LongAdder();
+
+  public void addCompressTime(long nanos) {
+    compressTimeNanos.add(nanos);
+  }
+
+  public void addSerializeTime(long nanos) {
+    serializeTimeNanos.add(nanos);
+  }
+
+  public void addCopyTime(long nanos) {
+    copyTimeNanos.add(nanos);
+  }
+
+  public long getCompressTimeMs() {
+    return TimeUnit.NANOSECONDS.toMillis(compressTimeNanos.sum());
+  }
+
+  public long getSerializeTimeMs() {
+    return TimeUnit.NANOSECONDS.toMillis(serializeTimeNanos.sum());
+  }
+
+  public long getCopyTimeMs() {
+    return TimeUnit.NANOSECONDS.toMillis(copyTimeNanos.sum());
+  }
+
+  public void addQueueStallTime(long nanos) {
+    queueStallTimeNanos.add(nanos);
+  }
+
+  public long getQueueStallTimeMs() {
+    return TimeUnit.NANOSECONDS.toMillis(queueStallTimeNanos.sum());
+  }
+
   public void addQueueWaitTime(long nanos) {
     queueWaitTimeNanos.add(nanos);
   }

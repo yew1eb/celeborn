@@ -17,6 +17,7 @@
 
 package org.apache.celeborn.client.read;
 
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
@@ -26,12 +27,28 @@ import java.util.concurrent.atomic.LongAdder;
  * fetch.
  */
 public class ReadStreamStats {
+
+  /** Per worker read cost, inspired by Uniffle's ShuffleServerReadCostTracker. */
+  public static class WorkerReadCost {
+    public final LongAdder chunkCount = new LongAdder();
+    public final LongAdder bytes = new LongAdder();
+    public final LongAdder totalRttNanos = new LongAdder();
+    public final AtomicLong maxRttNanos = new AtomicLong(0);
+  }
+
+  // Per worker (hostAndFetchPort) read cost of this stream.
+  private final ConcurrentHashMap<String, WorkerReadCost> workerReadCosts =
+      new ConcurrentHashMap<>();
   // Time the reducer thread is blocked waiting for fetched chunks.
   private final LongAdder chunkWaitTimeNanos = new LongAdder();
   // Number of chunks whose fetch round trip time exceeds the slow chunk threshold.
   private final LongAdder slowChunkCount = new LongAdder();
   private final AtomicLong maxChunkRttNanos = new AtomicLong(0);
   private final LongAdder decompressTimeNanos = new LongAdder();
+  // CPU cost of deserializing key/value records (reader iterator next).
+  private final LongAdder deserializeTimeNanos = new LongAdder();
+  // CPU cost of copying decompressed bytes into the user buffer (CelebornInputStream.read).
+  private final LongAdder copyTimeNanos = new LongAdder();
   private final LongAdder retryCount = new LongAdder();
   private final LongAdder retryWaitTimeMs = new LongAdder();
   private final LongAdder peerSwitchCount = new LongAdder();
@@ -48,8 +65,29 @@ public class ReadStreamStats {
     }
   }
 
+  public void recordWorkerChunkRead(String hostAndFetchPort, int bytes, long rttNanos) {
+    WorkerReadCost cost =
+        workerReadCosts.computeIfAbsent(hostAndFetchPort, k -> new WorkerReadCost());
+    cost.chunkCount.increment();
+    cost.bytes.add(bytes);
+    cost.totalRttNanos.add(rttNanos);
+    cost.maxRttNanos.accumulateAndGet(rttNanos, Math::max);
+  }
+
+  public ConcurrentHashMap<String, WorkerReadCost> getWorkerReadCosts() {
+    return workerReadCosts;
+  }
+
   public void addDecompressTime(long nanos) {
     decompressTimeNanos.add(nanos);
+  }
+
+  public void addDeserializeTime(long nanos) {
+    deserializeTimeNanos.add(nanos);
+  }
+
+  public void addCopyTime(long nanos) {
+    copyTimeNanos.add(nanos);
   }
 
   public void incRetryCount() {
@@ -82,6 +120,14 @@ public class ReadStreamStats {
 
   public long getDecompressTimeMs() {
     return TimeUnit.NANOSECONDS.toMillis(decompressTimeNanos.sum());
+  }
+
+  public long getDeserializeTimeMs() {
+    return TimeUnit.NANOSECONDS.toMillis(deserializeTimeNanos.sum());
+  }
+
+  public long getCopyTimeMs() {
+    return TimeUnit.NANOSECONDS.toMillis(copyTimeNanos.sum());
   }
 
   public long getRetryCount() {
