@@ -64,6 +64,27 @@ class CelebornListener(conf: SparkConf, kvstore: ElementTrackingStore)
     mayUpdate(true)
   }
 
+  // Cap the per-shuffle assignment rows to bound KVStore / event-log growth on long-running
+  // jobs with many shuffles (mirrors Gluten's UI_RETAINED_EXECUTIONS trigger and Spark's
+  // retainedStages). When the count exceeds the threshold, evict the oldest rows.
+  private val retainedShuffles: Int =
+    conf.getInt("celeborn.client.spark.ui.retainedShuffles", 1000)
+  kvstore.addTrigger(classOf[CelebornShuffleAssignmentUIData], retainedShuffles.toLong) {
+    count => cleanupAssignments(count)
+  }
+
+  private def cleanupAssignments(count: Long): Unit = {
+    import org.apache.spark.status.KVUtils
+    val toDelete = count - retainedShuffles
+    if (toDelete <= 0) {
+      return
+    }
+    val view = kvstore.view(classOf[CelebornShuffleAssignmentUIData])
+    KVUtils.viewToSeq(view, toDelete.toInt)(_ => true).foreach { e =>
+      kvstore.delete(classOf[CelebornShuffleAssignmentUIData], e.appShuffleId)
+    }
+  }
+
   override def onStageSubmitted(stageSubmitted: SparkListenerStageSubmitted): Unit = {
     // ShuffleMapStage carries shuffleDepId = the Spark shuffle dependency id; result stages
     // have None. Used in onTaskEnd to attribute write metrics to a shuffle.

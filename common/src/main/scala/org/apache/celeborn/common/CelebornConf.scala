@@ -1040,6 +1040,7 @@ class CelebornConf(loadDefaults: Boolean) extends Cloneable with Logging with Se
   def clientFetchMaxRetriesForEachReplica: Int = get(CLIENT_FETCH_MAX_RETRIES_FOR_EACH_REPLICA)
   def clientStageRerunEnabled: Boolean = get(CLIENT_STAGE_RERUN_ENABLED)
   def clientSparkUIEnabled: Boolean = get(CLIENT_SPARK_UI_ENABLED)
+  def clientSparkUIRetainedShuffles: Int = get(CLIENT_SPARK_UI_RETAINED_SHUFFLES)
   def clientFetchCleanFailedShuffle: Boolean = get(CLIENT_FETCH_CLEAN_FAILED_SHUFFLE)
   def clientFetchCleanFailedShuffleIntervalMS: Long =
     get(CLIENT_FETCH_CLEAN_FAILED_SHUFFLE_INTERVAL)
@@ -5286,6 +5287,20 @@ object CelebornConf extends Logging {
         "only when this is enabled, so it is zero-overhead when off.")
       .booleanConf
       .createWithDefault(true)
+
+  val CLIENT_SPARK_UI_RETAINED_SHUFFLES: ConfigEntry[Int] =
+    buildConf("celeborn.client.spark.ui.retainedShuffles")
+      .withAlternative("celeborn.client.spark.ui.retainedShuffle")
+      .categories("client")
+      .version("1.0.0")
+      .doc("Number of Celeborn shuffle assignments to retain in the Spark status KVStore " +
+        "(and thus the event log) for the Celeborn UI tab. When more shuffles are registered, " +
+        "the oldest assignment rows are evicted to bound memory/event-log growth on long-running " +
+        "jobs with many shuffles. Mirrors Spark's spark.ui.retainedStages and Gluten's " +
+        "UI_RETAINED_EXECUTIONS trigger. Only the per-shuffle assignment rows are capped; " +
+        "singleton entities (build info, fallback stats, aggregated metrics) are not affected.")
+      .intConf
+      .createWithDefault(1000)
 
   val CLIENT_FETCH_CLEAN_FAILED_SHUFFLE: ConfigEntry[Boolean] =
     buildConf("celeborn.client.spark.fetch.cleanFailedShuffle")
