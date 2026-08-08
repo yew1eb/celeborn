@@ -55,9 +55,7 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
   }
 
   private def renderBody(request: HttpServletRequest): Seq[Node] = {
-    val buildInfo = statusStore.buildInfo()
     val assignments = statusStore.assignmentInfos()
-    val fallback = statusStore.fallbackStats()
     val properties = statusStore.celebornProperties()
     val reassign = statusStore.reassignStats()
     val writeMetrics = statusStore.aggregatedWriteMetrics()
@@ -93,16 +91,10 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
           <li>Reassign Status: partitionSplit={reassign.partitionSplit},
             blockSendFailure={reassign.blockSendFailure}, stageRetry={reassign.stageRetry}</li>
           <li>
-            <a href="#buildinfo">Build Information</a>
-          </li>
-          <li>
             <a href="#properties">Celeborn Properties</a> ({properties.info.length} entries)
           </li>
           <li>
             <a href="#assignments">Shuffle Assignments</a> ({assignments.length} shuffles)
-          </li>
-          <li>
-            <a href="#fallback">Fallback Statistics</a>
           </li>
           <li>
             <a href="#throughput">Shuffle Throughput</a>
@@ -112,12 +104,6 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
           </li>
         </ul>
       </div>
-
-    val buildInfoTable = UIUtils.listingTable(
-      propertyHeader,
-      propertyRow,
-      buildInfo.info,
-      fixedWidth = true)
 
     val propertiesTable = UIUtils.listingTable(
       propertyHeader,
@@ -147,25 +133,6 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
         </thead>
         <tbody>
           {assignmentRows}
-        </tbody>
-      </table>
-
-    val fallbackRows = fallback.counts.asScala.toSeq.sortBy(_._1).map { case (policy, count) =>
-      <tr>
-        <td>{policy}</td>
-        <td>{count}</td>
-      </tr>
-    }
-    val fallbackTable =
-      <table class="table table-bordered table-striped table-sm">
-        <thead>
-          <tr>
-            <th>Fallback Policy</th>
-            <th>Count</th>
-          </tr>
-        </thead>
-        <tbody>
-          {fallbackRows}
         </tbody>
       </table>
 
@@ -354,14 +321,10 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
           }
         """)
       }</script>
-        <a name="buildinfo"></a>
-        {collapsible("build-info", "Build Information", buildInfoTable)}
         <a name="properties"></a>
         {collapsible("celeborn-properties", "Celeborn Properties", propertiesTable)}
         <a name="assignments"></a>
         {collapsible("assignments", "Shuffle Assignments", assignmentTable)}
-        <a name="fallback"></a>
-        {collapsible("fallback", "Fallback Statistics", fallbackTable)}
         <a name="throughput"></a>
         {collapsible("throughput", "Shuffle Throughput", throughputTable)}
         <a name="write"></a>
