@@ -125,6 +125,8 @@ public class WorkerPartitionReader implements PartitionReader {
               if (fetchStartTime != null) {
                 long rttNanos = System.nanoTime() - fetchStartTime;
                 streamStats.recordChunkRtt(rttNanos, slowChunkThresholdNanos);
+                streamStats.recordWorkerChunkRead(
+                    location.hostAndFetchPort(), buf.readableBytes(), rttNanos);
                 if (rttNanos > slowChunkThresholdNanos) {
                   logger.warn(
                       "Slow fetch chunk from {} for shuffle key {} stream {} chunk {}, "

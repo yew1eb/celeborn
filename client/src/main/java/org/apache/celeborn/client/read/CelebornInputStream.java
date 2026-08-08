@@ -819,11 +819,50 @@ public abstract class CelebornInputStream extends InputStream {
           && streamStats.getSlowChunkCount() == 0) {
         return;
       }
+      // Per worker read cost, sorted by total fetch round trip time descending.
+      // Only the top workers are logged to bound the log line length.
+      final int topWorkerLimit = 10;
+      StringBuilder sb = new StringBuilder();
+      streamStats.getWorkerReadCosts().entrySet().stream()
+          .sorted(
+              (a, b) ->
+                  Long.compare(b.getValue().totalRttNanos.sum(), a.getValue().totalRttNanos.sum()))
+          .limit(topWorkerLimit)
+          .forEach(
+              e -> {
+                if (sb.length() > 0) {
+                  sb.append(", ");
+                }
+                ReadStreamStats.WorkerReadCost cost = e.getValue();
+                long chunks = cost.chunkCount.sum();
+                sb.append("(")
+                    .append(e.getKey())
+                    .append(", bytes=")
+                    .append(cost.bytes.sum() / 1048576)
+                    .append("MB")
+                    .append(", chunks=")
+                    .append(chunks)
+                    .append(", avgRtt=")
+                    .append(
+                        chunks > 0
+                            ? TimeUnit.NANOSECONDS.toMillis(cost.totalRttNanos.sum()) / chunks
+                            : 0)
+                    .append("ms")
+                    .append(", maxRtt=")
+                    .append(TimeUnit.NANOSECONDS.toMillis(cost.maxRttNanos.get()))
+                    .append("ms")
+                    .append(")");
+              });
+      if (streamStats.getWorkerReadCosts().size() > topWorkerLimit) {
+        sb.append(", ... and ")
+            .append(streamStats.getWorkerReadCosts().size() - topWorkerLimit)
+            .append(" more workers");
+      }
       logger.info(
           "Read stream summary for appShuffleId {}, shuffleId {}, partitionId {}: "
               + "total={}ms, chunkWait={}ms, decompress={}ms, retries={}, retryWait={}ms, "
               + "peerSwitch={}, exclude={}, slowChunks={}, maxChunkRtt={}ms, "
-              + "locations total {}, read {}, skip {}.",
+              + "locations total {}, read {}, skip {}, workers=[{}].",
           appShuffleId,
           shuffleId,
           partitionId,
@@ -838,7 +877,8 @@ public abstract class CelebornInputStream extends InputStream {
           streamStats.getMaxChunkRttMs(),
           locationsCount,
           locationsCount - skipCount.sum(),
-          skipCount.sum());
+          skipCount.sum(),
+          sb);
     }
 
     void validateIntegrity() throws IOException {

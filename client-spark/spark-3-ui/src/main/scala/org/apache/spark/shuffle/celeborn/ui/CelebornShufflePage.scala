@@ -64,6 +64,8 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
     val taskInfo = statusStore.aggregatedTaskInfo()
     val writeTimes = statusStore.writeTimes()
     val perWorkerStats = statusStore.perWorkerWriteStats()
+    val readTimes = statusStore.readTimes()
+    val perWorkerReadStats = statusStore.perWorkerReadStats()
 
     // --- Summary derived from onTaskEnd TaskMetrics (a-class, plan A) ---
     val writeBytes = taskInfo.shuffleWriteBytes
@@ -281,6 +283,61 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
         </tbody>
       </table>
 
+    val readTimesRows = Seq(
+      ("Decompress Time", readTimes.decompressTimeMs),
+      ("Chunk Wait Time", readTimes.chunkWaitTimeMs),
+      ("Deserialize Time", readTimes.deserializeTimeMs),
+      ("Copy Time", readTimes.copyTimeMs),
+      ("Retry Count", readTimes.retryCount),
+      ("Retry Wait Time", readTimes.retryWaitTimeMs),
+      ("Peer Switch Count", readTimes.peerSwitchCount),
+      ("Exclude Count", readTimes.excludeCount),
+      ("Slow Chunk Count", readTimes.slowChunkCount),
+      ("Max Chunk RTT (ms)", readTimes.maxChunkRttMs))
+    val readTimesRowsXml = readTimesRows.map { case (label, value) =>
+      <tr>
+        <td>{label}</td>
+        <td>{value.toString}</td>
+      </tr>
+    }
+    val readTimesTable =
+      <table class="table table-bordered table-striped table-sm">
+        <thead>
+          <tr>
+            <th>Stage</th>
+            <th>Value</th>
+          </tr>
+        </thead>
+        <tbody>
+          {readTimesRowsXml}
+        </tbody>
+      </table>
+
+    val perWorkerReadRows = perWorkerReadStats.map { s =>
+      <tr>
+        <td>{s.workerId}</td>
+        <td>{s.chunkCount}</td>
+        <td>{org.apache.spark.util.Utils.bytesToString(s.bytes)}</td>
+        <td>{s.totalRttNanos}</td>
+        <td>{s.maxRttNanos}</td>
+      </tr>
+    }
+    val perWorkerReadTable =
+      <table class="table table-bordered table-striped table-sm">
+        <thead>
+          <tr>
+            <th>Worker Id</th>
+            <th>Chunk Count</th>
+            <th>Read Bytes</th>
+            <th>Total RTT (ns)</th>
+            <th>Max RTT (ns)</th>
+          </tr>
+        </thead>
+        <tbody>
+          {perWorkerReadRows}
+        </tbody>
+      </table>
+
     val content: Seq[Node] =
       <div>
         <span>{summary}</span>
@@ -313,6 +370,10 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
         {collapsible("write-times", "Shuffle Write Times", writeTimesTable)}
         <a name="servers"></a>
         {collapsible("shuffle-servers", "Shuffle Servers", perWorkerTable)}
+        <a name="readtimes"></a>
+        {collapsible("read-times", "Shuffle Read Times", readTimesTable)}
+        <a name="readservers"></a>
+        {collapsible("shuffle-read-servers", "Shuffle Read Servers", perWorkerReadTable)}
       </div>
 
     UIUtils.headerSparkPage(request, "Celeborn Shuffle Service", content, parent)

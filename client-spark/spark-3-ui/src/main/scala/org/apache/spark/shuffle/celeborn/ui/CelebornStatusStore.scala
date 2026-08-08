@@ -88,6 +88,22 @@ private[celeborn] class CelebornStatusStore(val store: KVStore) {
     viewToSeq(store.view(classOf[CelebornPerWorkerWriteStatsUIData]))
   }
 
+  /** Aggregated read-path timing breakdown, or all-zero if none recorded. */
+  def readTimes(): CelebornReadTimesUIData = {
+    val kClass = classOf[CelebornReadTimesUIData]
+    try {
+      store.read(kClass, kClass.getName)
+    } catch {
+      case _: NoSuchElementException =>
+        new CelebornReadTimesUIData(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    }
+  }
+
+  /** Per-worker read stats, newest last. */
+  def perWorkerReadStats(): Seq[CelebornPerWorkerReadStatsUIData] = {
+    viewToSeq(store.view(classOf[CelebornPerWorkerReadStatsUIData]))
+  }
+
   /** Per-shuffle write metrics snapshot, or empty if none recorded. */
   def aggregatedWriteMetrics(): CelebornAggregatedWriteMetricsUIData = {
     val kClass = classOf[CelebornAggregatedWriteMetricsUIData]

@@ -22,7 +22,7 @@ import java.util.concurrent.TimeUnit
 import org.apache.spark.{SparkConf, SparkContext}
 import org.apache.spark.internal.Logging
 import org.apache.spark.scheduler._
-import org.apache.spark.shuffle.celeborn.events.{CelebornBuildInfoEvent, CelebornFallbackEvent, CelebornReassignEvent, CelebornShuffleAssignmentEvent, CelebornWriteMetricsEvent}
+import org.apache.spark.shuffle.celeborn.events.{CelebornBuildInfoEvent, CelebornFallbackEvent, CelebornReadMetricsEvent, CelebornReassignEvent, CelebornShuffleAssignmentEvent, CelebornWriteMetricsEvent}
 import org.apache.spark.status.ElementTrackingStore
 
 /**
@@ -61,6 +61,19 @@ class CelebornListener(conf: SparkConf, kvstore: ElementTrackingStore)
   // Per-worker push stats (workerId -> mutable accumulator), merged from each event.
   private val perWorkerWriteStats =
     new java.util.concurrent.ConcurrentHashMap[String, PerWorkerWriteAccumulator]
+  // Aggregated read-path timing breakdown (ms) from CelebornReadMetricsEvent.
+  private val aggDecompressTimeMs = new java.util.concurrent.atomic.AtomicLong(0)
+  private val aggChunkWaitTimeMs = new java.util.concurrent.atomic.AtomicLong(0)
+  private val aggDeserializeTimeMs = new java.util.concurrent.atomic.AtomicLong(0)
+  private val aggCopyTimeMsRead = new java.util.concurrent.atomic.AtomicLong(0)
+  private val aggRetryCount = new java.util.concurrent.atomic.AtomicLong(0)
+  private val aggRetryWaitTimeMs = new java.util.concurrent.atomic.AtomicLong(0)
+  private val aggPeerSwitchCount = new java.util.concurrent.atomic.AtomicLong(0)
+  private val aggExcludeCount = new java.util.concurrent.atomic.AtomicLong(0)
+  private val aggSlowChunkCount = new java.util.concurrent.atomic.AtomicLong(0)
+  private val aggMaxChunkRttMs = new java.util.concurrent.atomic.AtomicLong(0)
+  private val perWorkerReadStats =
+    new java.util.concurrent.ConcurrentHashMap[String, PerWorkerReadAccumulator]
   // stageId -> shuffleDepId (only ShuffleMapStage has a shuffleDepId). Instance-level (not
   // companion-object static) so that different applications replayed on a shared HistoryServer
   // do not cross-contaminate each other's stageId namespace.
@@ -189,6 +202,24 @@ class CelebornListener(conf: SparkConf, kvstore: ElementTrackingStore)
         acc.merge(s)
       }
       mayUpdate(false)
+    case e: CelebornReadMetricsEvent =>
+      import scala.collection.JavaConverters._
+      val rm = e.readMetrics
+      aggDecompressTimeMs.addAndGet(rm.decompressTimeMs)
+      aggChunkWaitTimeMs.addAndGet(rm.chunkWaitTimeMs)
+      aggDeserializeTimeMs.addAndGet(rm.deserializeTimeMs)
+      aggCopyTimeMsRead.addAndGet(rm.copyTimeMs)
+      aggRetryCount.addAndGet(rm.retryCount)
+      aggRetryWaitTimeMs.addAndGet(rm.retryWaitTimeMs)
+      aggPeerSwitchCount.addAndGet(rm.peerSwitchCount)
+      aggExcludeCount.addAndGet(rm.excludeCount)
+      aggSlowChunkCount.addAndGet(rm.slowChunkCount)
+      aggMaxChunkRttMs.accumulateAndGet(rm.maxChunkRttMs, math.max)
+      e.workerReadCosts.asScala.foreach { w =>
+        val acc = perWorkerReadStats.computeIfAbsent(w.workerId, _ => new PerWorkerReadAccumulator)
+        acc.merge(w)
+      }
+      mayUpdate(false)
     case _ => // ignore unknown events
   }
 
@@ -246,6 +277,26 @@ class CelebornListener(conf: SparkConf, kvstore: ElementTrackingStore)
         acc.replicaCongestedCount.get(),
         acc.lastPushFailureReason))
     }
+    // Read-path timing breakdown (ms) + per-worker read stats, from CelebornReadMetricsEvent.
+    kvstore.write(new CelebornReadTimesUIData(
+      aggDecompressTimeMs.get(),
+      aggChunkWaitTimeMs.get(),
+      aggDeserializeTimeMs.get(),
+      aggCopyTimeMsRead.get(),
+      aggRetryCount.get(),
+      aggRetryWaitTimeMs.get(),
+      aggPeerSwitchCount.get(),
+      aggExcludeCount.get(),
+      aggSlowChunkCount.get(),
+      aggMaxChunkRttMs.get()))
+    perWorkerReadStats.asScala.foreach { case (workerId, acc) =>
+      kvstore.write(new CelebornPerWorkerReadStatsUIData(
+        workerId,
+        acc.chunkCount.get(),
+        acc.bytes.get(),
+        acc.totalRttNanos.get(),
+        acc.maxRttNanos.get()))
+    }
   }
 }
 
@@ -279,5 +330,19 @@ object CelebornListener extends Logging {
   def register(sc: SparkContext): Unit = {
     val kvstore = sc.statusStore.store.asInstanceOf[ElementTrackingStore]
     sc.listenerBus.addToStatusQueue(new CelebornListener(sc.conf, kvstore))
+  }
+}
+
+private[ui] class PerWorkerReadAccumulator {
+  private[ui] val chunkCount = new java.util.concurrent.atomic.AtomicLong(0)
+  private[ui] val bytes = new java.util.concurrent.atomic.AtomicLong(0)
+  private[ui] val totalRttNanos = new java.util.concurrent.atomic.AtomicLong(0)
+  private[ui] val maxRttNanos = new java.util.concurrent.atomic.AtomicLong(0)
+
+  def merge(w: org.apache.celeborn.common.protocol.message.WorkerReadCost): Unit = {
+    chunkCount.addAndGet(w.chunkCount)
+    bytes.addAndGet(w.bytes)
+    totalRttNanos.addAndGet(w.totalRttNanos)
+    maxRttNanos.accumulateAndGet(w.maxRttNanos, math.max)
   }
 }

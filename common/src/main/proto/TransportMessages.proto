@@ -117,6 +117,8 @@ enum MessageType {
   READ_REDUCER_PARTITION_END = 94;
   READ_REDUCER_PARTITION_END_RESPONSE = 95;
   REGISTER_APPLICATION_INFO = 96;
+  REPORT_SHUFFLE_READ_METRICS = 97;
+  REPORT_SHUFFLE_READ_METRICS_RESPONSE = 98;
 }
 
 enum StreamType {
@@ -1097,4 +1099,31 @@ message PbRegisterApplicationInfo {
   PbUserIdentifier userIdentifier = 2;
   map<string, string> extraInfo = 3;
   string requestId = 4;
+}
+
+message PbWorkerReadCost {
+  string workerId = 1;
+  int64 chunkCount = 2;
+  int64 bytes = 3;
+  int64 totalRttNanos = 4;
+  int64 maxRttNanos = 5;
+}
+
+message PbReportShuffleReadMetrics {
+  int32 shuffleId = 1;
+  int64 decompressTimeMs = 2;
+  int64 chunkWaitTimeMs = 3;
+  int64 deserializeTimeMs = 4;
+  int64 copyTimeMs = 5;
+  int64 retryCount = 6;
+  int64 retryWaitTimeMs = 7;
+  int64 peerSwitchCount = 8;
+  int64 excludeCount = 9;
+  int64 slowChunkCount = 10;
+  int64 maxChunkRttMs = 11;
+  repeated PbWorkerReadCost workerReadCosts = 12;
+}
+
+message PbReportShuffleReadMetricsResponse {
+  int32 status = 1;
 }

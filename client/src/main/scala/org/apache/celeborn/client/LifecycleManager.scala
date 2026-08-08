@@ -39,7 +39,7 @@ import com.google.common.cache.{Cache, CacheBuilder}
 import org.roaringbitmap.RoaringBitmap
 
 import org.apache.celeborn.client.LifecycleManager.{ShuffleAllocatedWorkers, ShuffleFailedWorkers}
-import org.apache.celeborn.client.listener.WorkerStatusListener
+import org.apache.celeborn.client.listener.{MapperEndMetricsCallback, ReadMetricsCallback, WorkerStatusListener}
 import org.apache.celeborn.common.{CelebornConf, CommitMetadata}
 import org.apache.celeborn.common.CelebornConf.ACTIVE_STORAGE_TYPES
 import org.apache.celeborn.common.client.{ApplicationInfoProvider, MasterClient}
@@ -547,6 +547,14 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
       } else {
         context.reply(PbSerDeUtils.toPbApplicationMeta(applicationMeta))
       }
+
+    case ReportShuffleReadMetrics(shuffleId, readMetrics, workerReadCosts, serdeVersion) =>
+      // Forward read-path metrics to the driver-side UI listener (registered by
+      // SparkShuffleManager). No aggregation here — the listener accumulates per-shuffle.
+      readMetricsCallback.foreach { cb =>
+        cb.onReadMetrics(shuffleId, readMetrics, workerReadCosts)
+      }
+      context.reply(ReportShuffleReadMetricsResponse(StatusCode.SUCCESS, serdeVersion))
   }
 
   private def handleReducerPartitionEnd(
@@ -961,7 +969,9 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
     // listener (registered by SparkShuffleManager). No aggregation here — the listener
     // accumulates per-shuffle, matching the assignment/fallback event pattern.
     writeMetrics.foreach { w =>
-      mapperEndMetricsCallback.foreach { cb => cb.apply(shuffleId, w, pushWorkerStats) }
+      mapperEndMetricsCallback.foreach { cb =>
+        cb.onMapperEndMetrics(shuffleId, w, pushWorkerStats)
+      }
     }
 
     val (mapperAttemptFinishedSuccess, allMapperFinished) =
@@ -2043,21 +2053,19 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
 
   // Fired from handleMapperEnd when the executor populated write metrics (UI enabled), carrying
   // the shuffleId + write-path timing breakdown + per-worker push stats. The driver-side
-  // SparkShuffleManager registers a callback that posts a CelebornWriteMetricsEvent to the Spark
-  // listener bus. Function3 so the 3 args flow without a wrapper tuple (Java implements
-  // scala.Function3).
-  @volatile private var mapperEndMetricsCallback: Option[scala.Function3[
-    java.lang.Integer,
-    WriteMetrics,
-    util.List[PushWorkerStats],
-    Unit]] = None
-  def registerMapperEndMetricsCallback(
-      callback: scala.Function3[
-        java.lang.Integer,
-        WriteMetrics,
-        util.List[PushWorkerStats],
-        Unit]): Unit = {
+  // SparkShuffleManager registers a MapperEndMetricsCallback that posts a
+  // CelebornWriteMetricsEvent to the Spark listener bus.
+  @volatile private var mapperEndMetricsCallback: Option[MapperEndMetricsCallback] = None
+  def registerMapperEndMetricsCallback(callback: MapperEndMetricsCallback): Unit = {
     mapperEndMetricsCallback = Some(callback)
+  }
+
+  // Fired from the ReportShuffleReadMetrics handler, carrying shuffleId + read-path timing
+  // breakdown + per-worker read cost. SparkShuffleManager registers a callback that posts a
+  // CelebornReadMetricsEvent to the Spark listener bus.
+  @volatile private var readMetricsCallback: Option[ReadMetricsCallback] = None
+  def registerReadMetricsCallback(callback: ReadMetricsCallback): Unit = {
+    readMetricsCallback = Some(callback)
   }
 
   /**

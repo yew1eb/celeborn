@@ -19,7 +19,7 @@ package org.apache.spark.shuffle.celeborn.events
 
 import org.apache.spark.scheduler.SparkListenerEvent
 
-import org.apache.celeborn.common.protocol.message.{PushWorkerStats, WriteMetrics}
+import org.apache.celeborn.common.protocol.message.{PushWorkerStats, ReadMetrics, WorkerReadCost, WriteMetrics}
 
 /**
  * Root for Celeborn UI events posted to the Spark listener bus. Defined in the
@@ -77,4 +77,16 @@ case class CelebornWriteMetricsEvent(
     shuffleId: Int,
     writeMetrics: WriteMetrics,
     pushWorkerStats: java.util.List[PushWorkerStats],
+    timestamp: Long) extends CelebornEvent
+
+/**
+ * Posted from LifecycleManager's ReportShuffleReadMetrics handler (via registerReadMetricsCallback)
+ *  when the executor reported read metrics. Carries the per-task read-path timing breakdown and
+ *  per-worker read cost; the listener accumulates them per-shuffle for the UI's Shuffle Read Times
+ *  and Shuffle Servers (read side) sections.
+ */
+case class CelebornReadMetricsEvent(
+    shuffleId: Int,
+    readMetrics: ReadMetrics,
+    workerReadCosts: java.util.List[WorkerReadCost],
     timestamp: Long) extends CelebornEvent

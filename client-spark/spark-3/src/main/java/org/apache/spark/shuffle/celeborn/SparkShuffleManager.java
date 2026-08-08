@@ -27,6 +27,7 @@ import org.apache.spark.internal.config.package$;
 import org.apache.spark.launcher.SparkLauncher;
 import org.apache.spark.rdd.DeterministicLevel;
 import org.apache.spark.shuffle.*;
+import org.apache.spark.shuffle.celeborn.events.CelebornReadMetricsEvent;
 import org.apache.spark.shuffle.celeborn.events.CelebornReassignEvent;
 import org.apache.spark.shuffle.celeborn.events.CelebornShuffleAssignmentEvent;
 import org.apache.spark.shuffle.celeborn.events.CelebornWriteMetricsEvent;
@@ -37,6 +38,7 @@ import org.slf4j.LoggerFactory;
 
 import org.apache.celeborn.client.LifecycleManager;
 import org.apache.celeborn.client.ShuffleClient;
+import org.apache.celeborn.client.listener.ReadMetricsCallback;
 import org.apache.celeborn.client.security.CryptoHandler;
 import org.apache.celeborn.common.CelebornConf;
 import org.apache.celeborn.common.protocol.ShuffleMode;
@@ -212,6 +214,20 @@ public class SparkShuffleManager implements ShuffleManager {
                                 System.currentTimeMillis()));
                   }
                 });
+            lifecycleManager.registerReadMetricsCallback(
+                (ReadMetricsCallback)
+                    (shuffleId, readMetrics, workerReadCosts) -> {
+                      SparkContext sc = SparkContext$.MODULE$.getActive().getOrElse(null);
+                      if (sc != null) {
+                        sc.listenerBus()
+                            .post(
+                                new CelebornReadMetricsEvent(
+                                    shuffleId,
+                                    readMetrics,
+                                    workerReadCosts,
+                                    System.currentTimeMillis()));
+                      }
+                    });
           }
           if (celebornConf.clientStageRerunEnabled()) {
             MapOutputTrackerMaster mapOutputTracker =

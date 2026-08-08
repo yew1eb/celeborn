@@ -77,6 +77,28 @@ case class PushWorkerStats(
     replicaCongestedCount: Long,
     lastPushFailureReason: String)
 
+// Per-worker read cost carried in ReportShuffleReadMetrics for the UI.
+case class WorkerReadCost(
+    workerId: String,
+    chunkCount: Long,
+    bytes: Long,
+    totalRttNanos: Long,
+    maxRttNanos: Long)
+
+// Read-path timing breakdown + per-worker read cost for the UI. Sent from the executor
+// (CelebornInputStream close) via a new RPC when celeborn.client.spark.ui.enabled.
+case class ReadMetrics(
+    decompressTimeMs: Long,
+    chunkWaitTimeMs: Long,
+    deserializeTimeMs: Long,
+    copyTimeMs: Long,
+    retryCount: Long,
+    retryWaitTimeMs: Long,
+    peerSwitchCount: Long,
+    excludeCount: Long,
+    slowChunkCount: Long,
+    maxChunkRttMs: Long)
+
 object ControlMessages extends Logging {
   val ZERO_UUID = new UUID(0L, 0L).toString
 
@@ -258,6 +280,17 @@ object ControlMessages extends Logging {
     extends MasterMessage
 
   case class MapperEndResponse(status: StatusCode, serdeVersion: SerdeVersion) extends MasterMessage
+
+  // Read-path metrics reported from the executor to the driver (new RPC) for the UI.
+  case class ReportShuffleReadMetrics(
+      shuffleId: Int,
+      readMetrics: ReadMetrics,
+      workerReadCosts: util.List[WorkerReadCost],
+      serdeVersion: SerdeVersion)
+    extends MasterMessage
+
+  case class ReportShuffleReadMetricsResponse(status: StatusCode, serdeVersion: SerdeVersion)
+    extends MasterMessage
 
   case class ReadReducerPartitionEndResponse(status: StatusCode) extends MasterMessage
 
@@ -816,6 +849,44 @@ object ControlMessages extends Logging {
         .build().toByteArray
       new TransportMessage(MessageType.MAPPER_END_RESPONSE, payload, serdeVersion)
 
+    case ReportShuffleReadMetrics(shuffleId, readMetrics, workerReadCosts, serdeVersion) =>
+      val rm = readMetrics
+      val builder = PbReportShuffleReadMetrics.newBuilder()
+        .setShuffleId(shuffleId)
+        .setDecompressTimeMs(rm.decompressTimeMs)
+        .setChunkWaitTimeMs(rm.chunkWaitTimeMs)
+        .setDeserializeTimeMs(rm.deserializeTimeMs)
+        .setCopyTimeMs(rm.copyTimeMs)
+        .setRetryCount(rm.retryCount)
+        .setRetryWaitTimeMs(rm.retryWaitTimeMs)
+        .setPeerSwitchCount(rm.peerSwitchCount)
+        .setExcludeCount(rm.excludeCount)
+        .setSlowChunkCount(rm.slowChunkCount)
+        .setMaxChunkRttMs(rm.maxChunkRttMs)
+      workerReadCosts.asScala.foreach { w =>
+        builder.addWorkerReadCosts(
+          PbWorkerReadCost.newBuilder()
+            .setWorkerId(w.workerId)
+            .setChunkCount(w.chunkCount)
+            .setBytes(w.bytes)
+            .setTotalRttNanos(w.totalRttNanos)
+            .setMaxRttNanos(w.maxRttNanos)
+            .build())
+      }
+      new TransportMessage(
+        MessageType.REPORT_SHUFFLE_READ_METRICS,
+        builder.build().toByteArray,
+        serdeVersion)
+
+    case ReportShuffleReadMetricsResponse(status, serdeVersion) =>
+      val payload = PbReportShuffleReadMetricsResponse.newBuilder()
+        .setStatus(status.getValue)
+        .build().toByteArray
+      new TransportMessage(
+        MessageType.REPORT_SHUFFLE_READ_METRICS_RESPONSE,
+        payload,
+        serdeVersion)
+
     case GetReducerFileGroup(shuffleId, isSegmentGranularityVisible, serdeVersion) =>
       val payload = PbGetReducerFileGroup.newBuilder()
         .setShuffleId(shuffleId)
@@ -1354,6 +1425,37 @@ object ControlMessages extends Logging {
         val pbMapperEndResponse = PbMapperEndResponse.parseFrom(message.getPayload)
         MapperEndResponse(
           StatusCode.fromValue(pbMapperEndResponse.getStatus),
+          message.getSerdeVersion)
+
+      case REPORT_SHUFFLE_READ_METRICS_VALUE =>
+        val pb = PbReportShuffleReadMetrics.parseFrom(message.getPayload)
+        ReportShuffleReadMetrics(
+          pb.getShuffleId,
+          ReadMetrics(
+            pb.getDecompressTimeMs,
+            pb.getChunkWaitTimeMs,
+            pb.getDeserializeTimeMs,
+            pb.getCopyTimeMs,
+            pb.getRetryCount,
+            pb.getRetryWaitTimeMs,
+            pb.getPeerSwitchCount,
+            pb.getExcludeCount,
+            pb.getSlowChunkCount,
+            pb.getMaxChunkRttMs),
+          pb.getWorkerReadCostsList.asScala.map { w =>
+            WorkerReadCost(
+              w.getWorkerId,
+              w.getChunkCount,
+              w.getBytes,
+              w.getTotalRttNanos,
+              w.getMaxRttNanos)
+          }.asJava,
+          message.getSerdeVersion)
+
+      case REPORT_SHUFFLE_READ_METRICS_RESPONSE_VALUE =>
+        val pb = PbReportShuffleReadMetricsResponse.parseFrom(message.getPayload)
+        ReportShuffleReadMetricsResponse(
+          StatusCode.fromValue(pb.getStatus),
           message.getSerdeVersion)
 
       case GET_REDUCER_FILE_GROUP_VALUE =>

@@ -140,3 +140,28 @@ private[celeborn] class CelebornPerWorkerWriteStatsUIData(
     val primaryCongestedCount: Long,
     val replicaCongestedCount: Long,
     val lastPushFailureReason: String)
+
+/** Aggregated read-path timing breakdown (ms) from CelebornReadMetricsEvent. Singleton. */
+private[celeborn] class CelebornReadTimesUIData(
+    val decompressTimeMs: Long,
+    val chunkWaitTimeMs: Long,
+    val deserializeTimeMs: Long,
+    val copyTimeMs: Long,
+    val retryCount: Long,
+    val retryWaitTimeMs: Long,
+    val peerSwitchCount: Long,
+    val excludeCount: Long,
+    val slowChunkCount: Long,
+    val maxChunkRttMs: Long) {
+  @JsonIgnore
+  @KVIndex
+  def id: String = classOf[CelebornReadTimesUIData].getName
+}
+
+/** Per-worker read cost aggregated from CelebornReadMetricsEvent. `workerId` is the key. */
+private[celeborn] class CelebornPerWorkerReadStatsUIData(
+    @KVIndexParam val workerId: String,
+    val chunkCount: Long,
+    val bytes: Long,
+    val totalRttNanos: Long,
+    val maxRttNanos: Long)
