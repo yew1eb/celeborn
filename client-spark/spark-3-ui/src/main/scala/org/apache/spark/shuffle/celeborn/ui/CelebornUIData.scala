@@ -106,3 +106,37 @@ private[celeborn] class CelebornAggregatedTaskInfoUIData(
   @KVIndex
   def id: String = classOf[CelebornAggregatedTaskInfoUIData].getName
 }
+
+/**
+ * Aggregated write-path timing breakdown (ms) across all tasks, mirroring Uniffle's
+ *  ShuffleWriteTimes. Singleton, overwritten on each CelebornWriteMetricsEvent.
+ */
+private[celeborn] class CelebornWriteTimesUIData(
+    val copyTimeMs: Long,
+    val serializeTimeMs: Long,
+    val compressTimeMs: Long,
+    val queueWaitTimeMs: Long,
+    val queueStallTimeMs: Long,
+    val inflightWaitTimeMs: Long,
+    val drainWaitTimeMs: Long,
+    val slowPushCount: Long,
+    val maxPushRttMs: Long) {
+  @JsonIgnore
+  @KVIndex
+  def id: String = classOf[CelebornWriteTimesUIData].getName
+}
+
+/**
+ * Per-worker push stats aggregated from CelebornWriteMetricsEvent's PushWorkerStats.
+ *  `workerId` is the natural key (multiple rows).
+ */
+private[celeborn] class CelebornPerWorkerWriteStatsUIData(
+    @KVIndexParam val workerId: String,
+    val pushCount: Long,
+    val pushBytes: Long,
+    val totalPushRttNanos: Long,
+    val softSplitCount: Long,
+    val hardSplitCount: Long,
+    val primaryCongestedCount: Long,
+    val replicaCongestedCount: Long,
+    val lastPushFailureReason: String)

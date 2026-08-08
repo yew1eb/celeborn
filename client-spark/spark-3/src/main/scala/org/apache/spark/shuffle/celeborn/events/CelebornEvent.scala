@@ -19,6 +19,8 @@ package org.apache.spark.shuffle.celeborn.events
 
 import org.apache.spark.scheduler.SparkListenerEvent
 
+import org.apache.celeborn.common.protocol.message.{PushWorkerStats, WriteMetrics}
+
 /**
  * Root for Celeborn UI events posted to the Spark listener bus. Defined in the
  *  spark-3 module (rather than spark-3-ui) so that [[org.apache.spark.shuffle.celeborn.SparkShuffleManager]]
@@ -63,4 +65,16 @@ case class CelebornReassignEvent(
     partitionSplit: Boolean,
     blockSendFailure: Boolean,
     stageRetry: Boolean,
+    timestamp: Long) extends CelebornEvent
+
+/**
+ * Posted from LifecycleManager.handleMapperEnd (via registerMapperEndMetricsCallback) when the
+ *  executor populated write metrics. Carries the per-task write-path timing breakdown and the
+ *  per-worker push stats; the listener accumulates them per-shuffle for the UI's Shuffle Write
+ *  Times and Shuffle Servers sections.
+ */
+case class CelebornWriteMetricsEvent(
+    shuffleId: Int,
+    writeMetrics: WriteMetrics,
+    pushWorkerStats: java.util.List[PushWorkerStats],
     timestamp: Long) extends CelebornEvent

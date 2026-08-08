@@ -22,7 +22,7 @@ import java.util.concurrent.TimeUnit
 import org.apache.spark.{SparkConf, SparkContext}
 import org.apache.spark.internal.Logging
 import org.apache.spark.scheduler._
-import org.apache.spark.shuffle.celeborn.events.{CelebornBuildInfoEvent, CelebornFallbackEvent, CelebornReassignEvent, CelebornShuffleAssignmentEvent}
+import org.apache.spark.shuffle.celeborn.events.{CelebornBuildInfoEvent, CelebornFallbackEvent, CelebornReassignEvent, CelebornShuffleAssignmentEvent, CelebornWriteMetricsEvent}
 import org.apache.spark.status.ElementTrackingStore
 
 /**
@@ -47,6 +47,20 @@ class CelebornListener(conf: SparkConf, kvstore: ElementTrackingStore)
   private val totalReadBytes = new java.util.concurrent.atomic.AtomicLong(0)
   private val totalFetchWaitTimeMs = new java.util.concurrent.atomic.AtomicLong(0)
   private val totalTaskCpuTimeMs = new java.util.concurrent.atomic.AtomicLong(0)
+  // Aggregated write-path timing breakdown (ms) from CelebornWriteMetricsEvent. Uses AtomicLong
+  // so concurrent events on the status queue accumulate safely.
+  private val aggCopyTimeMs = new java.util.concurrent.atomic.AtomicLong(0)
+  private val aggSerializeTimeMs = new java.util.concurrent.atomic.AtomicLong(0)
+  private val aggCompressTimeMs = new java.util.concurrent.atomic.AtomicLong(0)
+  private val aggQueueWaitTimeMs = new java.util.concurrent.atomic.AtomicLong(0)
+  private val aggQueueStallTimeMs = new java.util.concurrent.atomic.AtomicLong(0)
+  private val aggInflightWaitTimeMs = new java.util.concurrent.atomic.AtomicLong(0)
+  private val aggDrainWaitTimeMs = new java.util.concurrent.atomic.AtomicLong(0)
+  private val aggSlowPushCount = new java.util.concurrent.atomic.AtomicLong(0)
+  private val aggMaxPushRttMs = new java.util.concurrent.atomic.AtomicLong(0)
+  // Per-worker push stats (workerId -> mutable accumulator), merged from each event.
+  private val perWorkerWriteStats =
+    new java.util.concurrent.ConcurrentHashMap[String, PerWorkerWriteAccumulator]
   // stageId -> shuffleDepId (only ShuffleMapStage has a shuffleDepId). Instance-level (not
   // companion-object static) so that different applications replayed on a shared HistoryServer
   // do not cross-contaminate each other's stageId namespace.
@@ -156,6 +170,25 @@ class CelebornListener(conf: SparkConf, kvstore: ElementTrackingStore)
         e.stageRetry,
         e.timestamp))
       mayUpdate(false)
+    case e: CelebornWriteMetricsEvent =>
+      import scala.collection.JavaConverters._
+      val w = e.writeMetrics
+      aggCopyTimeMs.addAndGet(w.copyTimeMs)
+      aggSerializeTimeMs.addAndGet(w.serializeTimeMs)
+      aggCompressTimeMs.addAndGet(w.compressTimeMs)
+      aggQueueWaitTimeMs.addAndGet(w.queueWaitTimeMs)
+      aggQueueStallTimeMs.addAndGet(w.queueStallTimeMs)
+      aggInflightWaitTimeMs.addAndGet(w.inflightWaitTimeMs)
+      aggDrainWaitTimeMs.addAndGet(w.drainWaitTimeMs)
+      aggSlowPushCount.addAndGet(w.slowPushCount)
+      aggMaxPushRttMs.accumulateAndGet(w.maxPushRttMs, math.max)
+      // Merge per-worker push stats.
+      e.pushWorkerStats.asScala.foreach { s =>
+        val acc =
+          perWorkerWriteStats.computeIfAbsent(s.workerId, _ => new PerWorkerWriteAccumulator)
+        acc.merge(s)
+      }
+      mayUpdate(false)
     case _ => // ignore unknown events
   }
 
@@ -190,6 +223,53 @@ class CelebornListener(conf: SparkConf, kvstore: ElementTrackingStore)
       totalReadBytes.get(),
       totalFetchWaitTimeMs.get(),
       totalTaskCpuTimeMs.get()))
+    // Write-path timing breakdown (ms) + per-worker push stats, from CelebornWriteMetricsEvent.
+    kvstore.write(new CelebornWriteTimesUIData(
+      aggCopyTimeMs.get(),
+      aggSerializeTimeMs.get(),
+      aggCompressTimeMs.get(),
+      aggQueueWaitTimeMs.get(),
+      aggQueueStallTimeMs.get(),
+      aggInflightWaitTimeMs.get(),
+      aggDrainWaitTimeMs.get(),
+      aggSlowPushCount.get(),
+      aggMaxPushRttMs.get()))
+    perWorkerWriteStats.asScala.foreach { case (workerId, acc) =>
+      kvstore.write(new CelebornPerWorkerWriteStatsUIData(
+        workerId,
+        acc.pushCount.get(),
+        acc.pushBytes.get(),
+        acc.totalPushRttNanos.get(),
+        acc.softSplitCount.get(),
+        acc.hardSplitCount.get(),
+        acc.primaryCongestedCount.get(),
+        acc.replicaCongestedCount.get(),
+        acc.lastPushFailureReason))
+    }
+  }
+}
+
+private[ui] class PerWorkerWriteAccumulator {
+  private[ui] val pushCount = new java.util.concurrent.atomic.AtomicLong(0)
+  private[ui] val pushBytes = new java.util.concurrent.atomic.AtomicLong(0)
+  private[ui] val totalPushRttNanos = new java.util.concurrent.atomic.AtomicLong(0)
+  private[ui] val softSplitCount = new java.util.concurrent.atomic.AtomicLong(0)
+  private[ui] val hardSplitCount = new java.util.concurrent.atomic.AtomicLong(0)
+  private[ui] val primaryCongestedCount = new java.util.concurrent.atomic.AtomicLong(0)
+  private[ui] val replicaCongestedCount = new java.util.concurrent.atomic.AtomicLong(0)
+  @volatile private[ui] var lastPushFailureReason: String = ""
+
+  def merge(s: org.apache.celeborn.common.protocol.message.PushWorkerStats): Unit = {
+    pushCount.addAndGet(s.pushCount)
+    pushBytes.addAndGet(s.pushBytes)
+    totalPushRttNanos.addAndGet(s.totalPushRttNanos)
+    softSplitCount.addAndGet(s.softSplitCount)
+    hardSplitCount.addAndGet(s.hardSplitCount)
+    primaryCongestedCount.addAndGet(s.primaryCongestedCount)
+    replicaCongestedCount.addAndGet(s.replicaCongestedCount)
+    if (s.lastPushFailureReason != null && s.lastPushFailureReason.nonEmpty) {
+      lastPushFailureReason = s.lastPushFailureReason
+    }
   }
 }
 

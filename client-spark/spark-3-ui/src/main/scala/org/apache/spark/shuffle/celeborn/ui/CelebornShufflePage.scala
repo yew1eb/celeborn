@@ -62,6 +62,8 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
     val reassign = statusStore.reassignStats()
     val writeMetrics = statusStore.aggregatedWriteMetrics()
     val taskInfo = statusStore.aggregatedTaskInfo()
+    val writeTimes = statusStore.writeTimes()
+    val perWorkerStats = statusStore.perWorkerWriteStats()
 
     // --- Summary derived from onTaskEnd TaskMetrics (a-class, plan A) ---
     val writeBytes = taskInfo.shuffleWriteBytes
@@ -217,6 +219,68 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
         </tbody>
       </table>
 
+    val writeTimesRows = Seq(
+      ("Copy Time", writeTimes.copyTimeMs),
+      ("Serialize Time", writeTimes.serializeTimeMs),
+      ("Compress Time", writeTimes.compressTimeMs),
+      ("Queue Wait Time", writeTimes.queueWaitTimeMs),
+      ("Queue Stall Time", writeTimes.queueStallTimeMs),
+      ("Inflight Wait Time", writeTimes.inflightWaitTimeMs),
+      ("Drain Wait Time", writeTimes.drainWaitTimeMs),
+      ("Slow Push Count", writeTimes.slowPushCount),
+      ("Max Push RTT (ms)", writeTimes.maxPushRttMs))
+    val writeTimesRowsXml = writeTimesRows.map { case (label, value) =>
+      <tr>
+        <td>{label}</td>
+        <td>{value.toString}</td>
+      </tr>
+    }
+    val writeTimesTable =
+      <table class="table table-bordered table-striped table-sm">
+        <thead>
+          <tr>
+            <th>Stage</th>
+            <th>Time (ms)</th>
+          </tr>
+        </thead>
+        <tbody>
+          {writeTimesRowsXml}
+        </tbody>
+      </table>
+
+    val perWorkerRows = perWorkerStats.map { s =>
+      <tr>
+        <td>{s.workerId}</td>
+        <td>{org.apache.spark.util.Utils.bytesToString(s.pushBytes)}</td>
+        <td>{s.pushCount}</td>
+        <td>{s.totalPushRttNanos}</td>
+        <td>{s.softSplitCount}</td>
+        <td>{s.hardSplitCount}</td>
+        <td>{s.primaryCongestedCount}</td>
+        <td>{s.replicaCongestedCount}</td>
+        <td>{s.lastPushFailureReason}</td>
+      </tr>
+    }
+    val perWorkerTable =
+      <table class="table table-bordered table-striped table-sm">
+        <thead>
+          <tr>
+            <th>Worker Id</th>
+            <th>Push Bytes</th>
+            <th>Push Count</th>
+            <th>Total Push RTT (ns)</th>
+            <th>Soft Split</th>
+            <th>Hard Split</th>
+            <th>Primary Congested</th>
+            <th>Replica Congested</th>
+            <th>Last Push Failure Reason</th>
+          </tr>
+        </thead>
+        <tbody>
+          {perWorkerRows}
+        </tbody>
+      </table>
+
     val content: Seq[Node] =
       <div>
         <span>{summary}</span>
@@ -245,6 +309,10 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
         {collapsible("throughput", "Shuffle Throughput", throughputTable)}
         <a name="write"></a>
         {collapsible("per-shuffle-write", "Per-shuffle Write Metrics", writeTable)}
+        <a name="writetimes"></a>
+        {collapsible("write-times", "Shuffle Write Times", writeTimesTable)}
+        <a name="servers"></a>
+        {collapsible("shuffle-servers", "Shuffle Servers", perWorkerTable)}
       </div>
 
     UIUtils.headerSparkPage(request, "Celeborn Shuffle Service", content, parent)

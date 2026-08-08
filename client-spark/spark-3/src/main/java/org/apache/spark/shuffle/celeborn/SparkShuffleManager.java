@@ -29,6 +29,7 @@ import org.apache.spark.rdd.DeterministicLevel;
 import org.apache.spark.shuffle.*;
 import org.apache.spark.shuffle.celeborn.events.CelebornReassignEvent;
 import org.apache.spark.shuffle.celeborn.events.CelebornShuffleAssignmentEvent;
+import org.apache.spark.shuffle.celeborn.events.CelebornWriteMetricsEvent;
 import org.apache.spark.shuffle.sort.SortShuffleManager;
 import org.apache.spark.sql.internal.SQLConf;
 import org.slf4j.Logger;
@@ -195,6 +196,19 @@ public class SparkShuffleManager implements ShuffleManager {
                                 state.get(0),
                                 state.get(1),
                                 state.get(2),
+                                System.currentTimeMillis()));
+                  }
+                });
+            lifecycleManager.registerMapperEndMetricsCallback(
+                (shuffleId, writeMetrics, pushWorkerStats) -> {
+                  SparkContext sc = SparkContext$.MODULE$.getActive().getOrElse(null);
+                  if (sc != null) {
+                    sc.listenerBus()
+                        .post(
+                            new CelebornWriteMetricsEvent(
+                                shuffleId,
+                                writeMetrics,
+                                pushWorkerStats,
                                 System.currentTimeMillis()));
                   }
                 });
