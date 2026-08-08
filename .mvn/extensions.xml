@@ -17,9 +17,9 @@
   -->
 <extensions xmlns="http://maven.apache.org/EXTENSIONS/1.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
             xsi:schemaLocation="http://maven.apache.org/EXTENSIONS/1.0.0 http://maven.apache.org/xsd/core-extensions-1.0.0.xsd">
-    <extension>
-        <groupId>fish.payara.maven.extensions</groupId>
-        <artifactId>regex-profile-activator</artifactId>
-        <version>0.5</version>
-    </extension>
+    <!-- The regex-profile-activator extension was removed: it does not work
+         under Maven 4 (Maven 4 reworked the core extension mechanism), and
+         it was only used to activate the hadoop-3 profile via a regex on
+         hadoop.version. That profile now uses activeByDefault instead, since
+         Celeborn only supports Hadoop 3.x. -->
 </extensions>

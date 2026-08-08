@@ -102,22 +102,42 @@ install_app() {
 
 # Determine the Maven version from the root pom.xml file and
 # install maven under the build/ folder if needed.
+# The version can be overridden via MVN_VERSION_OVERRIDE (e.g. for CI matrix
+# builds that want to exercise Maven 4 while keeping pom.xml's <maven.version>
+# at the Maven 3 default).
 install_mvn() {
-  local MVN_VERSION=`grep "<maven.version>" "${_DIR}/../pom.xml" | head -n1 | awk -F '[<>]' '{print $3}'`
+  local MVN_VERSION=${MVN_VERSION_OVERRIDE:-$(grep "<maven.version>" "${_DIR}/../pom.xml" | head -n1 | awk -F '[<>]' '{print $3}')}
+  local MVN_MAJOR="${MVN_VERSION%%.*}"
   MVN_BIN="$(command -v mvn)"
   if [ "$MVN_BIN" ]; then
     local MVN_DETECTED_VERSION="$(mvn --version | head -n1 | awk '{print $3}')"
   fi
-  # See simple version normalization: http://stackoverflow.com/questions/16989598/bash-comparing-version-numbers
-  function version { echo "$@" | awk -F. '{ printf("%03d%03d%03d\n", $1,$2,$3); }'; }
+  # Strip any non-numeric suffix (e.g. "-rc-6") before comparing versions so
+  # that "4.0.0-rc-6" is treated as "4.0.0". See https://stackoverflow.com/questions/16989598/bash-comparing-version-numbers
+  function version { echo "$@" | sed 's/[^0-9.].*$//' | awk -F. '{ printf("%03d%03d%03d\n", $1,$2,$3); }'; }
   if [ $(version $MVN_DETECTED_VERSION) -ne $(version $MVN_VERSION) ]; then
+    # Maven 4 requires JDK 17+ to run. Refuse early instead of failing deeper
+    # in the build with a cryptic error.
+    if [ "${MVN_MAJOR}" -ge 4 ]; then
+      local DETECTED_JAVA_MAJOR="$(java -version 2>&1 | head -n1 | awk -F '"' '{print $2}' | cut -d. -f1)"
+      # On JDK 8 "java -version" prints "1.8", so cut -d. -f1 yields "1"; normalize.
+      if [ "${DETECTED_JAVA_MAJOR}" = "1" ]; then
+        DETECTED_JAVA_MAJOR=8
+      fi
+      if [ -z "${DETECTED_JAVA_MAJOR}" ] || [ "${DETECTED_JAVA_MAJOR}" -lt 17 ]; then
+        echo "ERROR: Maven ${MVN_VERSION} requires JDK 17+, but detected JDK ${DETECTED_JAVA_MAJOR:-unknown}." 1>&2
+        echo "       Set JAVA_HOME to a JDK 17+ installation, or override with MVN_VERSION_OVERRIDE." 1>&2
+        exit 2
+      fi
+    fi
     # Default to archive.apache.org: it serves the exact tarball
     # deterministically, avoiding the closer.lua mirror redirector which
     # intermittently routes to a mirror that returns an HTML page instead of
     # the binary. Override with APACHE_MIRROR to use a closer mirror.
     local APACHE_MIRROR=${APACHE_MIRROR:-'https://archive.apache.org/dist'}
     local MVN_TARBALL="apache-maven-${MVN_VERSION}-bin.tar.gz"
-    local FILE_PATH="maven/maven-3/${MVN_VERSION}/binaries"
+    # The repository path segment is versioned: maven-3 for 3.x, maven-4 for 4.x.
+    local FILE_PATH="maven/maven-${MVN_MAJOR}/${MVN_VERSION}/binaries"
 
     # closer.lua needs the ?action=download query to redirect to a mirror;
     # archive.apache.org and most plain mirrors serve the file directly.

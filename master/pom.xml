@@ -166,6 +166,14 @@
       <artifactId>bcpkix-jdk18on</artifactId>
       <scope>test</scope>
     </dependency>
+    <dependency>
+      <groupId>org.apache.hadoop</groupId>
+      <artifactId>hadoop-client-api</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.hadoop</groupId>
+      <artifactId>hadoop-client-runtime</artifactId>
+    </dependency>
   </dependencies>
 
   <build>
@@ -179,35 +187,8 @@
         <artifactId>protobuf-maven-plugin</artifactId>
       </plugin>
     </plugins>
-    <extensions>
-      <extension>
-        <groupId>kr.motd.maven</groupId>
-        <artifactId>os-maven-plugin</artifactId>
-        <version>${maven.plugin.os.version}</version>
-      </extension>
-    </extensions>
   </build>
   <profiles>
-    <profile>
-      <id>hadoop-3</id>
-      <activation>
-        <property>
-          <name>hadoop-3-deps</name>
-        </property>
-      </activation>
-      <dependencies>
-        <dependency>
-          <groupId>org.apache.hadoop</groupId>
-          <artifactId>hadoop-client-api</artifactId>
-          <version>${hadoop.version}</version>
-        </dependency>
-        <dependency>
-          <groupId>org.apache.hadoop</groupId>
-          <artifactId>hadoop-client-runtime</artifactId>
-          <version>${hadoop.version}</version>
-        </dependency>
-      </dependencies>
-    </profile>
     <profile>
       <id>aws</id>
       <dependencies>
