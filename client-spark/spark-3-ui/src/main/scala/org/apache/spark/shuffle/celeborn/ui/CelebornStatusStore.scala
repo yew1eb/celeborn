@@ -79,7 +79,7 @@ private[celeborn] class CelebornStatusStore(val store: KVStore) {
     try {
       store.read(kClass, kClass.getName)
     } catch {
-      case _: NoSuchElementException => new CelebornWriteTimesUIData(0, 0, 0, 0, 0, 0, 0, 0, 0)
+      case _: NoSuchElementException => new CelebornWriteTimesUIData(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
     }
   }
 

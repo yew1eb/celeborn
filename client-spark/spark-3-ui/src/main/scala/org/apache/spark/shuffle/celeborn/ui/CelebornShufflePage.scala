@@ -92,6 +92,7 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
           <li>Client Observed Read Speed: {mbps(readBytes, readMs)} MB/s</li>
           <li>Shuffle Write Time / Task CPU Time: {pct(writeMs, cpuMs)}</li>
           <li>Shuffle Read Time / Task CPU Time: {pct(readMs, cpuMs)}</li>
+          <li>Shuffle Duration (write+read) / Task CPU Time: {pct(writeMs + readMs, cpuMs)}</li>
           <li>Shuffle Adjustments: partitionSplit={reassign.partitionSplit},
             reviveTriggered={reassign.reviveTriggered}, stageRetry={reassign.stageRetry}</li>
           <li>
@@ -149,24 +150,26 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
         </tbody>
       </table>
 
-    val throughputRows = Seq(
+    val throughputRows: Seq[(String, String)] = Seq(
       (
         "Total Shuffle Write Bytes",
         org.apache.spark.util.Utils.bytesToString(taskInfo.shuffleWriteBytes)),
-      ("Total Shuffle Write Time", taskInfo.shuffleWriteTimeMs),
+      (
+        "Total Shuffle Write Time",
+        org.apache.spark.util.Utils.msDurationToString(taskInfo.shuffleWriteTimeMs)),
       (
         "Total Shuffle Read Bytes",
         org.apache.spark.util.Utils.bytesToString(taskInfo.shuffleReadBytes)),
-      ("Total Fetch Wait Time", taskInfo.shuffleFetchWaitTimeMs),
-      ("Total Task CPU Time", taskInfo.taskCpuTimeMs))
+      (
+        "Total Fetch Wait Time",
+        org.apache.spark.util.Utils.msDurationToString(taskInfo.shuffleFetchWaitTimeMs)),
+      (
+        "Total Task CPU Time",
+        org.apache.spark.util.Utils.msDurationToString(taskInfo.taskCpuTimeMs)))
     val throughputRowsXml = throughputRows.map { case (label, value) =>
       <tr>
         <td>{label}</td>
-        <td>{
-        if (label.contains("Time") || label.contains("RTT"))
-          org.apache.spark.util.Utils.msDurationToString(value)
-        else value.toString
-      }</td>
+        <td>{value}</td>
       </tr>
     }
     val throughputTable =
@@ -182,24 +185,30 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
         </tbody>
       </table>
 
-    val writeTimesRows = Seq(
-      ("Copy Time", writeTimes.copyTimeMs),
-      ("Serialize Time", writeTimes.serializeTimeMs),
-      ("Compress Time", writeTimes.compressTimeMs),
-      ("Queue Wait Time", writeTimes.queueWaitTimeMs),
-      ("Queue Stall Time", writeTimes.queueStallTimeMs),
-      ("Inflight Wait Time", writeTimes.inflightWaitTimeMs),
-      ("Drain Wait Time", writeTimes.drainWaitTimeMs),
-      ("Slow Push Count", writeTimes.slowPushCount),
-      ("Max Push RTT", writeTimes.maxPushRttMs))
+    val writeTimesRows: Seq[(String, String)] = Seq(
+      ("Copy Time", org.apache.spark.util.Utils.msDurationToString(writeTimes.copyTimeMs)),
+      (
+        "Serialize Time",
+        org.apache.spark.util.Utils.msDurationToString(writeTimes.serializeTimeMs)),
+      ("Compress Time", org.apache.spark.util.Utils.msDurationToString(writeTimes.compressTimeMs)),
+      (
+        "Queue Wait Time",
+        org.apache.spark.util.Utils.msDurationToString(writeTimes.queueWaitTimeMs)),
+      (
+        "Queue Stall Time",
+        org.apache.spark.util.Utils.msDurationToString(writeTimes.queueStallTimeMs)),
+      (
+        "Inflight Wait Time",
+        org.apache.spark.util.Utils.msDurationToString(writeTimes.inflightWaitTimeMs)),
+      (
+        "Drain Wait Time",
+        org.apache.spark.util.Utils.msDurationToString(writeTimes.drainWaitTimeMs)),
+      ("Slow Push Count", writeTimes.slowPushCount.toString),
+      ("Max Push RTT", org.apache.spark.util.Utils.msDurationToString(writeTimes.maxPushRttMs)))
     val writeTimesRowsXml = writeTimesRows.map { case (label, value) =>
       <tr>
         <td>{label}</td>
-        <td>{
-        if (label.contains("Time") || label.contains("RTT"))
-          org.apache.spark.util.Utils.msDurationToString(value)
-        else value.toString
-      }</td>
+        <td>{value}</td>
       </tr>
     }
     val writeTimesTable =
@@ -251,25 +260,29 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
         </tbody>
       </table>
 
-    val readTimesRows = Seq(
-      ("Decompress Time", readTimes.decompressTimeMs),
-      ("Chunk Wait Time", readTimes.chunkWaitTimeMs),
-      ("Deserialize Time", readTimes.deserializeTimeMs),
-      ("Copy Time", readTimes.copyTimeMs),
-      ("Retry Count", readTimes.retryCount),
-      ("Retry Wait Time", readTimes.retryWaitTimeMs),
-      ("Peer Switch Count", readTimes.peerSwitchCount),
-      ("Exclude Count", readTimes.excludeCount),
-      ("Slow Chunk Count", readTimes.slowChunkCount),
-      ("Max Chunk RTT", readTimes.maxChunkRttMs))
+    val readTimesRows: Seq[(String, String)] = Seq(
+      (
+        "Decompress Time",
+        org.apache.spark.util.Utils.msDurationToString(readTimes.decompressTimeMs)),
+      (
+        "Chunk Wait Time",
+        org.apache.spark.util.Utils.msDurationToString(readTimes.chunkWaitTimeMs)),
+      (
+        "Deserialize Time",
+        org.apache.spark.util.Utils.msDurationToString(readTimes.deserializeTimeMs)),
+      ("Copy Time", org.apache.spark.util.Utils.msDurationToString(readTimes.copyTimeMs)),
+      ("Retry Count", readTimes.retryCount.toString),
+      (
+        "Retry Wait Time",
+        org.apache.spark.util.Utils.msDurationToString(readTimes.retryWaitTimeMs)),
+      ("Peer Switch Count", readTimes.peerSwitchCount.toString),
+      ("Exclude Count", readTimes.excludeCount.toString),
+      ("Slow Chunk Count", readTimes.slowChunkCount.toString),
+      ("Max Chunk RTT", org.apache.spark.util.Utils.msDurationToString(readTimes.maxChunkRttMs)))
     val readTimesRowsXml = readTimesRows.map { case (label, value) =>
       <tr>
         <td>{label}</td>
-        <td>{
-        if (label.contains("Time") || label.contains("RTT"))
-          org.apache.spark.util.Utils.msDurationToString(value)
-        else value.toString
-      }</td>
+        <td>{value}</td>
       </tr>
     }
     val readTimesTable =
