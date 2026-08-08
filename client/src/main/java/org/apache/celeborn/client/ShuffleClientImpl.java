@@ -24,8 +24,10 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 
+import scala.Option;
 import scala.Tuple2;
 import scala.Tuple3;
 import scala.reflect.ClassTag$;
@@ -63,6 +65,7 @@ import org.apache.celeborn.common.network.util.TransportConf;
 import org.apache.celeborn.common.protocol.*;
 import org.apache.celeborn.common.protocol.message.ControlMessages.*;
 import org.apache.celeborn.common.protocol.message.StatusCode;
+import org.apache.celeborn.common.protocol.message.WriteMetrics;
 import org.apache.celeborn.common.rpc.RpcAddress;
 import org.apache.celeborn.common.rpc.RpcEndpointRef;
 import org.apache.celeborn.common.rpc.RpcEnv;
@@ -119,7 +122,7 @@ public class ShuffleClientImpl extends ShuffleClient {
   // key: mapKey (shuffleId-mapId-attemptId), value: (worker hostAndPushPort -> counters)
   // Aggregated counts of push events (soft/hard split, congested) per map task,
   // logged and cleared when the map task ends.
-  private final ConcurrentHashMap<String, ConcurrentHashMap<String, PushEventCounters>>
+  private final ConcurrentHashMap<String, ConcurrentHashMap<String, PushWorkerStats>>
       pushEventStats = JavaUtils.newConcurrentHashMap();
 
   private final long slowPushThresholdNanos;
@@ -1074,7 +1077,9 @@ public class ShuffleClientImpl extends ShuffleClient {
     if (shuffleCompressionEnabled && !skipCompress) {
       // compress data
       final Compressor compressor = compressorThreadLocal.get();
+      long compressStartNanos = System.nanoTime();
       compressor.compress(data, offset, length);
+      pushState.addCompressTime(System.nanoTime() - compressStartNanos);
 
       data = compressor.getCompressedBuffer();
       offset = 0;
@@ -1165,6 +1170,8 @@ public class ShuffleClientImpl extends ShuffleClient {
             public void onSuccess(ByteBuffer response) {
               long pushRttNanos = System.nanoTime() - pushStartTime;
               pushState.recordPushRtt(pushRttNanos, slowPushThresholdNanos);
+              recordWorkerPush(
+                  shuffleId, mapId, attemptId, latest.hostAndPushPort(), body.length, pushRttNanos);
               if (pushRttNanos > slowPushThresholdNanos) {
                 logger.warn(
                     "Slow push data to {} for shuffle {} map {} attempt {} partition {} batch {}, rtt {} ms.",
@@ -1612,6 +1619,8 @@ public class ShuffleClientImpl extends ShuffleClient {
           public void onSuccess(ByteBuffer response) {
             long pushRttNanos = System.nanoTime() - pushStartTime;
             pushState.recordPushRtt(pushRttNanos, slowPushThresholdNanos);
+            recordWorkerPush(
+                shuffleId, mapId, attemptId, hostPort, groupedBatchBytesSize, pushRttNanos);
             if (pushRttNanos > slowPushThresholdNanos) {
               logger.warn(
                   "Slow push merged data to {} for shuffle {} map {} attempt {} partition {} groupedBatch {} batch {}, rtt {} ms.",
@@ -1917,7 +1926,9 @@ public class ShuffleClientImpl extends ShuffleClient {
                   numPartitions,
                   crc32PerPartition,
                   bytesPerPartition,
-                  SerdeVersion.V1),
+                  SerdeVersion.V1,
+                  buildWriteMetricsOption(pushState),
+                  buildPushWorkerStatsList(shuffleId, mapId, attemptId, pushState)),
               rpcMaxRetries,
               rpcRetryWait,
               ClassTag$.MODULE$.apply(MapperEndResponse.class));
@@ -1928,6 +1939,57 @@ public class ShuffleClientImpl extends ShuffleClient {
       logAndClearPushStats(mapKey, shuffleId, mapId, attemptId, pushState);
       pushStates.remove(mapKey);
     }
+  }
+
+  /** Build the write-path timing breakdown for the UI, or None when UI is disabled. */
+  private Option<WriteMetrics> buildWriteMetricsOption(PushState pushState) {
+    if (!conf.clientSparkUIEnabled()) {
+      return Option.empty();
+    }
+    WriteMetrics wm =
+        new WriteMetrics(
+            pushState.getCopyTimeMs(),
+            pushState.getSerializeTimeMs(),
+            pushState.getCompressTimeMs(),
+            pushState.getQueueWaitTimeMs(),
+            pushState.getQueueStallTimeMs(),
+            pushState.getInflightWaitTimeMs(),
+            pushState.getDrainWaitTimeMs(),
+            pushState.getSlowPushCount(),
+            pushState.getMaxPushRttMs());
+    return Option.apply(wm);
+  }
+
+  /** Collect per-worker push stats for the UI, or empty list when UI is disabled. */
+  private java.util.List<org.apache.celeborn.common.protocol.message.PushWorkerStats>
+      buildPushWorkerStatsList(int shuffleId, int mapId, int attemptId, PushState pushState) {
+    java.util.List<org.apache.celeborn.common.protocol.message.PushWorkerStats> list =
+        new java.util.ArrayList<>();
+    if (!conf.clientSparkUIEnabled()) {
+      return list;
+    }
+    String mapKey = Utils.makeMapKey(shuffleId, mapId, attemptId);
+    ConcurrentHashMap<String, PushWorkerStats> workers = pushEventStats.get(mapKey);
+    if (workers != null) {
+      String lastFailureReason =
+          pushState.exception.get() != null ? pushState.exception.get().getMessage() : "";
+      workers.forEach(
+          (hostAndPushPort, stats) -> {
+            org.apache.celeborn.common.protocol.message.PushWorkerStats s =
+                new org.apache.celeborn.common.protocol.message.PushWorkerStats(
+                    hostAndPushPort,
+                    stats.pushCount.sum(),
+                    stats.pushBytes.sum(),
+                    stats.totalPushRttNanos.sum(),
+                    stats.softSplitCount.sum(),
+                    stats.hardSplitCount.sum(),
+                    stats.primaryCongestedCount.sum(),
+                    stats.replicaCongestedCount.sum(),
+                    lastFailureReason);
+            list.add(s);
+          });
+    }
+    return list;
   }
 
   @Override
@@ -2225,20 +2287,29 @@ public class ShuffleClientImpl extends ShuffleClient {
     REPLICA_CONGESTED
   }
 
-  private static class PushEventCounters {
+  // Per (mapTask, worker) push cost and event stats, inspired by Uniffle's
+  // ShuffleServerPushCostTracker, logged when the map task ends.
+  private static class PushWorkerStats {
+    private final LongAdder pushCount = new LongAdder();
+    private final LongAdder pushBytes = new LongAdder();
+    private final LongAdder totalPushRttNanos = new LongAdder();
+    private final AtomicLong maxPushRttNanos = new AtomicLong(0);
     private final LongAdder softSplitCount = new LongAdder();
     private final LongAdder hardSplitCount = new LongAdder();
     private final LongAdder primaryCongestedCount = new LongAdder();
     private final LongAdder replicaCongestedCount = new LongAdder();
+
+    private long eventCount() {
+      return softSplitCount.sum()
+          + hardSplitCount.sum()
+          + primaryCongestedCount.sum()
+          + replicaCongestedCount.sum();
+    }
   }
 
   private void recordPushEvent(
       int shuffleId, int mapId, int attemptId, String hostAndPushPort, PushEvent event) {
-    PushEventCounters counters =
-        pushEventStats
-            .computeIfAbsent(
-                Utils.makeMapKey(shuffleId, mapId, attemptId), k -> new ConcurrentHashMap<>())
-            .computeIfAbsent(hostAndPushPort, k -> new PushEventCounters());
+    PushWorkerStats counters = getPushWorkerStats(shuffleId, mapId, attemptId, hostAndPushPort);
     switch (event) {
       case SOFT_SPLIT:
         counters.softSplitCount.increment();
@@ -2255,52 +2326,112 @@ public class ShuffleClientImpl extends ShuffleClient {
     }
   }
 
+  private PushWorkerStats getPushWorkerStats(
+      int shuffleId, int mapId, int attemptId, String hostAndPushPort) {
+    return pushEventStats
+        .computeIfAbsent(
+            Utils.makeMapKey(shuffleId, mapId, attemptId), k -> new ConcurrentHashMap<>())
+        .computeIfAbsent(hostAndPushPort, k -> new PushWorkerStats());
+  }
+
+  private void recordWorkerPush(
+      int shuffleId, int mapId, int attemptId, String hostAndPushPort, long bytes, long rttNanos) {
+    PushWorkerStats stats = getPushWorkerStats(shuffleId, mapId, attemptId, hostAndPushPort);
+    stats.pushCount.increment();
+    stats.pushBytes.add(bytes);
+    stats.totalPushRttNanos.add(rttNanos);
+    stats.maxPushRttNanos.accumulateAndGet(rttNanos, Math::max);
+  }
+
   private void logAndClearPushStats(
       String mapKey, int shuffleId, int mapId, int attemptId, PushState pushState) {
-    ConcurrentHashMap<String, PushEventCounters> workerStats = pushEventStats.remove(mapKey);
+    ConcurrentHashMap<String, PushWorkerStats> workerStats = pushEventStats.remove(mapKey);
     long queueWaitMs = 0;
+    long queueStallMs = 0;
     long inflightWaitMs = 0;
     long drainWaitMs = 0;
+    long compressMs = 0;
+    long serializeMs = 0;
     long slowPushes = 0;
     long maxPushRttMs = 0;
     if (pushState != null) {
       queueWaitMs = pushState.getQueueWaitTimeMs();
+      queueStallMs = pushState.getQueueStallTimeMs();
       inflightWaitMs = pushState.getInflightWaitTimeMs();
       drainWaitMs = pushState.getDrainWaitTimeMs();
+      compressMs = pushState.getCompressTimeMs();
+      serializeMs = pushState.getSerializeTimeMs();
       slowPushes = pushState.getSlowPushCount();
       maxPushRttMs = pushState.getMaxPushRttMs();
     }
-    boolean hasEvents = workerStats != null && !workerStats.isEmpty();
-    boolean hasSlowWrite = slowPushes > 0 || queueWaitMs + inflightWaitMs + drainWaitMs >= 1000;
+    boolean hasEvents =
+        workerStats != null && workerStats.values().stream().anyMatch(s -> s.eventCount() > 0);
+    boolean hasSlowWrite =
+        slowPushes > 0 || queueWaitMs + queueStallMs + inflightWaitMs + drainWaitMs >= 1000;
     if (!hasEvents && !hasSlowWrite) {
       return;
     }
+    // Per worker push cost, sorted by total push round trip time descending.
+    // Only the top workers are logged to bound the log line length for wide shuffles.
+    final int topWorkerLimit = 10;
     StringBuilder sb = new StringBuilder();
-    if (hasEvents) {
-      workerStats.forEach(
-          (worker, counters) ->
-              sb.append("(")
-                  .append(worker)
-                  .append(", softSplit=")
-                  .append(counters.softSplitCount.sum())
-                  .append(", hardSplit=")
-                  .append(counters.hardSplitCount.sum())
-                  .append(", primaryCongested=")
-                  .append(counters.primaryCongestedCount.sum())
-                  .append(", replicaCongested=")
-                  .append(counters.replicaCongestedCount.sum())
-                  .append(")"));
+    if (workerStats != null) {
+      workerStats.entrySet().stream()
+          .sorted(
+              (a, b) ->
+                  Long.compare(
+                      b.getValue().totalPushRttNanos.sum(), a.getValue().totalPushRttNanos.sum()))
+          .limit(topWorkerLimit)
+          .forEach(
+              e -> {
+                if (sb.length() > 0) {
+                  sb.append(", ");
+                }
+                PushWorkerStats s = e.getValue();
+                long pushes = s.pushCount.sum();
+                sb.append("(")
+                    .append(e.getKey())
+                    .append(", bytes=")
+                    .append(s.pushBytes.sum() / 1048576)
+                    .append("MB")
+                    .append(", pushes=")
+                    .append(pushes)
+                    .append(", avgRtt=")
+                    .append(
+                        pushes > 0
+                            ? TimeUnit.NANOSECONDS.toMillis(s.totalPushRttNanos.sum()) / pushes
+                            : 0)
+                    .append("ms")
+                    .append(", maxRtt=")
+                    .append(TimeUnit.NANOSECONDS.toMillis(s.maxPushRttNanos.get()))
+                    .append("ms")
+                    .append(", softSplit=")
+                    .append(s.softSplitCount.sum())
+                    .append(", hardSplit=")
+                    .append(s.hardSplitCount.sum())
+                    .append(", primaryCongested=")
+                    .append(s.primaryCongestedCount.sum())
+                    .append(", replicaCongested=")
+                    .append(s.replicaCongestedCount.sum())
+                    .append(")");
+              });
+      if (workerStats.size() > topWorkerLimit) {
+        sb.append(", ... and ").append(workerStats.size() - topWorkerLimit).append(" more workers");
+      }
     }
     logger.info(
         "Write stats summary for shuffle {} map {} attempt {}: queueWait={}ms, "
-            + "inflightWait={}ms, drainWait={}ms, slowPush(>{}ms)={}, maxPushRtt={}ms, "
-            + "events=[{}]",
+            + "queueStall={}ms, inflightWait={}ms, drainWait={}ms, compress={}ms, "
+            + "serialize={}ms, slowPush(>{}ms)={}, maxPushRtt={}ms, workers=[{}]",
         shuffleId,
         mapId,
         attemptId,
         queueWaitMs,
+        queueStallMs,
         inflightWaitMs,
         drainWaitMs,
+        compressMs,
+        serializeMs,
         conf.clientPushSlowPushThresholdMs(),
         slowPushes,
         maxPushRttMs,

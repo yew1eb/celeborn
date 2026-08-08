@@ -442,7 +442,9 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
           numPartitions,
           crc32PerPartition,
           bytesWrittenPerPartition,
-          serdeVersion) =>
+          serdeVersion,
+          writeMetrics,
+          pushWorkerStats) =>
       logTrace(s"Received MapperEnd TaskEnd request, " +
         s"${Utils.makeMapKey(shuffleId, mapId, attemptId)}")
       val partitionType = getPartitionType(shuffleId)
