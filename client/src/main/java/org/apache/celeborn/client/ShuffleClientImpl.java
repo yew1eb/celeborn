@@ -46,6 +46,7 @@ import org.slf4j.LoggerFactory;
 import org.apache.celeborn.client.compress.Compressor;
 import org.apache.celeborn.client.read.CelebornInputStream;
 import org.apache.celeborn.client.read.MetricsCallback;
+import org.apache.celeborn.client.read.ReadStreamStats;
 import org.apache.celeborn.client.security.CryptoHandler;
 import org.apache.celeborn.common.CelebornConf;
 import org.apache.celeborn.common.exception.CelebornBroadcastException;
@@ -64,7 +65,9 @@ import org.apache.celeborn.common.network.server.BaseMessageHandler;
 import org.apache.celeborn.common.network.util.TransportConf;
 import org.apache.celeborn.common.protocol.*;
 import org.apache.celeborn.common.protocol.message.ControlMessages.*;
+import org.apache.celeborn.common.protocol.message.ReadMetrics;
 import org.apache.celeborn.common.protocol.message.StatusCode;
+import org.apache.celeborn.common.protocol.message.WorkerReadCost;
 import org.apache.celeborn.common.protocol.message.WriteMetrics;
 import org.apache.celeborn.common.rpc.RpcAddress;
 import org.apache.celeborn.common.rpc.RpcEndpointRef;
@@ -1990,6 +1993,47 @@ public class ShuffleClientImpl extends ShuffleClient {
           });
     }
     return list;
+  }
+
+  @Override
+  public void reportReadMetrics(int shuffleId, ReadStreamStats stats) {
+    if (!conf.clientSparkUIEnabled() || stats == null) {
+      return;
+    }
+    try {
+      ReadMetrics readMetrics =
+          new ReadMetrics(
+              stats.getDecompressTimeMs(),
+              stats.getChunkWaitTimeMs(),
+              stats.getDeserializeTimeMs(),
+              stats.getCopyTimeMs(),
+              stats.getRetryCount(),
+              stats.getRetryWaitTimeMs(),
+              stats.getPeerSwitchCount(),
+              stats.getExcludeCount(),
+              stats.getSlowChunkCount(),
+              stats.getMaxChunkRttMs());
+      java.util.List<WorkerReadCost> workerReadCosts = new java.util.ArrayList<>();
+      stats
+          .getWorkerReadCosts()
+          .forEach(
+              (workerId, cost) -> {
+                workerReadCosts.add(
+                    new WorkerReadCost(
+                        workerId,
+                        cost.chunkCount.sum(),
+                        cost.bytes.sum(),
+                        cost.totalRttNanos.sum(),
+                        cost.maxRttNanos.get()));
+              });
+      lifecycleManagerRef.askSync(
+          new ReportShuffleReadMetrics(shuffleId, readMetrics, workerReadCosts, SerdeVersion.V1),
+          rpcMaxRetries,
+          rpcRetryWait,
+          ClassTag$.MODULE$.apply(ReportShuffleReadMetricsResponse.class));
+    } catch (Exception e) {
+      logger.warn("Failed to report read metrics for shuffle " + shuffleId, e);
+    }
   }
 
   @Override

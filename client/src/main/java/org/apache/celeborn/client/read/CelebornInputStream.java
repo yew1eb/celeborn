@@ -808,6 +808,9 @@ public abstract class CelebornInputStream extends InputStream {
         decompressor = null;
         fetchExcludedWorkers = null;
 
+        // Report read-path metrics to the driver for the UI (no-op when UI disabled).
+        shuffleClient.reportReadMetrics(shuffleId, streamStats);
+
         closed = true;
       }
     }
