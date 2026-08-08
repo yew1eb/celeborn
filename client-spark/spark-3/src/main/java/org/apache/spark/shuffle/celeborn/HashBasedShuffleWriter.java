@@ -76,6 +76,8 @@ public class HashBasedShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
   // CPU cost of copying serialized records into the push buffer in write0, flushed into
   // PushState at close.
   private long copyTimeNanos = 0;
+  // Total serialized (pre-compression) bytes written in write0, flushed into PushState at close.
+  private long uncompressedBytes = 0;
   private final int numMappers;
   private final int numPartitions;
 
@@ -222,6 +224,7 @@ public class HashBasedShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
 
       final int rowSize = row.getSizeInBytes();
       final int serializedRecordSize = 4 + rowSize;
+      uncompressedBytes += serializedRecordSize;
 
       if (dataSize != null) {
         dataSize.add(rowSize);
@@ -397,6 +400,11 @@ public class HashBasedShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
       shuffleClient
           .getPushState(Utils.makeMapKey(shuffleId, mapId, encodedAttemptId))
           .addCopyTime(copyTimeNanos);
+    }
+    if (uncompressedBytes > 0) {
+      shuffleClient
+          .getPushState(Utils.makeMapKey(shuffleId, mapId, encodedAttemptId))
+          .addUncompressedBytes(uncompressedBytes);
     }
     // Send the remaining data in sendBuffer
     long pushMergedDataTime = System.nanoTime();

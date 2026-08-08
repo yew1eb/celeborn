@@ -58,6 +58,7 @@ class CelebornListener(conf: SparkConf, kvstore: ElementTrackingStore)
   private val aggDrainWaitTimeMs = new java.util.concurrent.atomic.AtomicLong(0)
   private val aggSlowPushCount = new java.util.concurrent.atomic.AtomicLong(0)
   private val aggMaxPushRttMs = new java.util.concurrent.atomic.AtomicLong(0)
+  private val aggUncompressedBytes = new java.util.concurrent.atomic.AtomicLong(0)
   // Per-worker push stats (workerId -> mutable accumulator), merged from each event.
   private val perWorkerWriteStats =
     new java.util.concurrent.ConcurrentHashMap[String, PerWorkerWriteAccumulator]
@@ -179,7 +180,7 @@ class CelebornListener(conf: SparkConf, kvstore: ElementTrackingStore)
     case e: CelebornReassignEvent =>
       kvstore.write(new CelebornReassignStatsUIData(
         e.partitionSplit,
-        e.blockSendFailure,
+        e.reviveTriggered,
         e.stageRetry,
         e.timestamp))
       mayUpdate(false)
@@ -195,6 +196,7 @@ class CelebornListener(conf: SparkConf, kvstore: ElementTrackingStore)
       aggDrainWaitTimeMs.addAndGet(w.drainWaitTimeMs)
       aggSlowPushCount.addAndGet(w.slowPushCount)
       aggMaxPushRttMs.accumulateAndGet(w.maxPushRttMs, math.max)
+      aggUncompressedBytes.addAndGet(w.uncompressedBytes)
       // Merge per-worker push stats.
       e.pushWorkerStats.asScala.foreach { s =>
         val acc =
@@ -264,7 +266,8 @@ class CelebornListener(conf: SparkConf, kvstore: ElementTrackingStore)
       aggInflightWaitTimeMs.get(),
       aggDrainWaitTimeMs.get(),
       aggSlowPushCount.get(),
-      aggMaxPushRttMs.get()))
+      aggMaxPushRttMs.get(),
+      aggUncompressedBytes.get()))
     perWorkerWriteStats.asScala.foreach { case (workerId, acc) =>
       kvstore.write(new CelebornPerWorkerWriteStatsUIData(
         workerId,

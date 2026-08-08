@@ -69,6 +69,8 @@ public class SortBasedShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
   private long serializeTimeNanos = 0;
   // CPU cost of copying serialized records (giant record path), flushed into PushState at close.
   private long copyTimeNanos = 0;
+  // Total serialized (pre-compression) bytes written, flushed into PushState at close.
+  private long uncompressedBytes = 0;
   private final int numMappers;
   private final int numPartitions;
 
@@ -273,6 +275,7 @@ public class SortBasedShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
 
       final int rowSize = row.getSizeInBytes();
       final int serializedRecordSize = 4 + rowSize;
+      uncompressedBytes += serializedRecordSize;
 
       if (dataSize != null) {
         dataSize.add(serializedRecordSize);
@@ -396,6 +399,11 @@ public class SortBasedShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
       shuffleClient
           .getPushState(Utils.makeMapKey(shuffleId, mapId, encodedAttemptId))
           .addCopyTime(copyTimeNanos);
+    }
+    if (uncompressedBytes > 0) {
+      shuffleClient
+          .getPushState(Utils.makeMapKey(shuffleId, mapId, encodedAttemptId))
+          .addUncompressedBytes(uncompressedBytes);
     }
     logger.info("Memory used {}", Utils.bytesToString(pusher.getUsed()));
     long pushStartTime = System.nanoTime();

@@ -63,7 +63,8 @@ case class WriteMetrics(
     inflightWaitTimeMs: Long,
     drainWaitTimeMs: Long,
     slowPushCount: Long,
-    maxPushRttMs: Long)
+    maxPushRttMs: Long,
+    uncompressedBytes: Long)
 
 // Per-(shuffle,mapId,attemptId,worker) push cost carried in MapperEnd for the UI.
 case class PushWorkerStats(
@@ -825,6 +826,7 @@ object ControlMessages extends Logging {
           .setDrainWaitTimeMs(w.drainWaitTimeMs)
           .setSlowPushCount(w.slowPushCount)
           .setMaxPushRttMs(w.maxPushRttMs)
+          .setUncompressedBytes(w.uncompressedBytes)
       }
       pushWorkerStats.asScala.foreach { s =>
         builder.addPushWorkerStats(
@@ -1387,7 +1389,8 @@ object ControlMessages extends Logging {
               pbMapperEnd.getInflightWaitTimeMs,
               pbMapperEnd.getDrainWaitTimeMs,
               pbMapperEnd.getSlowPushCount,
-              pbMapperEnd.getMaxPushRttMs)
+              pbMapperEnd.getMaxPushRttMs,
+              pbMapperEnd.getUncompressedBytes)
             if (w.copyTimeMs == 0 && w.serializeTimeMs == 0 && w.compressTimeMs == 0 &&
               w.queueWaitTimeMs == 0 && w.drainWaitTimeMs == 0 && w.slowPushCount == 0) {
               None

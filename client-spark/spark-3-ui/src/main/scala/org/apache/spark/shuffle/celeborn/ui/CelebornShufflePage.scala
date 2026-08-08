@@ -58,7 +58,6 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
     val assignments = statusStore.assignmentInfos()
     val properties = statusStore.celebornProperties()
     val reassign = statusStore.reassignStats()
-    val writeMetrics = statusStore.aggregatedWriteMetrics()
     val taskInfo = statusStore.aggregatedTaskInfo()
     val writeTimes = statusStore.writeTimes()
     val perWorkerStats = statusStore.perWorkerWriteStats()
@@ -79,28 +78,42 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
     val summary: Seq[Node] =
       <div>
         <ul class="list-unstyled">
-          <li>
-            <strong>Celeborn Shuffle Service</strong>
-          </li>
           <li>Total Shuffle Write Bytes: {org.apache.spark.util.Utils.bytesToString(writeBytes)}</li>
           <li>Total Shuffle Read Bytes: {org.apache.spark.util.Utils.bytesToString(readBytes)}</li>
+          <li>Compression Ratio:
+            {
+        if (writeBytes > 0)
+          f"${writeTimes.uncompressedBytes.toDouble / writeBytes.toDouble}%.2f"
+        else "N/A"
+      }
+            (uncompressed {org.apache.spark.util.Utils.bytesToString(writeTimes.uncompressedBytes)}
+            / compressed {org.apache.spark.util.Utils.bytesToString(writeBytes)})</li>
           <li>Client Observed Write Speed: {mbps(writeBytes, writeMs)} MB/s</li>
           <li>Client Observed Read Speed: {mbps(readBytes, readMs)} MB/s</li>
           <li>Shuffle Write Time / Task CPU Time: {pct(writeMs, cpuMs)}</li>
           <li>Shuffle Read Time / Task CPU Time: {pct(readMs, cpuMs)}</li>
-          <li>Reassign Status: partitionSplit={reassign.partitionSplit},
-            blockSendFailure={reassign.blockSendFailure}, stageRetry={reassign.stageRetry}</li>
+          <li>Shuffle Adjustments: partitionSplit={reassign.partitionSplit},
+            reviveTriggered={reassign.reviveTriggered}, stageRetry={reassign.stageRetry}</li>
           <li>
             <a href="#properties">Celeborn Properties</a> ({properties.info.length} entries)
-          </li>
-          <li>
-            <a href="#assignments">Shuffle Assignments</a> ({assignments.length} shuffles)
           </li>
           <li>
             <a href="#throughput">Shuffle Throughput</a>
           </li>
           <li>
-            <a href="#write">Per-shuffle Write Metrics</a>
+            <a href="#assignments">Shuffle Assignments</a> ({assignments.length} shuffles)
+          </li>
+          <li>
+            <a href="#write-servers">Shuffle Write Servers</a>
+          </li>
+          <li>
+            <a href="#read-servers">Shuffle Read Servers</a>
+          </li>
+          <li>
+            <a href="#write-times">Shuffle Write Times</a>
+          </li>
+          <li>
+            <a href="#read-times">Shuffle Read Times</a>
           </li>
         </ul>
       </div>
@@ -140,16 +153,20 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
       (
         "Total Shuffle Write Bytes",
         org.apache.spark.util.Utils.bytesToString(taskInfo.shuffleWriteBytes)),
-      ("Total Shuffle Write Time (ms)", taskInfo.shuffleWriteTimeMs),
+      ("Total Shuffle Write Time", taskInfo.shuffleWriteTimeMs),
       (
         "Total Shuffle Read Bytes",
         org.apache.spark.util.Utils.bytesToString(taskInfo.shuffleReadBytes)),
-      ("Total Fetch Wait Time (ms)", taskInfo.shuffleFetchWaitTimeMs),
-      ("Total Task CPU Time (ms)", taskInfo.taskCpuTimeMs))
+      ("Total Fetch Wait Time", taskInfo.shuffleFetchWaitTimeMs),
+      ("Total Task CPU Time", taskInfo.taskCpuTimeMs))
     val throughputRowsXml = throughputRows.map { case (label, value) =>
       <tr>
         <td>{label}</td>
-        <td>{value.toString}</td>
+        <td>{
+        if (label.contains("Time") || label.contains("RTT"))
+          org.apache.spark.util.Utils.msDurationToString(value)
+        else value.toString
+      }</td>
       </tr>
     }
     val throughputTable =
@@ -165,29 +182,6 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
         </tbody>
       </table>
 
-    val writeRows = writeMetrics.metrics.asScala.toSeq.sortBy(_._1).map { case (sid, m) =>
-      <tr>
-        <td>{sid}</td>
-        <td>{org.apache.spark.util.Utils.bytesToString(m.bytesWritten)}</td>
-        <td>{m.recordsWritten}</td>
-        <td>{m.writeTimeMs}</td>
-      </tr>
-    }
-    val writeTable =
-      <table class="table table-bordered table-striped table-sm">
-        <thead>
-          <tr>
-            <th>Shuffle Id</th>
-            <th>Bytes Written</th>
-            <th>Records Written</th>
-            <th>Write Time (ms)</th>
-          </tr>
-        </thead>
-        <tbody>
-          {writeRows}
-        </tbody>
-      </table>
-
     val writeTimesRows = Seq(
       ("Copy Time", writeTimes.copyTimeMs),
       ("Serialize Time", writeTimes.serializeTimeMs),
@@ -197,11 +191,15 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
       ("Inflight Wait Time", writeTimes.inflightWaitTimeMs),
       ("Drain Wait Time", writeTimes.drainWaitTimeMs),
       ("Slow Push Count", writeTimes.slowPushCount),
-      ("Max Push RTT (ms)", writeTimes.maxPushRttMs))
+      ("Max Push RTT", writeTimes.maxPushRttMs))
     val writeTimesRowsXml = writeTimesRows.map { case (label, value) =>
       <tr>
         <td>{label}</td>
-        <td>{value.toString}</td>
+        <td>{
+        if (label.contains("Time") || label.contains("RTT"))
+          org.apache.spark.util.Utils.msDurationToString(value)
+        else value.toString
+      }</td>
       </tr>
     }
     val writeTimesTable =
@@ -209,7 +207,7 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
         <thead>
           <tr>
             <th>Stage</th>
-            <th>Time (ms)</th>
+            <th>Value</th>
           </tr>
         </thead>
         <tbody>
@@ -222,7 +220,10 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
         <td>{s.workerId}</td>
         <td>{org.apache.spark.util.Utils.bytesToString(s.pushBytes)}</td>
         <td>{s.pushCount}</td>
-        <td>{s.totalPushRttNanos}</td>
+        <td>{
+        org.apache.spark.util.Utils.msDurationToString(
+          java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(s.totalPushRttNanos))
+      }</td>
         <td>{s.softSplitCount}</td>
         <td>{s.hardSplitCount}</td>
         <td>{s.primaryCongestedCount}</td>
@@ -237,7 +238,7 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
             <th>Worker Id</th>
             <th>Push Bytes</th>
             <th>Push Count</th>
-            <th>Total Push RTT (ns)</th>
+            <th>Total Push RTT</th>
             <th>Soft Split</th>
             <th>Hard Split</th>
             <th>Primary Congested</th>
@@ -260,11 +261,15 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
       ("Peer Switch Count", readTimes.peerSwitchCount),
       ("Exclude Count", readTimes.excludeCount),
       ("Slow Chunk Count", readTimes.slowChunkCount),
-      ("Max Chunk RTT (ms)", readTimes.maxChunkRttMs))
+      ("Max Chunk RTT", readTimes.maxChunkRttMs))
     val readTimesRowsXml = readTimesRows.map { case (label, value) =>
       <tr>
         <td>{label}</td>
-        <td>{value.toString}</td>
+        <td>{
+        if (label.contains("Time") || label.contains("RTT"))
+          org.apache.spark.util.Utils.msDurationToString(value)
+        else value.toString
+      }</td>
       </tr>
     }
     val readTimesTable =
@@ -285,8 +290,14 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
         <td>{s.workerId}</td>
         <td>{s.chunkCount}</td>
         <td>{org.apache.spark.util.Utils.bytesToString(s.bytes)}</td>
-        <td>{s.totalRttNanos}</td>
-        <td>{s.maxRttNanos}</td>
+        <td>{
+        org.apache.spark.util.Utils.msDurationToString(
+          java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(s.totalRttNanos))
+      }</td>
+        <td>{
+        org.apache.spark.util.Utils.msDurationToString(
+          java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(s.maxRttNanos))
+      }</td>
       </tr>
     }
     val perWorkerReadTable =
@@ -296,8 +307,8 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
             <th>Worker Id</th>
             <th>Chunk Count</th>
             <th>Read Bytes</th>
-            <th>Total RTT (ns)</th>
-            <th>Max RTT (ns)</th>
+            <th>Total RTT</th>
+            <th>Max RTT</th>
           </tr>
         </thead>
         <tbody>
@@ -323,20 +334,18 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
       }</script>
         <a name="properties"></a>
         {collapsible("celeborn-properties", "Celeborn Properties", propertiesTable)}
-        <a name="assignments"></a>
-        {collapsible("assignments", "Shuffle Assignments", assignmentTable)}
         <a name="throughput"></a>
         {collapsible("throughput", "Shuffle Throughput", throughputTable)}
-        <a name="write"></a>
-        {collapsible("per-shuffle-write", "Per-shuffle Write Metrics", writeTable)}
-        <a name="writetimes"></a>
-        {collapsible("write-times", "Shuffle Write Times", writeTimesTable)}
-        <a name="servers"></a>
-        {collapsible("shuffle-servers", "Shuffle Servers", perWorkerTable)}
-        <a name="readtimes"></a>
-        {collapsible("read-times", "Shuffle Read Times", readTimesTable)}
-        <a name="readservers"></a>
+        <a name="assignments"></a>
+        {collapsible("assignments", "Shuffle Assignments", assignmentTable)}
+        <a name="write-servers"></a>
+        {collapsible("shuffle-write-servers", "Shuffle Write Servers", perWorkerTable)}
+        <a name="read-servers"></a>
         {collapsible("shuffle-read-servers", "Shuffle Read Servers", perWorkerReadTable)}
+        <a name="write-times"></a>
+        {collapsible("write-times", "Shuffle Write Times", writeTimesTable)}
+        <a name="read-times"></a>
+        {collapsible("read-times", "Shuffle Read Times", readTimesTable)}
       </div>
 
     UIUtils.headerSparkPage(request, "Celeborn Shuffle Service", content, parent)

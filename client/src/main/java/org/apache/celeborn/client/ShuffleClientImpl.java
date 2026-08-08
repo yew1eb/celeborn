@@ -1959,7 +1959,8 @@ public class ShuffleClientImpl extends ShuffleClient {
             pushState.getInflightWaitTimeMs(),
             pushState.getDrainWaitTimeMs(),
             pushState.getSlowPushCount(),
-            pushState.getMaxPushRttMs());
+            pushState.getMaxPushRttMs(),
+            pushState.getUncompressedBytes());
     return Option.apply(wm);
   }
 

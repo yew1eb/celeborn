@@ -918,8 +918,8 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
       return
     }
     // A revive request means a mapper's push failed and asked for a new partition location.
-    // Mark blockSendFailure for the UI (deduped to the first trigger).
-    maybeFireReassign(reassignBlockSendFailureTriggered.compareAndSet(false, true))
+    // Mark reviveTriggered for the UI (deduped to the first trigger).
+    maybeFireReassign(reassignReviveTriggered.compareAndSet(false, true))
     logDebug(
       s"[handleRevive] shuffle $shuffleId, $mapIds, $partitionIds, $oldEpochs, $oldPartitions, $causes")
     if (commitManager.isStageEnd(shuffleId)) {
@@ -2041,7 +2041,7 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
   // postReassignTriggeredEvent AtomicBoolean.compareAndSet). The driver-side SparkShuffleManager
   // registers a callback that posts a CelebornReassignEvent carrying the current 3-boolean state.
   private val reassignPartitionSplitTriggered = new java.util.concurrent.atomic.AtomicBoolean(false)
-  private val reassignBlockSendFailureTriggered =
+  private val reassignReviveTriggered =
     new java.util.concurrent.atomic.AtomicBoolean(false)
   private val reassignStageRetryTriggered = new java.util.concurrent.atomic.AtomicBoolean(false)
   @volatile private var reassignCallback
@@ -2070,13 +2070,13 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
 
   /**
    * Fire the reassign callback with the current state if any flag was just flipped.
-   *  Called from handleRevive (blockSendFailure) and handlePartitionSplit (partitionSplit).
+   *  Called from handleRevive (reviveTriggered) and handlePartitionSplit (partitionSplit).
    */
   private def maybeFireReassign(triggered: Boolean): Unit = {
     if (triggered) {
       val state = new java.util.ArrayList[java.lang.Boolean]()
       state.add(reassignPartitionSplitTriggered.get(): java.lang.Boolean)
-      state.add(reassignBlockSendFailureTriggered.get(): java.lang.Boolean)
+      state.add(reassignReviveTriggered.get(): java.lang.Boolean)
       state.add(reassignStageRetryTriggered.get(): java.lang.Boolean)
       reassignCallback.foreach(_.accept(state))
     }

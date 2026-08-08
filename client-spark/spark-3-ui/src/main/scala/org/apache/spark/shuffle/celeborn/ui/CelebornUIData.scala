@@ -68,7 +68,7 @@ private[celeborn] class CelebornPropertiesUIData(val info: Seq[(String, String)]
  */
 private[celeborn] class CelebornReassignStatsUIData(
     val partitionSplit: Boolean,
-    val blockSendFailure: Boolean,
+    val reviveTriggered: Boolean,
     val stageRetry: Boolean,
     val timestamp: Long) {
   @JsonIgnore
@@ -120,7 +120,8 @@ private[celeborn] class CelebornWriteTimesUIData(
     val inflightWaitTimeMs: Long,
     val drainWaitTimeMs: Long,
     val slowPushCount: Long,
-    val maxPushRttMs: Long) {
+    val maxPushRttMs: Long,
+    val uncompressedBytes: Long) {
   @JsonIgnore
   @KVIndex
   def id: String = classOf[CelebornWriteTimesUIData].getName

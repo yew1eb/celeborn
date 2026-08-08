@@ -391,6 +391,7 @@ message PbMapperEnd {
   int64 slowPushCount = 17;
   int64 maxPushRttMs = 18;
   repeated PbPushWorkerStats pushWorkerStats = 19;
+  int64 uncompressedBytes = 20;
 }
 
 // Per-(shuffle,mapId,attemptId,worker) push cost for the UI's Shuffle Servers section.

@@ -71,6 +71,8 @@ public class PushState {
   private final LongAdder serializeTimeNanos = new LongAdder();
   // CPU cost of copying serialized records into the push buffer (writer write0 / fastWrite0).
   private final LongAdder copyTimeNanos = new LongAdder();
+  // Total serialized (pre-compression) bytes written, for the UI compression ratio.
+  private final LongAdder uncompressedBytes = new LongAdder();
 
   public void addCompressTime(long nanos) {
     compressTimeNanos.add(nanos);
@@ -84,6 +86,10 @@ public class PushState {
     copyTimeNanos.add(nanos);
   }
 
+  public void addUncompressedBytes(long bytes) {
+    uncompressedBytes.add(bytes);
+  }
+
   public long getCompressTimeMs() {
     return TimeUnit.NANOSECONDS.toMillis(compressTimeNanos.sum());
   }
@@ -94,6 +100,10 @@ public class PushState {
 
   public long getCopyTimeMs() {
     return TimeUnit.NANOSECONDS.toMillis(copyTimeNanos.sum());
+  }
+
+  public long getUncompressedBytes() {
+    return uncompressedBytes.sum();
   }
 
   public void addQueueStallTime(long nanos) {

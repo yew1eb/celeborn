@@ -63,7 +63,7 @@ case class CelebornFallbackEvent(
  */
 case class CelebornReassignEvent(
     partitionSplit: Boolean,
-    blockSendFailure: Boolean,
+    reviveTriggered: Boolean,
     stageRetry: Boolean,
     timestamp: Long) extends CelebornEvent
 
