@@ -102,7 +102,10 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
             <a href="#throughput">Shuffle Throughput</a>
           </li>
           <li>
-            <a href="#assignments">Shuffle Assignments</a> ({assignments.length} shuffles)
+            <a href="#write-times">Shuffle Write Times</a>
+          </li>
+          <li>
+            <a href="#read-times">Shuffle Read Times</a>
           </li>
           <li>
             <a href="#write-servers">Shuffle Write Servers</a>
@@ -111,10 +114,7 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
             <a href="#read-servers">Shuffle Read Servers</a>
           </li>
           <li>
-            <a href="#write-times">Shuffle Write Times</a>
-          </li>
-          <li>
-            <a href="#read-times">Shuffle Read Times</a>
+            <a href="#assignments">Shuffle Assignments</a> ({assignments.length} shuffles)
           </li>
         </ul>
       </div>
@@ -185,55 +185,30 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
         </tbody>
       </table>
 
-    val writeTimesRows: Seq[(String, String, String)] = Seq(
-      (
-        "Serialize",
-        org.apache.spark.util.Utils.msDurationToString(writeTimes.serializeTimeMs),
-        "Mapper"),
-      ("Copy", org.apache.spark.util.Utils.msDurationToString(writeTimes.copyTimeMs), "Mapper"),
-      (
-        "Queue Wait",
-        org.apache.spark.util.Utils.msDurationToString(writeTimes.queueWaitTimeMs),
-        "Mapper"),
-      (
-        "Compress",
-        org.apache.spark.util.Utils.msDurationToString(writeTimes.compressTimeMs),
-        "Pusher"),
-      (
-        "Queue Stall",
-        org.apache.spark.util.Utils.msDurationToString(writeTimes.queueStallTimeMs),
-        "Pusher"),
-      (
-        "Inflight Wait",
-        org.apache.spark.util.Utils.msDurationToString(writeTimes.inflightWaitTimeMs),
-        "Pusher"),
-      (
-        "Drain Wait",
-        org.apache.spark.util.Utils.msDurationToString(writeTimes.drainWaitTimeMs),
-        "Mapper"),
-      (
-        "Max Push RTT",
-        org.apache.spark.util.Utils.msDurationToString(writeTimes.maxPushRttMs),
-        "Network"),
-      ("Slow Push Count", writeTimes.slowPushCount.toString, "Network"))
-    val writeTimesRowsXml = writeTimesRows.map { case (stage, duration, thread) =>
-      <tr>
-        <td>{stage}</td>
-        <td>{duration}</td>
-        <td>{thread}</td>
-      </tr>
-    }
+    val writeTimesFields = Seq(
+      "Serialize" -> org.apache.spark.util.Utils.msDurationToString(writeTimes.serializeTimeMs),
+      "Copy" -> org.apache.spark.util.Utils.msDurationToString(writeTimes.copyTimeMs),
+      "Queue Wait" -> org.apache.spark.util.Utils.msDurationToString(writeTimes.queueWaitTimeMs),
+      "Background Compress" -> org.apache.spark.util.Utils.msDurationToString(
+        writeTimes.compressTimeMs),
+      "Background Queue Stall" -> org.apache.spark.util.Utils.msDurationToString(
+        writeTimes.queueStallTimeMs),
+      "Background Inflight Wait" -> org.apache.spark.util.Utils.msDurationToString(
+        writeTimes.inflightWaitTimeMs),
+      "Drain Wait" -> org.apache.spark.util.Utils.msDurationToString(writeTimes.drainWaitTimeMs),
+      "Max Push RTT" -> org.apache.spark.util.Utils.msDurationToString(writeTimes.maxPushRttMs),
+      "Slow Push" -> writeTimes.slowPushCount.toString)
     val writeTimesTable =
       <table class="table table-bordered table-striped table-sm">
         <thead>
           <tr>
-            <th>Stage</th>
-            <th>Duration</th>
-            <th>Thread</th>
+            <th></th>{writeTimesFields.map { case (n, _) => <th>{n}</th> }}
           </tr>
         </thead>
         <tbody>
-          {writeTimesRowsXml}
+          <tr>
+            <th>Duration</th>{writeTimesFields.map { case (_, d) => <td>{d}</td> }}
+          </tr>
         </tbody>
       </table>
 
@@ -273,42 +248,23 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
         </tbody>
       </table>
 
-    val readTimesRows: Seq[(String, String, String)] = Seq(
-      (
-        "Chunk Wait",
-        org.apache.spark.util.Utils.msDurationToString(readTimes.chunkWaitTimeMs),
-        "Reducer"),
-      (
-        "Decompress",
-        org.apache.spark.util.Utils.msDurationToString(readTimes.decompressTimeMs),
-        "Reducer"),
-      (
-        "Retry Wait",
-        org.apache.spark.util.Utils.msDurationToString(readTimes.retryWaitTimeMs),
-        "Reducer"),
-      (
-        "Max Chunk RTT",
-        org.apache.spark.util.Utils.msDurationToString(readTimes.maxChunkRttMs),
-        "Network"),
-      ("Slow Chunk Count", readTimes.slowChunkCount.toString, "Network"))
-    val readTimesRowsXml = readTimesRows.map { case (stage, duration, thread) =>
-      <tr>
-        <td>{stage}</td>
-        <td>{duration}</td>
-        <td>{thread}</td>
-      </tr>
-    }
+    val readTimesFields = Seq(
+      "Chunk Wait" -> org.apache.spark.util.Utils.msDurationToString(readTimes.chunkWaitTimeMs),
+      "Decompress" -> org.apache.spark.util.Utils.msDurationToString(readTimes.decompressTimeMs),
+      "Retry Wait" -> org.apache.spark.util.Utils.msDurationToString(readTimes.retryWaitTimeMs),
+      "Max Chunk RTT" -> org.apache.spark.util.Utils.msDurationToString(readTimes.maxChunkRttMs),
+      "Slow Chunk" -> readTimes.slowChunkCount.toString)
     val readTimesTable =
       <table class="table table-bordered table-striped table-sm">
         <thead>
           <tr>
-            <th>Stage</th>
-            <th>Duration</th>
-            <th>Thread</th>
+            <th></th>{readTimesFields.map { case (n, _) => <th>{n}</th> }}
           </tr>
         </thead>
         <tbody>
-          {readTimesRowsXml}
+          <tr>
+            <th>Duration</th>{readTimesFields.map { case (_, d) => <td>{d}</td> }}
+          </tr>
         </tbody>
       </table>
 
@@ -363,16 +319,16 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
         {collapsible("celeborn-properties", "Celeborn Properties", propertiesTable)}
         <a name="throughput"></a>
         {collapsible("throughput", "Shuffle Throughput", throughputTable)}
-        <a name="assignments"></a>
-        {collapsible("assignments", "Shuffle Assignments", assignmentTable)}
-        <a name="write-servers"></a>
-        {collapsible("shuffle-write-servers", "Shuffle Write Servers", perWorkerTable)}
-        <a name="read-servers"></a>
-        {collapsible("shuffle-read-servers", "Shuffle Read Servers", perWorkerReadTable)}
         <a name="write-times"></a>
         {collapsible("write-times", "Shuffle Write Times", writeTimesTable)}
         <a name="read-times"></a>
         {collapsible("read-times", "Shuffle Read Times", readTimesTable)}
+        <a name="write-servers"></a>
+        {collapsible("shuffle-write-servers", "Shuffle Write Servers", perWorkerTable)}
+        <a name="read-servers"></a>
+        {collapsible("shuffle-read-servers", "Shuffle Read Servers", perWorkerReadTable)}
+        <a name="assignments"></a>
+        {collapsible("assignments", "Shuffle Assignments", assignmentTable)}
       </div>
 
     UIUtils.headerSparkPage(request, "Celeborn Shuffle Service", content, parent)
