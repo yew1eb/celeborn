@@ -218,21 +218,53 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
       </table>
 
     val content: Seq[Node] =
-      <div><span>{summary}</span></div> ++
-        <a name="buildinfo"></a> ++
-        <h4><strong>Build Information</strong></h4> ++ buildInfoTable ++
-        <a name="properties"></a> ++
-        <h4><strong>Celeborn Properties</strong></h4> ++ propertiesTable ++
-        <a name="assignments"></a> ++
-        <h4><strong>Shuffle Assignments</strong></h4> ++ assignmentTable ++
-        <a name="fallback"></a> ++
-        <h4><strong>Fallback Statistics</strong></h4> ++ fallbackTable ++
-        <a name="throughput"></a> ++
-        <h4><strong>Shuffle Throughput</strong></h4> ++ throughputTable ++
-        <a name="write"></a> ++
-        <h4><strong>Per-shuffle Write Metrics</strong></h4> ++ writeTable
+      <div>
+        <span>{summary}</span>
+        <script type="text/javascript">{
+        scala.xml.Unparsed("""
+          if (typeof window.collapseTable !== 'function') {
+            window.collapseTable = function(thisName, table) {
+              var thisClass = '.' + thisName;
+              var tableDiv = $(thisClass).parent().find('.' + table);
+              $(tableDiv).toggleClass('collapsed');
+              $(thisClass).find('.collapse-table-arrow')
+                .toggleClass('arrow-open').toggleClass('arrow-closed');
+            };
+          }
+        """)
+      }</script>
+        <a name="buildinfo"></a>
+        {collapsible("build-info", "Build Information", buildInfoTable)}
+        <a name="properties"></a>
+        {collapsible("celeborn-properties", "Celeborn Properties", propertiesTable)}
+        <a name="assignments"></a>
+        {collapsible("assignments", "Shuffle Assignments", assignmentTable)}
+        <a name="fallback"></a>
+        {collapsible("fallback", "Fallback Statistics", fallbackTable)}
+        <a name="throughput"></a>
+        {collapsible("throughput", "Shuffle Throughput", throughputTable)}
+        <a name="write"></a>
+        {collapsible("per-shuffle-write", "Per-shuffle Write Metrics", writeTable)}
+      </div>
 
     UIUtils.headerSparkPage(request, "Celeborn Shuffle Service", content, parent)
+  }
+
+  /** A collapsible section (default collapsed), mirroring Uniffle's collapse-table pattern. */
+  private def collapsible(id: String, title: String, body: Seq[Node]): Seq[Node] = {
+    val spanClass = s"collapse-$id collapse-table"
+    val bodyClass = s"$id-table collapsible-table collapsed"
+    <div>
+      <span class={spanClass} onClick={s"collapseTable('collapse-$id', '$id-table')"}>
+        <h4>
+          <span class="collapse-table-arrow arrow-closed"></span>
+          <a>{title}</a>
+        </h4>
+      </span>
+      <div class={bodyClass}>
+        {body}
+      </div>
+    </div>
   }
 
   private def propertyHeader: Seq[String] = Seq("Property", "Value")
