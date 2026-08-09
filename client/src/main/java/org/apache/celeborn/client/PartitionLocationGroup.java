@@ -232,6 +232,12 @@ public class PartitionLocationGroup {
     return p == null ? (single == null ? 0 : 1) : p.active.size();
   }
 
+  /** Visible for testing and observability logging. */
+  int retiredCount() {
+    ParallelState p = parallel;
+    return p == null ? 0 : p.retired.size();
+  }
+
   private ParallelState inflateIfNeeded() {
     ParallelState p = parallel;
     if (p == null) {

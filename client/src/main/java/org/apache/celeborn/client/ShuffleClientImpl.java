@@ -482,11 +482,21 @@ public class ShuffleClientImpl extends ShuffleClient {
       StatusCode cause,
       ReviveRequest request) {
     group.retire(epoch, cause);
-    if (group.anotherUsableFor(mapId, epoch) != null) {
+    PartitionLocation fallback = group.anotherUsableFor(mapId, epoch);
+    if (fallback != null) {
       // Another active location is available: re-push to it immediately without waiting for
       // the revive response. The retry thread reads the preset SUCCESS and picks the other
       // active location.
       request.reviveStatus = StatusCode.SUCCESS.getValue();
+      logger.info(
+          "Shuffle {} partition {}: location epoch {} retired (cause {}), "
+              + "re-push immediately to epoch {}@{} without waiting for revive.",
+          shuffleId,
+          request.partitionId,
+          epoch,
+          cause,
+          fallback.getEpoch(),
+          fallback.hostAndPushPort());
     }
   }
 
@@ -502,6 +512,15 @@ public class ShuffleClientImpl extends ShuffleClient {
       PartitionLocationGroup latestGroup = locationGroup(shuffleId, partitionId);
       if (latestGroup != null) {
         boolean newlyRetired = latestGroup.retire(latest.getEpoch(), StatusCode.SOFT_SPLIT);
+        if (newlyRetired) {
+          logger.info(
+              "Shuffle {} partition {}: location epoch {}@{} soft-split, "
+                  + "keep draining and report to LifecycleManager.",
+              shuffleId,
+              partitionId,
+              latest.getEpoch(),
+              latest.hostAndPushPort());
+        }
         if (newlyRetired && !mapperEnded(shuffleId, mapId)) {
           ReviveRequest reviveRequest =
               new ReviveRequest(
@@ -1102,7 +1121,34 @@ public class ShuffleClientImpl extends ShuffleClient {
             if (additionals != null) {
               allActive.addAll(additionals);
             }
+            int beforeActive = group.activeCount();
+            int beforeRetired = group.retiredCount();
             group.mergeActiveLocations(allActive, true);
+            int afterActive = group.activeCount();
+            if (afterActive > beforeActive && afterActive > 1) {
+              StringBuilder sb = new StringBuilder();
+              for (PartitionLocation l : allActive) {
+                if (sb.length() > 0) {
+                  sb.append(",");
+                }
+                sb.append(l.getEpoch()).append("@").append(l.hostAndPushPort());
+              }
+              logger.info(
+                  "Shuffle {} partition {}: parallel write active, now writing to {} locations: {}.",
+                  shuffleId,
+                  partitionId,
+                  afterActive,
+                  sb);
+            }
+            int evicted = beforeRetired - group.retiredCount();
+            if (evicted > 0) {
+              logger.debug(
+                  "Shuffle {} partition {}: evicted {} retired location(s) no longer reported "
+                      + "by LifecycleManager.",
+                  shuffleId,
+                  partitionId,
+                  evicted);
+            }
           } else if (loc != null) {
             group.updateLatest(loc);
           }
@@ -1217,6 +1263,12 @@ public class ShuffleClientImpl extends ShuffleClient {
     if (currentLoc == null && group != null && adaptivePartitionWriteParallelismEnabled) {
       // All known locations of this partition are unusable, synchronously revive for a
       // fresh location (same semantics as the legacy single-location revive).
+      logger.info(
+          "Shuffle {} partition {}: all {} location(s) unusable, blocking revive from epoch {}.",
+          shuffleId,
+          partitionId,
+          group.activeCount(),
+          group.maxEpoch());
       if (!revive(
           shuffleId,
           mapId,

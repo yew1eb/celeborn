@@ -45,6 +45,8 @@ private[client] class HotState {
   // Desired total number of active locations of the partition. Monotone increasing,
   // capped at maxLocationsPerPartition.
   @volatile var desired: Int = 1
+  // Number of splits judged as hot fills (for the stage-end summary log).
+  @volatile var judgedSplits: Int = 0
 }
 
 /**
@@ -122,6 +124,8 @@ private[client] class PartitionHotnessTracker(
       (cause.contains(StatusCode.SOFT_SPLIT) || cause.contains(StatusCode.HARD_SPLIT)) &&
         workerAvailableByLocation(oldPartition)
     if (!measureEligible) {
+      logDebug(s"Partition $shuffleId-$partitionId epoch $epoch retired, not measured " +
+        s"(cause ${cause.getOrElse("unknown")} not split-related or worker unavailable).")
       return
     }
     if (hotState != null && hotState.splitReported.contains(Integer.valueOf(epoch))) {
@@ -139,6 +143,11 @@ private[client] class PartitionHotnessTracker(
     }
     if (allocTime == null || nowMs - allocTime >= adaptivePartitionWriteParallelismHotWindowMs) {
       markSplitReported(hotState, epoch)
+      logDebug(s"Partition $shuffleId-$partitionId epoch $epoch retired " +
+        s"(cause ${cause.get}), not hot: " +
+        (if (allocTime == null) "alloc time unknown."
+         else s"fill time ${nowMs - allocTime}ms >= window " +
+           s"${adaptivePartitionWriteParallelismHotWindowMs}ms."))
       return
     }
     val state = getOrCreateHotState(shuffleId, partitionId)
@@ -148,6 +157,7 @@ private[client] class PartitionHotnessTracker(
         val target =
           math.ceil(adaptivePartitionWriteParallelismHotWindowMs.toDouble / fillTimeMs).toInt
         val newDesired = math.min(adaptivePartitionWriteParallelismMaxLocations, target)
+        state.judgedSplits += 1
         if (newDesired > state.desired) {
           state.desired = newDesired
           logInfo(s"Partition $shuffleId-$partitionId filled a location in " +
@@ -226,9 +236,22 @@ private[client] class PartitionHotnessTracker(
     }
   }
 
-  /** Remove all hot state of a shuffle. */
+  /** Remove all hot state of a shuffle, logging a one-line summary of its hot partitions. */
   private[client] def removeShuffle(shuffleId: Int): Unit = {
-    partitionHotStates.remove(shuffleId)
+    val map = partitionHotStates.remove(shuffleId)
     shuffleInitialAllocTimeMs.remove(shuffleId)
+    if (map != null) {
+      val hot = map.asScala.filter(_._2.desired > 1)
+      if (hot.nonEmpty) {
+        val details = hot.toSeq
+          .sortBy(_._1.intValue())
+          .map { case (partitionId, state) =>
+            s"$partitionId(desired=${state.desired},judgedSplits=${state.judgedSplits})"
+          }
+          .mkString(", ")
+        logInfo(s"Shuffle $shuffleId adaptive partition write parallelism summary: " +
+          s"${hot.size} hot partition(s): $details")
+      }
+    }
   }
 }

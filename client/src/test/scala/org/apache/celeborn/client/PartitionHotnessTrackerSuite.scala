@@ -32,8 +32,17 @@ class PartitionHotnessTrackerSuite extends CelebornFunSuite {
     new PartitionLocation(partitionId, epoch, host, 9000, 9100, 9200, 9300, Mode.PRIMARY)
 
   private def makeTracker(
-      workerAvailable: PartitionLocation => Boolean): PartitionHotnessTracker =
-    new PartitionHotnessTracker(new CelebornConf(), (_, _) => None, workerAvailable)
+      workerAvailable: PartitionLocation => Boolean,
+      maxLocations: Int = -1): PartitionHotnessTracker = {
+    val conf = new CelebornConf()
+    if (maxLocations > 0) {
+      // Pin the cap so capping tests are independent of the product default.
+      conf.set(
+        CelebornConf.CLIENT_SHUFFLE_ADAPTIVE_PARTITION_WRITE_PARALLELISM_MAX_LOCATIONS.key,
+        maxLocations.toString)
+    }
+    new PartitionHotnessTracker(conf, (_, _) => None, workerAvailable)
+  }
 
   test("HARD_SPLIT with an available worker boosts desired") {
     val tracker = makeTracker(_ => true)
@@ -90,7 +99,7 @@ class PartitionHotnessTrackerSuite extends CelebornFunSuite {
   }
 
   test("fillTime proportionally steps desired, capped at maxLocationsPerPartition") {
-    val tracker = makeTracker(_ => true)
+    val tracker = makeTracker(_ => true, 4)
     val loc0 = makeLoc(partitionId, 0, "host1")
     tracker.recordInitialAllocTime(shuffleId, Array(loc0), 0L)
 
@@ -123,7 +132,7 @@ class PartitionHotnessTrackerSuite extends CelebornFunSuite {
   }
 
   test("desired never decreases on slower subsequent fills") {
-    val tracker = makeTracker(_ => true)
+    val tracker = makeTracker(_ => true, 4)
     val loc0 = makeLoc(partitionId, 0, "host1")
     tracker.recordInitialAllocTime(shuffleId, Array(loc0), 0L)
 

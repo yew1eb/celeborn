@@ -5416,7 +5416,7 @@ object CelebornConf extends Logging {
       .version("0.7.0")
       .intConf
       .checkValue(v => v > 0, "Must be positive.")
-      .createWithDefault(4)
+      .createWithDefault(8)
 
   val CLIENT_SHUFFLE_ADAPTIVE_PARTITION_WRITE_PARALLELISM_HOT_WINDOW: ConfigEntry[Long] =
     buildConf("celeborn.client.shuffle.adaptivePartitionWriteParallelism.hotWindow")

@@ -292,6 +292,10 @@ class ChangePartitionManagerAdaptiveParallelismSuite extends CelebornFunSuite {
 
   test("proportional step-up: a much faster fill jumps straight to the cap, no debounce") {
     val conf = makeConf()
+    // Pin the cap to 4 so the test is independent of the product default.
+    conf.set(
+      CelebornConf.CLIENT_SHUFFLE_ADAPTIVE_PARTITION_WRITE_PARALLELISM_MAX_LOCATIONS.key,
+      "4")
     val shuffleId = 1
     val partitionId = 0
     val workers = (1 to 3).map(makeWorker)
@@ -328,6 +332,10 @@ class ChangePartitionManagerAdaptiveParallelismSuite extends CelebornFunSuite {
 
   test("desired is capped at maxLocationsPerPartition") {
     val conf = makeConf()
+    // Pin the cap to 4 so the test is independent of the product default.
+    conf.set(
+      CelebornConf.CLIENT_SHUFFLE_ADAPTIVE_PARTITION_WRITE_PARALLELISM_MAX_LOCATIONS.key,
+      "4")
     val shuffleId = 1
     val partitionId = 0
     val workers = (1 to 2).map(makeWorker)

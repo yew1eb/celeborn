@@ -650,6 +650,24 @@ class ChangePartitionManager(
           latestEpoch(shuffleId, partitionId).getOrElse(change.epoch),
           (surviving + change.epoch).max)
         val newEpochs = allocateGapLocations(partitionId, baseEpoch, gap, candidates, slots)
+        if (newEpochs.nonEmpty) {
+          val hosts = slots.asScala.flatMap { case (worker, (primaries, replicas)) =>
+            val hit = primaries.asScala.exists(loc =>
+              loc.getId == partitionId && newEpochs.contains(loc.getEpoch)) ||
+              replicas.asScala.exists(loc =>
+                loc.getId == partitionId && newEpochs.contains(loc.getEpoch))
+            if (hit) Some(worker.host) else None
+          }.toSet
+          logInfo(s"[adaptiveParallelism] Shuffle $shuffleId partition $partitionId: " +
+            s"allocated ${newEpochs.size} additional location(s) (desired $desired, " +
+            s"surviving ${surviving.size}), epochs ${newEpochs.toSeq.sorted.mkString(",")} " +
+            s"on workers ${hosts.mkString(",")}.")
+        }
+        if (newEpochs.size < gap) {
+          logWarning(s"[adaptiveParallelism] Shuffle $shuffleId partition $partitionId: " +
+            s"wanted $gap additional location(s) but allocated ${newEpochs.size} " +
+            s"(not enough candidate workers).")
+        }
         allocations.put(partitionId, ParallelAllocation(surviving, newEpochs))
       } else {
         allocations.put(partitionId, ParallelAllocation(surviving, Set.empty))
