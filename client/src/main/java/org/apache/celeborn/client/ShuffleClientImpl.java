@@ -44,6 +44,7 @@ import org.apache.celeborn.client.compress.Compressor;
 import org.apache.celeborn.client.read.CelebornInputStream;
 import org.apache.celeborn.client.read.MetricsCallback;
 import org.apache.celeborn.client.security.CryptoHandler;
+import org.apache.celeborn.client.write.WriteLocationTracker;
 import org.apache.celeborn.common.CelebornConf;
 import org.apache.celeborn.common.exception.CelebornBroadcastException;
 import org.apache.celeborn.common.exception.CelebornIOException;
@@ -107,9 +108,10 @@ public class ShuffleClientImpl extends ShuffleClient {
   // key: appShuffleIdentifier, value: shuffleId
   protected Map<String, Tuple2<Integer, Boolean>> shuffleIdCache = JavaUtils.newConcurrentHashMap();
 
-  // key: shuffleId, value: (partitionId, PartitionLocation)
-  final Map<Integer, ConcurrentHashMap<Integer, PartitionLocation>> reducePartitionMap =
-      JavaUtils.newConcurrentHashMap();
+  // Tracks active write locations (single-value view + sparse 1:N sibling set) for each shuffle.
+  // Encapsulates the legacy reducePartitionMap / reducePartitionSiblingsMap logic.
+  // Package-private: ReviveManager (same package) reads the single-value map via it.
+  final WriteLocationTracker writeLocationTracker;
 
   // key: shuffleId, value: Set(mapId)
   protected final ConcurrentHashMap<Integer, Set<Integer>> mapperEndMap =
@@ -132,8 +134,6 @@ public class ShuffleClientImpl extends ShuffleClient {
   private boolean fetchExcludeWorkerOnFailureEnabled;
 
   private final ExecutorService pushDataRetryPool;
-
-  private final Map<Integer, Set<Integer>> splitting = JavaUtils.newConcurrentHashMap();
 
   protected final String appUniqueId;
   private final boolean authEnabled;
@@ -195,6 +195,7 @@ public class ShuffleClientImpl extends ShuffleClient {
     this.appUniqueId = appUniqueId;
     this.conf = conf;
     this.userIdentifier = userIdentifier;
+    this.writeLocationTracker = new WriteLocationTracker(conf.dynamicWriteParallelismEnabled());
     registerShuffleMaxRetries = conf.clientRegisterShuffleMaxRetry();
     registerShuffleRetryWaitMs = conf.clientRegisterShuffleRetryWaitMs();
     rpcMaxRetries = conf.clientRpcMaxRetries();
@@ -351,7 +352,9 @@ public class ShuffleClientImpl extends ShuffleClient {
                   + ", old location: "
                   + request.loc));
     } else {
-      PartitionLocation newLoc = reducePartitionMap.get(shuffleId).get(partitionId);
+      PartitionLocation newLoc =
+          writeLocationTracker.selectForMapId(
+              shuffleId, partitionId, mapId, writeLocationTracker.getSingle(shuffleId, partitionId));
       logger.info(
           "Revive for push data success, new location for shuffle {} map {} attempt {} partition {} batch {} is location {}.",
           shuffleId,
@@ -448,7 +451,12 @@ public class ShuffleClientImpl extends ShuffleClient {
               request.partitionId,
               oldGroupedBatchId);
         } else if (request.reviveStatus == StatusCode.SUCCESS.getValue()) {
-          PartitionLocation newLoc = reducePartitionMap.get(shuffleId).get(request.partitionId);
+          PartitionLocation newLoc =
+              writeLocationTracker.selectForMapId(
+                  shuffleId,
+                  request.partitionId,
+                  mapId,
+                  writeLocationTracker.getSingle(shuffleId, request.partitionId));
           DataBatches newDataBatches =
               newDataBatchesMap.computeIfAbsent(genAddressPair(newLoc), (s) -> new DataBatches());
           newDataBatches.addDataBatch(newLoc, batch.batchId, batch.body);
@@ -613,15 +621,12 @@ public class ShuffleClientImpl extends ShuffleClient {
   public ConcurrentHashMap<Integer, PartitionLocation> getPartitionLocation(
       int shuffleId, int numMappers, int numPartitions) throws CelebornIOException {
     try {
-      return reducePartitionMap.computeIfAbsent(
-          shuffleId,
-          (id) -> {
-            try {
-              return registerShuffle(shuffleId, numMappers, numPartitions);
-            } catch (CelebornIOException e) {
-              throw new RuntimeException(e);
-            }
-          });
+      ConcurrentHashMap<Integer, PartitionLocation> map = writeLocationTracker.getSingleMap(shuffleId);
+      if (map.isEmpty()) {
+        // Cold path: register with the driver, which seeds the single-value map via the tracker.
+        registerShuffle(shuffleId, numMappers, numPartitions);
+      }
+      return map;
     } catch (RuntimeException e) {
       if (e.getCause() instanceof CelebornIOException) {
         throw (CelebornIOException) e.getCause();
@@ -729,14 +734,17 @@ public class ShuffleClientImpl extends ShuffleClient {
         RegisterShuffleResponse response = callable.call();
         StatusCode respStatus = response.status();
         if (StatusCode.SUCCESS.equals(respStatus)) {
-          ConcurrentHashMap<Integer, PartitionLocation> result = JavaUtils.newConcurrentHashMap();
           PartitionLocation[] locations = response.partitionLocations();
+          // Seed the single-value map via the tracker. The sibling set is intentionally NOT
+          // populated here (sparse): a partition starts with a single location, and the sibling
+          // set is only created on revive when the driver returns multiple locations.
+          ConcurrentHashMap<Integer, PartitionLocation> result =
+              writeLocationTracker.seedOnRegister(shuffleId, locations);
           for (PartitionLocation location : locations) {
             pushExcludedWorkers.remove(location.hostAndPushPort());
             if (location.hasPeer()) {
               pushExcludedWorkers.remove(location.getPeer().hostAndPushPort());
             }
-            result.put(location.getId(), location);
           }
           return result;
         } else if (StatusCode.SLOT_NOT_AVAILABLE.equals(respStatus)) {
@@ -895,9 +903,10 @@ public class ShuffleClientImpl extends ShuffleClient {
     // partitionId -> StatusCode#getValue
     Map<Integer, Integer> results = new HashMap<>();
 
-    // Local cached map of (partitionId -> PartitionLocation)
+    // The single-value map is owned by the writeLocationTracker; revive updates both the
+    // single-value (first/newest location) and the sparse sibling set via updateOnRevive.
     ConcurrentHashMap<Integer, PartitionLocation> partitionLocationMap =
-        reducePartitionMap.get(shuffleId);
+        writeLocationTracker.getSingleMap(shuffleId);
 
     Map<Integer, PartitionLocation> oldLocMap = new HashMap<>();
     Iterator<ReviveRequest> iter = requests.iterator();
@@ -918,7 +927,7 @@ public class ShuffleClientImpl extends ShuffleClient {
         mapperEndMap.computeIfAbsent(shuffleId, (id) -> ConcurrentHashMap.newKeySet()).add(mapId);
       }
 
-      for (Map.Entry<Integer, Tuple3<StatusCode, Boolean, PartitionLocation>> entry :
+      for (Map.Entry<Integer, Tuple3<StatusCode, Boolean, java.util.List<PartitionLocation>>> entry :
           response.newLocs().entrySet()) {
         int partitionId = entry.getKey();
         StatusCode statusCode = entry.getValue()._1();
@@ -931,11 +940,16 @@ public class ShuffleClientImpl extends ShuffleClient {
         }
 
         if (StatusCode.SUCCESS == statusCode) {
-          PartitionLocation loc = entry.getValue()._3();
-          partitionLocationMap.put(partitionId, loc);
-          pushExcludedWorkers.remove(loc.hostAndPushPort());
-          if (loc.hasPeer()) {
-            pushExcludedWorkers.remove(loc.getPeer().hostAndPushPort());
+          java.util.List<PartitionLocation> locs = entry.getValue()._3();
+          // updateOnRevive sets single-value to locs[0] and, only when locs has multiple siblings,
+          // replaces the sparse sibling set; otherwise degrades back to single-value.
+          writeLocationTracker.updateOnRevive(shuffleId, partitionId, locs);
+          PartitionLocation loc = locs.isEmpty() ? null : locs.get(0);
+          if (loc != null) {
+            pushExcludedWorkers.remove(loc.hostAndPushPort());
+            if (loc.hasPeer()) {
+              pushExcludedWorkers.remove(loc.getPeer().hostAndPushPort());
+            }
           }
         } else if (StatusCode.STAGE_ENDED == statusCode) {
           stageEndShuffleSet.add(shuffleId);
@@ -1037,7 +1051,9 @@ public class ShuffleClientImpl extends ShuffleClient {
       return 0;
     }
 
-    final PartitionLocation loc = map.get(partitionId);
+    final PartitionLocation fallback = writeLocationTracker.getSingle(shuffleId, partitionId);
+    final PartitionLocation loc =
+        writeLocationTracker.selectForMapId(shuffleId, partitionId, mapId, fallback);
     if (loc == null) {
       throw new CelebornIOException(
           String.format(
@@ -1151,8 +1167,7 @@ public class ShuffleClientImpl extends ShuffleClient {
                       attemptId,
                       partitionId,
                       nextBatchId);
-                  if (!newerPartitionLocationExists(
-                      reducePartitionMap.get(shuffleId), partitionId, latest.getEpoch(), false)) {
+                  if (!writeLocationTracker.hasNewer(shuffleId, partitionId, latest.getEpoch())) {
                     ReviveRequest reviveRequest =
                         new ReviveRequest(
                             shuffleId,
@@ -1180,6 +1195,10 @@ public class ShuffleClientImpl extends ShuffleClient {
                     pushState.recordFailedBatch(
                         latest.getUniqueId(), mapId, attemptId, nextBatchId);
                   }
+                  // Dynamic write parallelism: mark this sibling as unavailable so subsequent
+                  // sibling selections skip it. The Driver-side active set is updated on the
+                  // revive (cause=HARD_SPLIT) that follows.
+                  writeLocationTracker.excludeSibling(shuffleId, partitionId, latest);
                   ReviveRequest reviveRequest =
                       new ReviveRequest(
                           shuffleId,
@@ -1585,8 +1604,7 @@ public class ShuffleClientImpl extends ShuffleClient {
                           StatusCode.fromValue(statusCodeList.get(i).byteValue())));
                   if (statusCodeList.get(i) == StatusCode.SOFT_SPLIT.getValue()) {
                     PartitionLocation loc = batches.get(partitionIndex).loc;
-                    if (!newerPartitionLocationExists(
-                        reducePartitionMap.get(shuffleId), loc.getId(), loc.getEpoch(), false)) {
+                    if (!writeLocationTracker.hasNewer(shuffleId, loc.getId(), loc.getEpoch())) {
                       ReviveRequest reviveRequest =
                           new ReviveRequest(
                               shuffleId,
@@ -1863,11 +1881,10 @@ public class ShuffleClientImpl extends ShuffleClient {
   @Override
   public boolean cleanupShuffle(int shuffleId) {
     // clear status
-    reducePartitionMap.remove(shuffleId);
+    writeLocationTracker.cleanup(shuffleId);
     reduceFileGroupsMap.remove(shuffleId);
     mapperEndMap.remove(shuffleId);
     stageEndShuffleSet.remove(shuffleId);
-    splitting.remove(shuffleId);
 
     logger.info("Unregistered shuffle {}.", shuffleId);
     return true;

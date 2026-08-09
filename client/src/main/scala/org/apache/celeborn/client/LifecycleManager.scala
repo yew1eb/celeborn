@@ -86,6 +86,7 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
   private val pushRackAwareEnabled = conf.clientReserveSlotsRackAwareEnabled
   private val partitionSplitThreshold = conf.shufflePartitionSplitThreshold
   private val partitionSplitMode = conf.shufflePartitionSplitMode
+  private val dynamicWriteParallelismEnabled = conf.dynamicWriteParallelismEnabled
   // shuffle id -> partition type
   private val shufflePartitionType = JavaUtils.newConcurrentHashMap[Int, PartitionType]()
   private val rangeReadFilter = conf.shuffleRangeReadFilterEnabled
@@ -101,6 +102,15 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
   // shuffle id -> (partitionId -> newest PartitionLocation)
   val latestPartitionLocation =
     JavaUtils.newConcurrentHashMap[Int, ConcurrentHashMap[Int, PartitionLocation]]()
+
+  // Dynamic write parallelism (1:N): shuffle id -> (partitionId -> active sibling locations).
+  // When dynamicWriteParallelismEnabled, a partition may have multiple concurrent active
+  // PartitionLocations written in parallel. latestPartitionLocation above still tracks the
+  // newest single epoch (for reader/commit get-max paths); activeSiblingsMap is the writer-side
+  // active set used by ChangePartitionManager for routing/upgrade decisions.
+  // Each partitionId -> a small synchronized List of active sibling PartitionLocations.
+  val activeSiblingsMap =
+    JavaUtils.newConcurrentHashMap[Int, ConcurrentHashMap[Int, util.List[PartitionLocation]]]()
   private val userIdentifier: UserIdentifier = IdentityProvider.instantiate(conf).provide()
   private val availableStorageTypes = conf.availableStorageTypes
   private val storageTypes =
@@ -155,7 +165,61 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
     val map = latestPartitionLocation.computeIfAbsent(shuffleId, newMapFunc)
     locations.asScala.foreach(location => map.put(location.getId, location))
     invalidateLatestMaxLocsCache(shuffleId)
+    if (dynamicWriteParallelismEnabled) {
+      // Append newly allocated locations as active siblings (1:N). Existing siblings are kept;
+      // full/excluded ones are removed by ChangePartitionManager via removeActiveSibling.
+      val siblingsMap =
+        activeSiblingsMap.computeIfAbsent(shuffleId, newSiblingListMapFunc)
+      locations.asScala.foreach { location =>
+        val list = siblingsMap.computeIfAbsent(location.getId, newSiblingListFunc)
+        list.synchronized {
+          if (!list.asScala.exists(_.getEpoch == location.getEpoch)) {
+            list.add(location)
+          }
+        }
+      }
+    }
   }
+
+  /** Remove an active sibling (e.g. one that hit HARD_SPLIT) from the writer-side active set. */
+  def removeActiveSibling(shuffleId: Int, partitionId: Int, epoch: Int): Unit = {
+    if (!dynamicWriteParallelismEnabled) return
+    val siblingsMap = activeSiblingsMap.get(shuffleId)
+    if (siblingsMap == null) return
+    val list = siblingsMap.get(partitionId)
+    if (list == null) return
+    list.synchronized {
+      val it = list.iterator()
+      while (it.hasNext) {
+        if (it.next().getEpoch == epoch) it.remove()
+      }
+    }
+  }
+
+  /** Snapshot the active siblings for a partition (writer-side). */
+  def getActiveSiblings(shuffleId: Int, partitionId: Int): util.List[PartitionLocation] = {
+    if (!dynamicWriteParallelismEnabled) {
+      // Feature disabled: fall back to the single newest location (legacy behavior).
+      val map = latestPartitionLocation.get(shuffleId)
+      if (map != null) {
+        val loc = map.get(partitionId)
+        if (loc != null) return new util.ArrayList[PartitionLocation](util.Arrays.asList(loc))
+      }
+      return new util.ArrayList[PartitionLocation]()
+    }
+    val siblingsMap = activeSiblingsMap.get(shuffleId)
+    if (siblingsMap == null) return new util.ArrayList[PartitionLocation]()
+    val list = siblingsMap.get(partitionId)
+    if (list == null) return new util.ArrayList[PartitionLocation]()
+    list.synchronized { new util.ArrayList[PartitionLocation](list) }
+  }
+
+  private val newSiblingListMapFunc: util.function.Function[Int, ConcurrentHashMap[Int, util.List[
+    PartitionLocation]]] =
+    (_: Int) => JavaUtils.newConcurrentHashMap[Int, util.List[PartitionLocation]]()
+
+  private val newSiblingListFunc: util.function.Function[Int, util.List[PartitionLocation]] =
+    (_: Int) => new util.ArrayList[PartitionLocation]()
 
   case class RegisterCallContext(context: RpcCallContext, partitionId: Int = -1) {
     def reply(response: RegisterShuffleResponse) = {

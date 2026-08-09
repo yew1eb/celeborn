@@ -353,6 +353,10 @@ message PbChangeLocationPartitionInfo {
   int32 status = 2;
   PbPartitionLocation partition = 3;
   bool oldAvailable = 4;
+  // Multiple partition locations for dynamic write parallelism (1:N). Backward compatible:
+  // old clients/workers still read `partition` (single). New readers use `locations` when non-empty,
+  // falling back to `partition` otherwise.
+  repeated PbPartitionLocation locations = 5;
 }
 
 message PbChangeLocationResponse {

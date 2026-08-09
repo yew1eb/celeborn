@@ -205,7 +205,7 @@ object ControlMessages extends Logging {
 
   case class ChangeLocationResponse(
       endedMapIds: util.List[Integer],
-      newLocs: util.Map[Integer, (StatusCode, java.lang.Boolean, PartitionLocation)],
+      newLocs: util.Map[Integer, (StatusCode, java.lang.Boolean, util.List[PartitionLocation])],
       serdeVersion: SerdeVersion) extends MasterMessage
 
   case class MapperEnd(
@@ -714,13 +714,21 @@ object ControlMessages extends Logging {
     case ChangeLocationResponse(mapIds, newLocs, serdeVersion) =>
       val builder = PbChangeLocationResponse.newBuilder()
       builder.addAllEndedMapId(mapIds)
-      newLocs.asScala.foreach { case (partitionId, (status, available, loc)) =>
+      newLocs.asScala.foreach { case (partitionId, (status, available, locs)) =>
         val pbChangeLocationPartitionInfoBuilder = PbChangeLocationPartitionInfo.newBuilder()
           .setPartitionId(partitionId)
           .setStatus(status.getValue)
           .setOldAvailable(available)
-        if (loc != null) {
-          pbChangeLocationPartitionInfoBuilder.setPartition(PbSerDeUtils.toPbPartitionLocation(loc))
+        if (locs != null && !locs.isEmpty) {
+          // New readers use the repeated `locations` field for 1:N dynamic write parallelism.
+          locs.asScala.foreach { loc =>
+            pbChangeLocationPartitionInfoBuilder.addLocations(
+              PbSerDeUtils.toPbPartitionLocation(loc))
+          }
+          // Backward compat: keep the legacy single `partition` field populated with the first
+          // location so old clients that only read `partition` still work.
+          pbChangeLocationPartitionInfoBuilder.setPartition(
+            PbSerDeUtils.toPbPartitionLocation(locs.get(0)))
         }
         builder.addPartitionInfo(pbChangeLocationPartitionInfoBuilder.build())
       }
@@ -1207,17 +1215,23 @@ object ControlMessages extends Logging {
       case CHANGE_LOCATION_RESPONSE_VALUE =>
         val pbChangeLocationResponse = PbChangeLocationResponse.parseFrom(message.getPayload)
         val newLocs =
-          new util.HashMap[Integer, (StatusCode, java.lang.Boolean, PartitionLocation)]()
+          new util.HashMap[Integer, (StatusCode, java.lang.Boolean, util.List[PartitionLocation])]()
         val partitionInfos = pbChangeLocationResponse.getPartitionInfoList
         (0 until partitionInfos.size).foreach { idx =>
           val info = partitionInfos.get(idx)
-          var partition: PartitionLocation = null
-          if (info.hasPartition) {
-            partition = PbSerDeUtils.fromPbPartitionLocation(info.getPartition)
+          // Prefer the repeated `locations` field (1:N dynamic write parallelism); fall back to
+          // the legacy single `partition` field for backward compatibility with old writers.
+          val locations = new util.ArrayList[PartitionLocation]()
+          if (info.getLocationsCount > 0) {
+            info.getLocationsList.asScala.foreach { pb =>
+              locations.add(PbSerDeUtils.fromPbPartitionLocation(pb))
+            }
+          } else if (info.hasPartition) {
+            locations.add(PbSerDeUtils.fromPbPartitionLocation(info.getPartition))
           }
           newLocs.put(
             info.getPartitionId,
-            (StatusCode.fromValue(info.getStatus), info.getOldAvailable, partition))
+            (StatusCode.fromValue(info.getStatus), info.getOldAvailable, locations))
         }
         ChangeLocationResponse(
           pbChangeLocationResponse.getEndedMapIdList,

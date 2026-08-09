@@ -45,6 +45,21 @@ class ChangePartitionManager(
     lifecycleManager: LifecycleManager) extends Logging {
 
   private val pushReplicateEnabled = conf.clientPushReplicateEnabled
+  private val dynamicWriteParallelismEnabled = conf.dynamicWriteParallelismEnabled
+  private val dynamicWriteParallelismMax = conf.dynamicWriteParallelismMax
+  private val reviveWindowMs = conf.dynamicWriteParallelismReviveWindowMs
+  private val reviveThresholdRatio = conf.dynamicWriteParallelismReviveThresholdRatio
+  private val cooldownMs = conf.dynamicWriteParallelismCooldownMs
+
+  // Dynamic write parallelism state, per (shuffleId, partitionId).
+  // reviveTimestamps: wall-clock timestamps of real allocations (post three-layer dedup), used to
+  //                  compute revive frequency as the upgrade signal. Capped per partition.
+  // parallelismState: target parallelism P + last upgrade time (for cooldown).
+  private val partitionReviveTimestamps =
+    JavaUtils.newConcurrentHashMap[Int, ConcurrentHashMap[Integer, util.ArrayDeque[java.lang.Long]]]()
+  private val partitionParallelismState =
+    JavaUtils.newConcurrentHashMap[Int, ConcurrentHashMap[Integer, ParallelismState]]()
+
   // shuffleId -> (partitionId -> set of ChangePartition)
   val changePartitionRequests
       : ConcurrentHashMap[Int, ConcurrentHashMap[Integer, JSet[ChangePartitionRequest]]] =
@@ -191,7 +206,8 @@ class ChangePartitionManager(
           context.reply(
             partitionId,
             StatusCode.SUCCESS,
-            Some(latestLoc),
+            // Reply the active sibling set (1:N when enabled; [latestLoc] when disabled).
+            Option(lifecycleManager.getActiveSiblings(shuffleId, partitionId)),
             lifecycleManager.workerStatusTracker.workerAvailableByLocation(oldPartition))
           logDebug(s"[handleRequestPartitionLocation]: For shuffle: $shuffleId," +
             s" old partition: $partitionId-$oldEpoch, new partition: $latestLoc found, return it")
@@ -259,7 +275,10 @@ class ChangePartitionManager(
           req.context.reply(
             req.partitionId,
             StatusCode.SUCCESS,
-            Option(newLocation),
+            // Reply the full active sibling set for this partition (1:N). When dynamic write
+            // parallelism is disabled, getActiveSiblings returns just [newLocation], preserving
+            // the legacy single-location behavior.
+            Option(lifecycleManager.getActiveSiblings(shuffleId, req.partitionId)),
             lifecycleManager.workerStatusTracker.workerAvailableByLocation(req.oldPartition))))
       }
     }
@@ -279,7 +298,7 @@ class ChangePartitionManager(
           req.context.reply(
             req.partitionId,
             status,
-            None,
+            None: Option[util.List[PartitionLocation]],
             lifecycleManager.workerStatusTracker.workerAvailableByLocation(req.oldPartition))))
       }
     }
@@ -359,10 +378,17 @@ class ChangePartitionManager(
     }
 
     // PartitionSplit all contains oldPartition
+    // Dynamic write parallelism: record a real allocation (post three-layer dedup) per partition
+    // and decide how many sibling locations to allocate this round. appendCount=1 means just
+    // replenish the replaced location (no upgrade); >1 means upgrade P->2P.
+    val nowMs = System.currentTimeMillis()
+    val appendCounts = changePartitions.map { cp =>
+      val count = recordRealAllocationAndGetAppendCount(shuffleId, cp.partitionId, nowMs)
+      (cp, count)
+    }
+
     val newlyAllocatedLocations =
-      reallocateChangePartitionRequestSlotsFromCandidates(
-        changePartitions.toList,
-        candidates.asScala.toList)
+      reallocateChangePartitionRequestSlotsFromCandidates(appendCounts, candidates.asScala.toList)
 
     if (!lifecycleManager.reserveSlotsWithRetry(
         shuffleId,
@@ -411,15 +437,19 @@ class ChangePartitionManager(
   }
 
   private def reallocateChangePartitionRequestSlotsFromCandidates(
-      changePartitionRequests: List[ChangePartitionRequest],
+      appendCounts: Array[(ChangePartitionRequest, Int)],
       candidates: List[WorkerInfo]): WorkerResource = {
     val slots = new WorkerResource()
-    changePartitionRequests.foreach { partition =>
-      lifecycleManager.allocateFromCandidates(
-        partition.partitionId,
-        partition.epoch,
-        candidates,
-        slots)
+    appendCounts.foreach { case (partition, count) =>
+      // Allocate `count` sibling locations for this partition (1 when feature disabled or no
+      // upgrade). Each gets a distinct epoch via allocateFromCandidates' internal epoch increment.
+      (0 until count).foreach { _ =>
+        lifecycleManager.allocateFromCandidates(
+          partition.partitionId,
+          partition.epoch,
+          candidates,
+          slots)
+      }
     }
     slots
   }
@@ -428,5 +458,89 @@ class ChangePartitionManager(
     changePartitionRequests.remove(shuffleId)
     inBatchPartitions.remove(shuffleId)
     locks.remove(shuffleId)
+    lifecycleManager.activeSiblingsMap.remove(shuffleId)
+    partitionReviveTimestamps.remove(shuffleId)
+    partitionParallelismState.remove(shuffleId)
+  }
+
+  // ---- Dynamic write parallelism (1:N) helpers ----
+
+  /** Per-partition dynamic parallelism state. */
+  case class ParallelismState(var targetParallelism: Int, var lastUpgradeTimeMs: Long)
+
+  private val MAX_REVIVE_SAMPLES = 64
+
+  /**
+   * Called after a real allocation (the third layer of the existing dedup in
+   * handleRequestPartitionLocation) for a SOFT_SPLIT/HARD_SPLIT revive. Records the timestamp,
+   * evaluates revive frequency, and decides whether to upgrade target parallelism (P -> 2P).
+   *
+   * Counting here (not at the revive entry) is critical: multiple mappers reporting the same full
+   * location are collapsed to one real allocation by the three-layer dedup, so the frequency is
+   * not inflated by the mapper count and reflects the true location-replacement rate.
+   *
+   * Returns the count of NEW sibling locations to allocate (>= 1 to replenish the replaced one;
+   * > 1 when an upgrade is triggered). Caller is responsible for actual allocation + reply.
+   */
+  def recordRealAllocationAndGetAppendCount(
+      shuffleId: Int,
+      partitionId: Int,
+      nowMs: Long): Int = {
+    if (!dynamicWriteParallelismEnabled) return 1
+
+    val state = getOrCreateState(shuffleId, partitionId)
+    val timestamps = getOrCreateTimestamps(shuffleId, partitionId)
+
+    // 1. Record this real allocation, prune window, cap samples.
+    timestamps.synchronized {
+      timestamps.addLast(nowMs)
+      val cutoff = nowMs - reviveWindowMs
+      while (!timestamps.isEmpty && timestamps.peekFirst() < cutoff) timestamps.pollFirst()
+      while (timestamps.size() > MAX_REVIVE_SAMPLES) timestamps.pollFirst()
+    }
+
+    val activeCount = lifecycleManager.getActiveSiblings(shuffleId, partitionId).size()
+    val currentP = math.max(1, activeCount)
+
+    // 2. Cooldown: no upgrade right after a previous one.
+    if (nowMs - state.lastUpgradeTimeMs < cooldownMs) {
+      return 1
+    }
+
+    // 3. Upgrade decision: windowed real-allocation count >= K(P) = ratio * P.
+    val inWindow = timestamps.synchronized {
+      val cutoff = nowMs - reviveWindowMs
+      timestamps.descendingIterator().asScala.takeWhile(_ >= cutoff).size
+    }
+    val threshold = math.ceil(reviveThresholdRatio * currentP).toInt
+    if (inWindow >= threshold && currentP < dynamicWriteParallelismMax) {
+      val newP = math.min(currentP * 2, dynamicWriteParallelismMax)
+      state.targetParallelism = newP
+      state.lastUpgradeTimeMs = nowMs
+      // Clear window so this upgrade isn't double-counted by subsequent records.
+      timestamps.synchronized { timestamps.clear() }
+      // Allocate enough new siblings to reach newP (newP - currentP new ones; the current real
+      // allocation replenishes 1, so net new = newP - currentP).
+      return math.max(1, newP - currentP)
+    }
+
+    // No upgrade: just replenish the one replaced sibling.
+    1
+  }
+
+  private def getOrCreateState(shuffleId: Int, partitionId: Int): ParallelismState = {
+    val map = partitionParallelismState.computeIfAbsent(
+      shuffleId,
+      (_: Int) => JavaUtils.newConcurrentHashMap[Integer, ParallelismState]())
+    map.computeIfAbsent(partitionId, (_: Integer) => ParallelismState(1, 0L))
+  }
+
+  private def getOrCreateTimestamps(
+      shuffleId: Int,
+      partitionId: Int): util.ArrayDeque[java.lang.Long] = {
+    val map = partitionReviveTimestamps.computeIfAbsent(
+      shuffleId,
+      (_: Int) => JavaUtils.newConcurrentHashMap[Integer, util.ArrayDeque[java.lang.Long]]())
+    map.computeIfAbsent(partitionId, (_: Integer) => new util.ArrayDeque[java.lang.Long]())
   }
 }

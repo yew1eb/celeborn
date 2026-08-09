@@ -19,6 +19,8 @@ package org.apache.celeborn.client
 
 import java.util
 
+import scala.collection.JavaConverters._
+
 import org.apache.celeborn.common.internal.Logging
 import org.apache.celeborn.common.network.protocol.SerdeVersion
 import org.apache.celeborn.common.protocol.PartitionLocation
@@ -31,7 +33,7 @@ trait RequestLocationCallContext {
   def reply(
       partitionId: Int,
       status: StatusCode,
-      partitionLocationOpt: Option[PartitionLocation],
+      partitionLocationsOpt: Option[util.List[PartitionLocation]],
       available: Boolean): Unit
 }
 
@@ -42,7 +44,7 @@ case class ChangeLocationsCallContext(
   extends RequestLocationCallContext with Logging {
   val endedMapIds = new util.ArrayList[Integer]()
   val newLocs =
-    JavaUtils.newConcurrentHashMap[Integer, (StatusCode, java.lang.Boolean, PartitionLocation)](
+    JavaUtils.newConcurrentHashMap[Integer, (StatusCode, java.lang.Boolean, util.List[PartitionLocation])](
       partitionCount)
 
   def markMapperEnd(mapId: Int): Unit = this.synchronized {
@@ -52,12 +54,13 @@ case class ChangeLocationsCallContext(
   override def reply(
       partitionId: Int,
       status: StatusCode,
-      partitionLocationOpt: Option[PartitionLocation],
+      partitionLocationsOpt: Option[util.List[PartitionLocation]],
       available: Boolean): Unit = this.synchronized {
     if (newLocs.containsKey(partitionId)) {
       logError(s"PartitionId $partitionId already exists!")
     }
-    newLocs.put(partitionId, (status, available, partitionLocationOpt.getOrElse(null)))
+    val locs = partitionLocationsOpt.getOrElse(new util.ArrayList[PartitionLocation]())
+    newLocs.put(partitionId, (status, available, locs))
 
     if (newLocs.size() == partitionCount || StatusCode.SHUFFLE_UNREGISTERED == status
       || StatusCode.STAGE_ENDED == status) {
@@ -71,12 +74,14 @@ case class ApplyNewLocationCallContext(context: RpcCallContext, serdeVersion: Se
   override def reply(
       partitionId: Int,
       status: StatusCode,
-      partitionLocationOpt: Option[PartitionLocation],
+      partitionLocationsOpt: Option[util.List[PartitionLocation]],
       available: Boolean): Unit = {
-    partitionLocationOpt match {
-      case Some(partitionLocation) =>
-        context.reply(RegisterShuffleResponse(status, Array(partitionLocation), serdeVersion))
-      case None => context.reply(RegisterShuffleResponse(status, Array.empty, serdeVersion))
+    partitionLocationsOpt match {
+      case Some(partitionLocations) =>
+        val arr = partitionLocations.asScala.toArray
+        context.reply(RegisterShuffleResponse(status, arr, serdeVersion))
+      case None =>
+        context.reply(RegisterShuffleResponse(status, Array.empty, serdeVersion))
     }
   }
 }

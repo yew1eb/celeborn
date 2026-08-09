@@ -66,7 +66,7 @@ class ReviveManager {
               Map<Integer, ReviveRequest> requestsToSend = new HashMap<>();
 
               Map<Integer, PartitionLocation> partitionMap =
-                  shuffleClient.reducePartitionMap.get(shuffleId);
+                  shuffleClient.writeLocationTracker.getSingleMap(shuffleId);
               // Insert request that is not MapperEnded and with the max epoch
               // into requestsToSend
               Iterator<ReviveRequest> iter = requests.iterator();

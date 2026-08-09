@@ -1153,6 +1153,14 @@ class CelebornConf(loadDefaults: Boolean) extends Cloneable with Logging with Se
   def shufflePartitionSplitMode: PartitionSplitMode =
     PartitionSplitMode.valueOf(get(SHUFFLE_PARTITION_SPLIT_MODE))
   def shufflePartitionSplitThreshold: Long = get(SHUFFLE_PARTITION_SPLIT_THRESHOLD)
+  def dynamicWriteParallelismEnabled: Boolean = get(CLIENT_DYNAMIC_WRITE_PARALLELISM_ENABLED)
+  def dynamicWriteParallelismMax: Int = get(CLIENT_DYNAMIC_WRITE_PARALLELISM_MAX)
+  def dynamicWriteParallelismReviveWindowMs: Long =
+    get(CLIENT_DYNAMIC_WRITE_PARALLELISM_REVIVE_WINDOW_MS)
+  def dynamicWriteParallelismReviveThresholdRatio: Double =
+    get(CLIENT_DYNAMIC_WRITE_PARALLELISM_REVIVE_THRESHOLD_RATIO)
+  def dynamicWriteParallelismCooldownMs: Long =
+    get(CLIENT_DYNAMIC_WRITE_PARALLELISM_COOLDOWN_MS)
   def batchHandleChangePartitionEnabled: Boolean = get(CLIENT_BATCH_HANDLE_CHANGE_PARTITION_ENABLED)
   def batchHandleChangePartitionBuckets: Int =
     get(CLIENT_BATCH_HANDLE_CHANGE_PARTITION_BUCKETS)
@@ -5338,6 +5346,62 @@ object CelebornConf extends Logging {
       .transform(_.toUpperCase(Locale.ROOT))
       .checkValues(Set(PartitionSplitMode.SOFT.name, PartitionSplitMode.HARD.name))
       .createWithDefault(PartitionSplitMode.SOFT.name)
+
+  val CLIENT_DYNAMIC_WRITE_PARALLELISM_ENABLED: ConfigEntry[Boolean] =
+    buildConf("celeborn.client.shuffle.dynamicWriteParallelism.enabled")
+      .categories("client")
+      .doc("Whether to enable dynamic write parallelism for large/skewed partitions. " +
+        "When enabled, a single partition can be written to multiple PartitionLocations " +
+        "in parallel (1:N), decoupling write performance from the single-location I/O bottleneck " +
+        "and protecting the SOFT_SPLIT -> HARD_SPLIT upgrade window so shuffle write is not blocked. " +
+        "Parallelism is auto-adjusted via revive frequency negative feedback. " +
+        "Disabled by default for backward compatibility.")
+      .version("0.6.0")
+      .booleanConf
+      .createWithDefault(false)
+
+  val CLIENT_DYNAMIC_WRITE_PARALLELISM_MAX: ConfigEntry[Int] =
+    buildConf("celeborn.client.shuffle.dynamicWriteParallelism.max")
+      .categories("client")
+      .doc("Upper bound of dynamic write parallelism per partition. Caps the number of concurrent " +
+        "active sibling PartitionLocations (and thus replication slots) a single partition can " +
+        "scale out to. Effective only when dynamicWriteParallelism.enabled is true.")
+      .version("0.6.0")
+      .intConf
+      .createWithDefault(8)
+
+  val CLIENT_DYNAMIC_WRITE_PARALLELISM_REVIVE_WINDOW_MS: ConfigEntry[Long] =
+    buildConf("celeborn.client.shuffle.dynamicWriteParallelism.reviveWindowMs")
+      .categories("client")
+      .doc("Sliding window (in ms) for counting the per-partition revive frequency used as the " +
+        "dynamic parallelism signal. A revive is counted only when it triggers a real allocation " +
+        "(after the existing three-layer dedup), so it is not inflated by concurrent mappers " +
+        "reporting the same full location. Effective only when dynamicWriteParallelism.enabled is true.")
+      .version("0.6.0")
+      .timeConf(TimeUnit.MILLISECONDS)
+      .createWithDefaultString("30s")
+
+  val CLIENT_DYNAMIC_WRITE_PARALLELISM_REVIVE_THRESHOLD_RATIO: ConfigEntry[Double] =
+    buildConf("celeborn.client.shuffle.dynamicWriteParallelism.reviveThresholdRatio")
+      .categories("client")
+      .doc("Threshold ratio K(P) = ratio x P for triggering a parallelism upgrade. When the number " +
+        "of real-allocation revives within reviveWindowMs reaches K(P), the target parallelism is " +
+        "doubled (P -> 2P, capped by max). Scaling K by P keeps the threshold fair as more siblings " +
+        "naturally produce more revives at larger P. Effective only when dynamicWriteParallelism.enabled is true.")
+      .version("0.6.0")
+      .doubleConf
+      .createWithDefault(1.0)
+
+  val CLIENT_DYNAMIC_WRITE_PARALLELISM_COOLDOWN_MS: ConfigEntry[Long] =
+    buildConf("celeborn.client.shuffle.dynamicWriteParallelism.cooldownMs")
+      .categories("client")
+      .doc("Cooldown (in ms) after a parallelism upgrade during which no further upgrade is " +
+        "triggered, preventing instantaneous cascading upgrades from transient revive spikes. " +
+        "Effective only when dynamicWriteParallelism.enabled is true.")
+      .version("0.6.0")
+      .timeConf(TimeUnit.MILLISECONDS)
+      .createWithDefaultString("5s")
+
 
   val SHUFFLE_COMPRESSION_CODEC: ConfigEntry[String] =
     buildConf("celeborn.client.shuffle.compression.codec")

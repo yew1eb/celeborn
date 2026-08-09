@@ -1,0 +1,106 @@
+﻿Dynamically optimize shuffle write parallelism 
+                                                                 Authors: Erik Fang, Yanze Jiang
+Abstract
+In current Celeborn implementation, each partition is described as a series of PartitionLocation with sequential epoch ids. For each partition, only one partitionLocation, known as the latestPartitionLocation, is actively for writes at any time. Since each PartitionLocation corresponds to a file on worker, partition write performance is constrained by the I/O capacity of a single worker, potentially creating a bottleneck in data throughput.
+
+
+While this architecture generally performs well, it can lead to significant performance degradation in specific scenarios:
+* partition skew
+    If certain partitions are significantly larger than others, they may take considerably longer to write, eventually slowing down the entire job. In real-world cases, we have observed that skewed partitions with high write speeds can quickly reach the soft split threshold and get promoted to a hard split within seconds. This event forces all Spark MapTasks to pause and await a new partition location via revive RPC calls, which substantially increases the total shuffle write time.
+* small partition number
+    Shuffle write parallelism is controlled by the compute framework, such as Spark or Flink, and may be set to a low value for scenarios like single partition. As a result, when shuffle write parallelism is tied directly to partition number, it can lead to suboptimal performance.
+
+
+    To mitigate these limitations, this document proposes an enhancement that enables concurrent writes to multiple PartitionLocations for a single partition. Furthermore, the system will dynamically detect and adjust shuffle write parallelism based on real-time feedback from shuffle client.
+Goal
+The primary objectives of this proposal are:
+* To enable shuffle client to write to one single partition with multiple PartitionLocations in parallel
+* to improve LifecycleManager to dynamically detect and optimize write parallelism for each partition, based on the observed frequency of partition splits. 
+Design
+Shuffle Client Modifications
+In ShuffleClientImpl, the previous 1:1 mapping between partitionId and PartitionLocation is updated to a 1:N mapping managed by LocationManager. This change allowes data for a single partition to be splitted and written to multiple locations concurrently. For simplicity, mapId will be hashed to select the target PartitionLocation from the available set in LocationManager.
+With multiple candidate PartitionLocations now available, occasional unavailability—due to push failures or hard splits—no longer stalls shuffle write. ShuffleClient can seamlessly switch to alternative PartitionLocations to contine writing while reporting the unavailable ones to the LifecycleManager via a non-urgent reviveRequest[a][b][c]. Only when all available PartitionLocations become unusable, ShuffleClient sends an urgent reviveRequest to LifecycleManager, indicating it is blocked and requires a new PartitionLocation to proceed.
+Lifecycle Manager Enhancements
+Within LifecycleManager, a PartitionLocationMonitor is introduced to dynamically determine the appropriate write parallelism for each shuffle partition. By default, each partition starts with a parallelism of 1. As the PartitionLocationMonitor receives notifications of SOFT_SPLIT (triggered after writing 1GB by default) and HARD_SPLIT (triggered after writing 3GB by default), it estimates the data push speed for each partition based on the frequency of these splits. 
+Assuming that each worker has an I/O bandwidth limit that affects flush performance, the optimal partition write parallel level is calculated as follows:
+
+
+Partition Write Parallelism = Push Speed / Expected Worker Flush Speed[d][e]
+
+
+This adaptive approach ensures that partitions with higher write loads can scale their parallelism accordingly, decoupling write performance from the statically configured partition number.
+Refining HARD_SPLIT Semantics
+In current PushDataHandler, a HARD_SPLIT response can be triggered by four distinct conditions:
+1. The PartitionLocation size exceeds WORKER_PARTITION_SPLIT_MAX_SIZE
+2. The worker enters shutdown status due to Graceful Shutdown or Decommission
+3. The worker's actualUsableSpace is less than the WORKER_DISK_RESERVE_SIZE
+, indicating that the worker's disk is full.
+4. The PartitionLocation has already been committed.
+
+
+It is proposed that these conditions be disaggregated by introducing more specific StatusCode[f][g][h][i][j], such as WORKER_SHUTDOWN,PUSH_DATA_DISK_SPACE_FULL
+ and FILE_COMMITTED. Without this differentiation, the PartitionLocationMonitor might incorrectly increase the parallelism level for partitions that are already committed or located on workers that are shutting down. 
+Alternatively, HARD_SPLIT response can be extended to include the file length, which should be much easier to handle for the compatible issues.
+Further Optimization
+As a future enhancement, worker can monitor the inbound write speeds for assigned PartitionLocations. If a worker detects that it is overloaded by some high-traffic partitions, it could directly send a SOFT_SPLIT_OVERLOAD [k][l][m][n]responses to ShuffleClient, asking PartitionLocationMonitor to increase the write parallelism for the affected partition and distribute the load more evenly across other workers. We view this approach as a complement to the current design, with plans to implement it in future iterations.
+[a]QQ: Is there any chance of duplication here ?
+For example, if mapper M1 writes C1 to workers W1 ... and if the write succeeds, but the response fails (n/w issues, etc); will we immediately retry a new worker W2 - potentially recording C1 in both workers ?
+[b]actually, this is the current behavior to have duplication and dedup at read time. 
+For Non-AQE jobs, partitionLocations of the same partition is read by the same task, and dedup is done with rpc header (Map Id, Attempt Id, Batch Id) as described in https://celeborn.apache.org/docs/latest/developers/faulttolerant/#exactly-once.
+For AQE jobs with CELEBORN-1319, PushFailedBatches are recorded and reported to LifecycleManage to filter rpcs that doesn't response to ShuffleClient with SUCCESS
+[c]To clarify, this is something to watch out for potentially -   not that I have a immediate corner case where I see it breaking :)
+[d]How is this determined ?
+
+
+Wont this not be a function of current cluster behavior -  in addition to h/w characteristics of a worker (especially when there are heterogenous sku's) ?
+
+
+For example - it would be influenced by load on workers (read/write load), IO characteristics ('size' of reads/writes, spark vs flink reads, etc)-> iops available, nic utilization, load characteristics (num mappers/ reducers, active shuffles and so on), etc.
+Essentially, I would expect this would be highly dynamic.
+
+
+Are we planning to capture the speed across all mappers (for workers) to arrive at a 'reasonable guess' to determine 'outliers' which are getting loaded ?
+[e]Yes, it is highly dynamic, and it will be affected by lots of things. I'm afraid to capture a reasonable guess is a much more complex and dynamic story, and beyond scope of this document. 
+In practice, it is doable to monitor the partition write speed of celeborn workers, and get a "best guess". we had set it to 10MB/s in our jobs.
+[f]What would be the compatibility impact of this ?
+Is there a path to ensuring it is backwardly compatible ?
+[g]correct, the compatible issue here is very complex. In our own implementation, several commits were added to address it. Given the community assumes that the worker side upgrades first, we can add a section to discuss it.
+Alternatively, we can go with the SOFT_SPLIT_OVERLOAD solution, which is easier for compatibility.  However, we prefer to use frequent partition splitting as the main signal since it is the nature way, and SOFT_SPLIT_OVERLOAD relies on "expected worker flush speed" that is hard to get a reasonable guess
+[h]For compatibility, perhaps we can update the protocol, for example by adding supportAdvancedShuffleWrite to support new clients.
+共 1 个回应
+Mridul Muralidharan于 2025-06-30 6:16 上午 UTC回应了 ➕
+[i]After discussed with Rex offline, we have a simple solution for the compatible issue.  The response of Hard Split can be extended to return the file length after the Status Code, leaving existing hard split logic unchanged. The document has been updated accordingly.
+[j]Nice !
+[k]This more closely mirrors an internal throttling enhancement we have for spark shuffle (though the intent is to protect external shuffle service from abusive apps).
+
+
+Wondering if this might be a better option, instead of trying to infer if we need to update partition write parallelism.
+[l]I believe the two are not mutually exclusive: 1) We need to ensure that the shuffle service is stable enough to handle the pressure of shuffle traffic, and 2) We should enhance cluster resource utilization and address the issue of skewed partitions causing uneven pressure on RSS services. By parallelizing the shuffle writer, the pressure on RSS workers is balanced, and the performance of job shuffle writing is improved.
+[m]You are right that they are orthogonal.
+
+
+Essentially, the proposal depends on (among other things):
+
+
+a) reasonably estimating 'expected worker flush speed'.
+
+
+There could be nuances to this for cluster admins to estimate it - given the dynamic nature of cluster load/app characteristics, heterogenous worker nodes, etc.
+
+
+b) Depends on how often splits happen.
+
+
+In our ecosystem, for example, we split at 10g - given the metadata/memory impact ... which might negatively interact with effectiveness of proposal if I understand correctly ?
+
+
+
+
+Given this, I am trying to see if there are refinements possible.
+
+
+Note: the proposal, as-is, is a definite improvement over current state ! My thought exercise is to see if we can improve further :)
+[n]In our code base, Worker uses a sliding window to monitor writing speed of every Partition Location, but Rex raised concern about the memory consumption. After discussed with Yanze, we suppose some light weight speed monitoring solution can be leveraged, such as, average write speed of Partition Locations (file length / file write time).
+The plan is to go with the splitting frequency first (since we have already used it in production), then explore the light weight speed monitoring solution.
+共 1 个回应
+Mridul Muralidharan于 2025-07-16 2:06 上午 UTC回应了 👍
