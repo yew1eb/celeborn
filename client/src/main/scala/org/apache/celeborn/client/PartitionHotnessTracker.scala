@@ -35,7 +35,7 @@ import org.apache.celeborn.common.util.JavaUtils
  */
 private[client] class HotState {
   // Active epochs, insertion-ordered. Registered only for partitions that ever revived in
-  // parallel-write mode; other partitions derive their active set as
+  // adaptive-parallelism mode; other partitions derive their active set as
   // { latestPartitionLocation.epoch }.
   val activeEpochs = new util.LinkedHashSet[Integer]()
   // epoch -> when the location of the epoch was allocated (slots reserved) by this manager.
@@ -48,7 +48,7 @@ private[client] class HotState {
 }
 
 /**
- * Tracks the per-partition hot state behind parallel write: how many writable locations
+ * Tracks the per-partition hot state behind adaptive partition write parallelism: how many writable locations
  * each partition should have. Extracted from ChangePartitionManager, which holds one
  * instance and delegates all hot state handling to it. Dependencies on the
  * LifecycleManager (latest partition locations, worker availability) are injected as
@@ -60,12 +60,13 @@ private[client] class PartitionHotnessTracker(
     latestEpoch: (Int, Int) => Option[Int],
     workerAvailableByLocation: PartitionLocation => Boolean) extends Logging {
 
-  private val parallelWriteMaxLocations = conf.clientShuffleParallelWriteMaxLocationsPerPartition
-  private val parallelWriteHotPartitionWindowMs =
-    conf.clientShuffleParallelWriteHotPartitionWindowMs
+  private val adaptivePartitionWriteParallelismMaxLocations =
+    conf.clientShuffleAdaptivePartitionWriteParallelismMaxLocations
+  private val adaptivePartitionWriteParallelismHotWindowMs =
+    conf.clientShuffleAdaptivePartitionWriteParallelismHotWindowMs
 
   // shuffleId -> (partitionId -> hot state). Sparse: only partitions that have ever been
-  // revived in parallel-write mode get an entry; the active set of any other partition is
+  // revived in adaptive-parallelism mode get an entry; the active set of any other partition is
   // derived as { latestPartitionLocation.epoch }.
   private val partitionHotStates =
     JavaUtils.newConcurrentHashMap[Int, ConcurrentHashMap[Integer, HotState]]()
@@ -136,7 +137,7 @@ private[client] class PartitionHotnessTracker(
         null
       }
     }
-    if (allocTime == null || nowMs - allocTime >= parallelWriteHotPartitionWindowMs) {
+    if (allocTime == null || nowMs - allocTime >= adaptivePartitionWriteParallelismHotWindowMs) {
       markSplitReported(hotState, epoch)
       return
     }
@@ -145,12 +146,12 @@ private[client] class PartitionHotnessTracker(
       if (state.splitReported.add(Integer.valueOf(epoch))) {
         val fillTimeMs = nowMs - allocTime
         val target =
-          math.ceil(parallelWriteHotPartitionWindowMs.toDouble / fillTimeMs).toInt
-        val newDesired = math.min(parallelWriteMaxLocations, target)
+          math.ceil(adaptivePartitionWriteParallelismHotWindowMs.toDouble / fillTimeMs).toInt
+        val newDesired = math.min(adaptivePartitionWriteParallelismMaxLocations, target)
         if (newDesired > state.desired) {
           state.desired = newDesired
           logInfo(s"Partition $shuffleId-$partitionId filled a location in " +
-            s"${fillTimeMs}ms (< ${parallelWriteHotPartitionWindowMs}ms), " +
+            s"${fillTimeMs}ms (< ${adaptivePartitionWriteParallelismHotWindowMs}ms), " +
             s"boost desired location count to ${state.desired}.")
         }
       }
@@ -211,7 +212,7 @@ private[client] class PartitionHotnessTracker(
 
   /**
    * The active epochs of a partition: the registered entry if the partition was ever
-   * revived in parallel-write mode, otherwise derived as { latestPartitionLocation.epoch }.
+   * revived in adaptive-parallelism mode, otherwise derived as { latestPartitionLocation.epoch }.
    */
   private[client] def currentActiveEpochs(shuffleId: Int, partitionId: Int): Set[Int] = {
     val map = partitionHotStates.get(shuffleId)

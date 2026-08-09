@@ -1157,11 +1157,12 @@ class CelebornConf(loadDefaults: Boolean) extends Cloneable with Logging with Se
   def shufflePartitionSplitMode: PartitionSplitMode =
     PartitionSplitMode.valueOf(get(SHUFFLE_PARTITION_SPLIT_MODE))
   def shufflePartitionSplitThreshold: Long = get(SHUFFLE_PARTITION_SPLIT_THRESHOLD)
-  def clientShuffleParallelWriteEnabled: Boolean = get(CLIENT_SHUFFLE_PARALLEL_WRITE_ENABLED)
-  def clientShuffleParallelWriteMaxLocationsPerPartition: Int =
-    get(CLIENT_SHUFFLE_PARALLEL_WRITE_MAX_LOCATIONS_PER_PARTITION)
-  def clientShuffleParallelWriteHotPartitionWindowMs: Long =
-    get(CLIENT_SHUFFLE_PARALLEL_WRITE_HOT_PARTITION_WINDOW)
+  def clientShuffleAdaptivePartitionWriteParallelismEnabled: Boolean =
+    get(CLIENT_SHUFFLE_ADAPTIVE_PARTITION_WRITE_PARALLELISM_ENABLED)
+  def clientShuffleAdaptivePartitionWriteParallelismMaxLocations: Int =
+    get(CLIENT_SHUFFLE_ADAPTIVE_PARTITION_WRITE_PARALLELISM_MAX_LOCATIONS)
+  def clientShuffleAdaptivePartitionWriteParallelismHotWindowMs: Long =
+    get(CLIENT_SHUFFLE_ADAPTIVE_PARTITION_WRITE_PARALLELISM_HOT_WINDOW)
   def batchHandleChangePartitionEnabled: Boolean = get(CLIENT_BATCH_HANDLE_CHANGE_PARTITION_ENABLED)
   def batchHandleChangePartitionBuckets: Int =
     get(CLIENT_BATCH_HANDLE_CHANGE_PARTITION_BUCKETS)
@@ -5394,8 +5395,8 @@ object CelebornConf extends Logging {
       .checkValues(Set(PartitionSplitMode.SOFT.name, PartitionSplitMode.HARD.name))
       .createWithDefault(PartitionSplitMode.SOFT.name)
 
-  val CLIENT_SHUFFLE_PARALLEL_WRITE_ENABLED: ConfigEntry[Boolean] =
-    buildConf("celeborn.client.shuffle.parallelWrite.enabled")
+  val CLIENT_SHUFFLE_ADAPTIVE_PARTITION_WRITE_PARALLELISM_ENABLED: ConfigEntry[Boolean] =
+    buildConf("celeborn.client.shuffle.adaptivePartitionWriteParallelism.enabled")
       .categories("client")
       .doc("Whether to enable writing one partition to multiple partition locations " +
         "in parallel. When enabled, a hot partition (whose location is filled up faster " +
@@ -5406,26 +5407,26 @@ object CelebornConf extends Logging {
       .booleanConf
       .createWithDefault(false)
 
-  val CLIENT_SHUFFLE_PARALLEL_WRITE_MAX_LOCATIONS_PER_PARTITION: ConfigEntry[Int] =
-    buildConf("celeborn.client.shuffle.parallelWrite.maxLocationsPerPartition")
+  val CLIENT_SHUFFLE_ADAPTIVE_PARTITION_WRITE_PARALLELISM_MAX_LOCATIONS: ConfigEntry[Int] =
+    buildConf("celeborn.client.shuffle.adaptivePartitionWriteParallelism.maxLocations")
       .categories("client")
       .doc("Max number of active locations one partition can write in parallel when " +
-        "celeborn.client.shuffle.parallelWrite.enabled is true. The LifecycleManager " +
+        "celeborn.client.shuffle.adaptivePartitionWriteParallelism.enabled is true. The LifecycleManager " +
         "caps the judged desired location count of a partition to this value.")
       .version("0.7.0")
       .intConf
       .checkValue(v => v > 0, "Must be positive.")
       .createWithDefault(4)
 
-  val CLIENT_SHUFFLE_PARALLEL_WRITE_HOT_PARTITION_WINDOW: ConfigEntry[Long] =
-    buildConf("celeborn.client.shuffle.parallelWrite.hotPartitionWindow")
+  val CLIENT_SHUFFLE_ADAPTIVE_PARTITION_WRITE_PARALLELISM_HOT_WINDOW: ConfigEntry[Long] =
+    buildConf("celeborn.client.shuffle.adaptivePartitionWriteParallelism.hotWindow")
       .categories("client")
       .doc("The window to judge whether a partition is hot when " +
-        "celeborn.client.shuffle.parallelWrite.enabled is true. If a partition location " +
+        "celeborn.client.shuffle.adaptivePartitionWriteParallelism.enabled is true. If a partition location " +
         "is filled up (soft/hard split) faster than this window, the partition is hot " +
         "and its desired active location count is raised to ceil(window / fillTime), " +
         "i.e. the location count that would push the per-location fill time above this " +
-        "window, capped by celeborn.client.shuffle.parallelWrite.maxLocationsPerPartition.")
+        "window, capped by celeborn.client.shuffle.adaptivePartitionWriteParallelism.maxLocations.")
       .version("0.7.0")
       .timeConf(TimeUnit.MILLISECONDS)
       .createWithDefaultString("60s")

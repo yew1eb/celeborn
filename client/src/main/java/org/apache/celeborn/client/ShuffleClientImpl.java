@@ -167,7 +167,7 @@ public class ShuffleClientImpl extends ShuffleClient {
 
   private final boolean dataPushFailureTrackingEnabled;
 
-  private final boolean parallelWriteEnabled;
+  private final boolean adaptivePartitionWriteParallelismEnabled;
 
   public static class ReduceFileGroups {
     public Map<Integer, Set<PartitionLocation>> partitionGroups;
@@ -231,7 +231,8 @@ public class ShuffleClientImpl extends ShuffleClient {
     }
     authEnabled = conf.authEnabledOnClient();
     dataPushFailureTrackingEnabled = conf.clientAdaptiveOptimizeSkewedPartitionReadEnabled();
-    parallelWriteEnabled = conf.clientShuffleParallelWriteEnabled();
+    adaptivePartitionWriteParallelismEnabled =
+        conf.clientShuffleAdaptivePartitionWriteParallelismEnabled();
     slowPushThresholdNanos = TimeUnit.MILLISECONDS.toNanos(conf.clientPushSlowPushThresholdMs());
 
     // init rpc env
@@ -450,13 +451,13 @@ public class ShuffleClientImpl extends ShuffleClient {
   }
 
   /**
-   * For parallel write: retire the failed epochs locally, and for partitions that still have
-   * another active location, preset the revive request status to SUCCESS so that the retry thread
-   * re-pushes to the other active location immediately instead of waiting for revive.
+   * For adaptive parallel write: retire the failed epochs locally, and for partitions that still
+   * have another active location, preset the revive request status to SUCCESS so that the retry
+   * thread re-pushes to the other active location immediately instead of waiting for revive.
    */
   private void presetSuccessIfAnotherActive(
       int shuffleId, int mapId, ReviveRequest[] requests, StatusCode cause) {
-    if (!parallelWriteEnabled) {
+    if (!adaptivePartitionWriteParallelismEnabled) {
       return;
     }
     for (ReviveRequest request : requests) {
@@ -496,7 +497,7 @@ public class ShuffleClientImpl extends ShuffleClient {
    */
   private void handleSoftSplitRetire(
       int shuffleId, int mapId, int attemptId, int partitionId, PartitionLocation latest) {
-    if (parallelWriteEnabled) {
+    if (adaptivePartitionWriteParallelismEnabled) {
       LocationGroup latestGroup = locationGroup(shuffleId, partitionId);
       if (latestGroup != null) {
         boolean newlyRetired = latestGroup.retire(latest.getEpoch(), StatusCode.SOFT_SPLIT);
@@ -1088,7 +1089,7 @@ public class ShuffleClientImpl extends ShuffleClient {
           PartitionLocation loc = entry.getValue()._3();
           LocationGroup group =
               partitionLocationMap.computeIfAbsent(partitionId, id -> new LocationGroup(loc));
-          if (parallelWriteEnabled) {
+          if (adaptivePartitionWriteParallelismEnabled) {
             // Converge to the full active set delivered by the LifecycleManager.
             List<PartitionLocation> allActive = new ArrayList<>();
             if (loc != null) {
@@ -1210,7 +1211,7 @@ public class ShuffleClientImpl extends ShuffleClient {
 
     LocationGroup group = map.get(partitionId);
     PartitionLocation currentLoc = group == null ? null : group.currentFor(mapId);
-    if (currentLoc == null && group != null && parallelWriteEnabled) {
+    if (currentLoc == null && group != null && adaptivePartitionWriteParallelismEnabled) {
       // All known locations of this partition are unusable, synchronously revive for a
       // fresh location (same semantics as the legacy single-location revive).
       if (!revive(
@@ -1391,7 +1392,7 @@ public class ShuffleClientImpl extends ShuffleClient {
                   reviveManager.addRequest(reviveRequest);
                   recordPushEvent(
                       shuffleId, mapId, attemptId, latest.hostAndPushPort(), PushEvent.HARD_SPLIT);
-                  if (parallelWriteEnabled) {
+                  if (adaptivePartitionWriteParallelismEnabled) {
                     LocationGroup latestGroup = locationGroup(shuffleId, partitionId);
                     if (latestGroup != null) {
                       retireAndPresetIfAnotherActive(
@@ -1509,7 +1510,7 @@ public class ShuffleClientImpl extends ShuffleClient {
                     new ReviveRequest(
                         shuffleId, mapId, attemptId, partitionId, latest.getEpoch(), latest, cause);
                 reviveManager.addRequest(reviveRequest);
-                if (parallelWriteEnabled) {
+                if (adaptivePartitionWriteParallelismEnabled) {
                   LocationGroup latestGroup = locationGroup(shuffleId, partitionId);
                   if (latestGroup != null) {
                     retireAndPresetIfAnotherActive(

@@ -88,13 +88,15 @@ class ChangePartitionManager(
   private val dynamicResourceEnabled = conf.clientShuffleDynamicResourceEnabled
   private val dynamicResourceUnavailableFactor = conf.clientShuffleDynamicResourceFactor
 
-  private val parallelWriteEnabled = conf.clientShuffleParallelWriteEnabled
-  private val parallelWriteMaxLocations = conf.clientShuffleParallelWriteMaxLocationsPerPartition
+  private val adaptivePartitionWriteParallelismEnabled =
+    conf.clientShuffleAdaptivePartitionWriteParallelismEnabled
+  private val adaptivePartitionWriteParallelismMaxLocations =
+    conf.clientShuffleAdaptivePartitionWriteParallelismMaxLocations
 
   // Injectable clock for testing.
   private[client] var nowMs: () => Long = () => System.currentTimeMillis()
 
-  // Per-partition hot state behind parallel write: how many writable locations each
+  // Per-partition hot state behind adaptive partition write parallelism: how many writable locations each
   // partition should have. All hot state handling is delegated to this tracker.
   private val hotnessTracker = new PartitionHotnessTracker(
     conf,
@@ -258,7 +260,7 @@ class ChangePartitionManager(
     // The requested epoch is retiring: remove it from the active epoch set of the
     // partition and, when the retire is measure-eligible, judge whether the partition is
     // hot and needs more locations.
-    if (parallelWriteEnabled && oldEpoch >= 0) {
+    if (adaptivePartitionWriteParallelismEnabled && oldEpoch >= 0) {
       onEpochRetired(shuffleId, partitionId, oldEpoch, oldPartition, cause, nowMs())
     }
 
@@ -272,7 +274,7 @@ class ChangePartitionManager(
       } else {
         getLatestPartition(shuffleId, partitionId, oldEpoch).foreach { latestLoc =>
           val additionalLocs =
-            if (parallelWriteEnabled) {
+            if (adaptivePartitionWriteParallelismEnabled) {
               currentActiveLocations(shuffleId, partitionId)
                 .filter(_.getEpoch != latestLoc.getEpoch)
                 .asJava
@@ -412,7 +414,7 @@ class ChangePartitionManager(
       }
     }
 
-    // remove together to reduce lock time. Parallel write: allocation is decoupled from
+    // remove together to reduce lock time. Adaptive parallelism: allocation is decoupled from
     // replying — every request is replied with the current full active set of the partition
     // (max epoch location as the primary reply, the rest as additional locations), so all
     // executors converge to the same active set even when this round allocates nothing.
@@ -518,7 +520,7 @@ class ChangePartitionManager(
 
     // PartitionSplit all contains oldPartition
     val (newlyAllocatedLocations, parallelAllocations) =
-      if (parallelWriteEnabled) {
+      if (adaptivePartitionWriteParallelismEnabled) {
         allocateParallelLocations(
           shuffleId,
           changePartitions.toList,
@@ -590,7 +592,7 @@ class ChangePartitionManager(
 
     // Register the hot state of revived partitions (sparse): record the allocation time of
     // every newly reserved epoch and the surviving active epoch set.
-    if (parallelWriteEnabled) {
+    if (adaptivePartitionWriteParallelismEnabled) {
       val allocTimeMs = nowMs()
       parallelAllocations.foreach { case (partitionId, allocation) =>
         if (allocation.newEpochs.nonEmpty) {
@@ -610,7 +612,7 @@ class ChangePartitionManager(
       }
     }
 
-    if (parallelWriteEnabled) {
+    if (adaptivePartitionWriteParallelismEnabled) {
       replySuccessFullSet()
     } else {
       replySuccess(newPrimaryLocations.toArray)
@@ -638,7 +640,7 @@ class ChangePartitionManager(
       val partitionId = change.partitionId
       val desired = math.min(
         desiredLocationCount(shuffleId, partitionId),
-        parallelWriteMaxLocations)
+        adaptivePartitionWriteParallelismMaxLocations)
       // The requested epoch was already removed from the registered active entry when the
       // request arrived; for the derived case (no entry) remove it here.
       val surviving = currentActiveEpochs(shuffleId, partitionId) - change.epoch

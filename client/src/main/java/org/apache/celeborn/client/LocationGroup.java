@@ -176,7 +176,7 @@ public class LocationGroup {
     }
   }
 
-  /** Legacy single-location update (parallel write disabled or single-location response). */
+  /** Legacy single-location update (adaptive parallelism disabled or single-location response). */
   public void updateSingle(PartitionLocation loc) {
     ParallelState p = parallel;
     if (p == null) {

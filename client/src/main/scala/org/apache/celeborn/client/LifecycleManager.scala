@@ -155,7 +155,7 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
       locations: util.List[PartitionLocation]): Unit = {
     val map = latestPartitionLocation.computeIfAbsent(shuffleId, newMapFunc)
     // latest = the location with the max epoch; keep this semantic when one call carries
-    // multiple active locations of the same partition (parallel write).
+    // multiple active locations of the same partition (adaptive parallelism).
     locations.asScala.foreach(location =>
       map.merge(
         location.getId,
@@ -902,7 +902,7 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
       val allPrimaryPartitionLocations = slots.asScala.flatMap(_._2._1.asScala).toArray
       // Record the allocation time of the initial (epoch 0) locations so that
       // ChangePartitionManager can measure fill times for hot partition detection.
-      if (conf.clientShuffleParallelWriteEnabled) {
+      if (conf.clientShuffleAdaptivePartitionWriteParallelismEnabled) {
         changePartitionManager.recordInitialAllocTime(
           shuffleId,
           allPrimaryPartitionLocations,

@@ -31,9 +31,9 @@ import org.apache.celeborn.common.protocol.message.ControlMessages.WorkerResourc
 import org.apache.celeborn.common.protocol.message.StatusCode
 import org.apache.celeborn.common.util.JavaUtils
 
-class ChangePartitionManagerParallelWriteSuite extends CelebornFunSuite {
+class ChangePartitionManagerAdaptiveParallelismSuite extends CelebornFunSuite {
 
-  private val APP = "app-parallel-write-test"
+  private val APP = "app-adaptive-parallelism-test"
 
   private case class CapturedReply(
       status: StatusCode,
@@ -64,7 +64,7 @@ class ChangePartitionManagerParallelWriteSuite extends CelebornFunSuite {
 
   private def makeConf(): CelebornConf = {
     val conf = new CelebornConf()
-    conf.set(CelebornConf.CLIENT_SHUFFLE_PARALLEL_WRITE_ENABLED.key, "true")
+    conf.set(CelebornConf.CLIENT_SHUFFLE_ADAPTIVE_PARTITION_WRITE_PARALLELISM_ENABLED.key, "true")
     conf.set(CelebornConf.CLIENT_BATCH_HANDLE_CHANGE_PARTITION_ENABLED.key, "false")
     conf.set(CelebornConf.CLIENT_PUSH_REPLICATE_ENABLED.key, "false")
     conf
