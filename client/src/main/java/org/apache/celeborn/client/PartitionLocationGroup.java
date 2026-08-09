@@ -207,8 +207,13 @@ public class PartitionLocationGroup {
     }
   }
 
-  /** Legacy single-location update (adaptive parallelism disabled or single-location response). */
-  public void updateLatest(PartitionLocation loc) {
+  /**
+   * Legacy single-location update (adaptive parallelism disabled or single-location response).
+   * Synchronized because revive responses can be applied concurrently by the ReviveManager
+   * scheduler thread and by push threads via the blocking revive path, so the non-inflated
+   * check-then-set on {@link #single} must be atomic.
+   */
+  public synchronized void updateLatest(PartitionLocation loc) {
     ParallelState p = parallel;
     if (p == null) {
       PartitionLocation cur = single;

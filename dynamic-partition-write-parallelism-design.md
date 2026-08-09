@@ -192,6 +192,21 @@ message PbChangeLocationPartitionInfo {
 - **预置 SUCCESS 的安全性**：HARD_SPLIT 时 worker 已拒收该 batch，旧 location 里只有之前成功落盘的 batch；重推到另一 location 后读侧两文件合并+去重，等价于现有"revive 后重推"路径；
 - **speculation/rerun/stageEnd 后重跑**：既有路径不变。
 
+### 7.5 并发设计（审计结论）
+
+**线程模型**：`PartitionLocationGroup` 被四类线程并发访问——DataPusher push 线程（每 map task 一个）、push 回调线程（split/失败回调）、ReviveManager 单线程调度器（批量 revive 响应应用）、以及 push 线程直连（全不可用分支的同步 `revive()` 也会应用响应）。LM 侧同一 partition 的批处理由条纹锁 + `inBatchPartitions` 去重天然串行。
+
+**无需加锁的点及依据**：
+- `pick`/`currentFor` 读路径：CopyOnWriteArrayList + ConcurrentHashMap，快照迭代安全；
+- `retire()` 首报信号：CHM `compute` 按 key 原子——并发退休同一 epoch 恰好一个线程拿到 true（每 epoch 一条 revive 上报的保证）；
+- `retire` 与 `mergeActiveLocations` 交错：退休不丢——merge 跳过 retired；竞态下入 active 但 retired 有标记，pick 照样跳过；清理只删"LM 不再报告的 retired"，误删后该 epoch 亦不在 active，不会再被选中；
+- `HotState.activeEpochs` 全部变更点（注册/移除/读）均在 `entry.synchronized` 内；热点判定去重的 `splitReported.add` 在 `state.synchronized` 内；
+- `reviveStatus` 预置：字段本身 volatile（baseline 机制）。
+
+**修复项**：`updateLatest` 非膨胀路径的 check-then-set 原非原子（同步 revive 使响应应用可被 push 线程并发执行，乱序响应可能旧 epoch 覆盖新 epoch）——已加 `synchronized`（与 `mergeActiveLocations` 同 monitor，重入安全）。baseline 是无保护 `put`（last-writer-wins），修复后严格优于 baseline。
+
+**良性记录在案**：(a) 全不可用场景的同步 revive 羊群——重复 RPC 由 LM 侧 `inBatchPartitions` piggyback 合并，正确性无虞；(b) `removeShuffle` 后迟到上报会重建一个 HotState 条目——生命周期末尾的一次性微泄漏；(c) `latest()` 在 active 为空时回退 stale `single`——只用作 revive oldLoc 与拥塞门控代表，无正确性影响。
+
 ## 8. LM 侧实现（热点判定集中地）
 
 ### 8.1 HotState（稀疏，per (shuffleId, partitionId)）
