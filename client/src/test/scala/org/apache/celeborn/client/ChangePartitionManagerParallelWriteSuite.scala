@@ -137,8 +137,9 @@ class ChangePartitionManagerParallelWriteSuite extends CelebornFunSuite {
     val changePartitionManager = new FakeClockManager(conf, lifecycleManager, 100000L)
     changePartitionManager.recordInitialAllocTime(shuffleId, Array(loc0), 100000L)
 
-    // Epoch 0 fills in 10s (< 60s window): the first SOFT_SPLIT report boosts desired to 2.
-    changePartitionManager.advance(10000)
+    // Epoch 0 fills in 40s (< 60s window): the first SOFT_SPLIT report boosts desired to
+    // target ceil(60/40) = 2.
+    changePartitionManager.advance(40000)
     val context = new CapturingContext
     changePartitionManager.handleRequestPartitionLocation(
       context,
@@ -256,7 +257,7 @@ class ChangePartitionManagerParallelWriteSuite extends CelebornFunSuite {
     val changePartitionManager = new FakeClockManager(conf, lifecycleManager, 100000L)
     changePartitionManager.recordInitialAllocTime(shuffleId, Array(loc0), 100000L)
 
-    changePartitionManager.advance(10000)
+    changePartitionManager.advance(40000)
     changePartitionManager.handleRequestPartitionLocation(
       new CapturingContext,
       shuffleId,
@@ -289,7 +290,7 @@ class ChangePartitionManagerParallelWriteSuite extends CelebornFunSuite {
     assert(reply.additionals.asScala.map(_.getEpoch).toSet == Set(1))
   }
 
-  test("debounce: at most one boost per window") {
+  test("proportional step-up: a much faster fill jumps straight to the cap, no debounce") {
     val conf = makeConf()
     val shuffleId = 1
     val partitionId = 0
@@ -298,8 +299,8 @@ class ChangePartitionManagerParallelWriteSuite extends CelebornFunSuite {
     val changePartitionManager = new FakeClockManager(conf, lifecycleManager, 0L)
     changePartitionManager.recordInitialAllocTime(shuffleId, Array(loc0), 0L)
 
-    // t=10s: epoch 0 fills fast, boost desired to 2 (epochs 1, 2 allocated at t=10s).
-    changePartitionManager.advance(10000)
+    // t=40s: epoch 0 fills in 40s, target ceil(60/40) = 2 (epochs 1, 2 allocated at t=40s).
+    changePartitionManager.advance(40000)
     changePartitionManager.handleRequestPartitionLocation(
       new CapturingContext,
       shuffleId,
@@ -310,33 +311,19 @@ class ChangePartitionManagerParallelWriteSuite extends CelebornFunSuite {
       isSegmentGranularityVisible = false)
     assert(changePartitionManager.desiredLocationCount(shuffleId, partitionId) == 2)
 
-    // t=40s: epoch 2 (allocated at t=10s) fills in 30s, hot, but within the debounce
-    // window of the last boost: desired stays 2 (epoch 3 allocated as plain replace).
-    changePartitionManager.advance(30000)
+    // t=50s: epoch 2 (allocated at t=40s) fills in 10s, target ceil(60/10) = 6, capped at
+    // the configured max 4. No per-window debounce: the much faster fill corrects desired
+    // immediately (the cap and the per-epoch first-report dedup bound the boosts).
+    changePartitionManager.advance(10000)
     val loc2 = primaryLocs(shuffleId, partitionId).find(_.getEpoch == 2).get
-    changePartitionManager.handleRequestPartitionLocation(
-      new CapturingContext,
+    changePartitionManager.onEpochRetired(
       shuffleId,
       partitionId,
       2,
       loc2,
       Some(StatusCode.SOFT_SPLIT),
-      isSegmentGranularityVisible = false)
-    assert(changePartitionManager.desiredLocationCount(shuffleId, partitionId) == 2)
-
-    // t=75s: epoch 3 (allocated at t=40s) fills in 35s, hot and past the debounce window:
-    // desired boosts to 3.
-    changePartitionManager.advance(35000)
-    val loc3 = primaryLocs(shuffleId, partitionId).find(_.getEpoch == 3).get
-    changePartitionManager.handleRequestPartitionLocation(
-      new CapturingContext,
-      shuffleId,
-      partitionId,
-      3,
-      loc3,
-      Some(StatusCode.SOFT_SPLIT),
-      isSegmentGranularityVisible = false)
-    assert(changePartitionManager.desiredLocationCount(shuffleId, partitionId) == 3)
+      50000L)
+    assert(changePartitionManager.desiredLocationCount(shuffleId, partitionId) == 4)
   }
 
   test("desired is capped at maxLocationsPerPartition") {
@@ -348,14 +335,15 @@ class ChangePartitionManagerParallelWriteSuite extends CelebornFunSuite {
     val changePartitionManager = new ChangePartitionManager(conf, lifecycleManager)
     changePartitionManager.recordInitialAllocTime(shuffleId, Array(loc0), 0L)
 
-    // One hot epoch per window: desired climbs 1 -> 2 -> 3 -> 4, then is capped.
+    // Proportional climb: fillTime 40s -> target 2, 25s -> 3, 15s -> 4, then a 10s fill
+    // (target 6) is capped at the configured max 4.
     changePartitionManager.onEpochRetired(
       shuffleId,
       partitionId,
       0,
       loc0,
       Some(StatusCode.SOFT_SPLIT),
-      10000L)
+      40000L)
     assert(changePartitionManager.desiredLocationCount(shuffleId, partitionId) == 2)
     changePartitionManager.recordAllocTime(shuffleId, partitionId, 1, 70000L)
     changePartitionManager.onEpochRetired(
@@ -364,7 +352,7 @@ class ChangePartitionManagerParallelWriteSuite extends CelebornFunSuite {
       1,
       makeLoc(partitionId, 1, workers.head.host),
       Some(StatusCode.SOFT_SPLIT),
-      80000L)
+      95000L)
     assert(changePartitionManager.desiredLocationCount(shuffleId, partitionId) == 3)
     changePartitionManager.recordAllocTime(shuffleId, partitionId, 2, 140000L)
     changePartitionManager.onEpochRetired(
@@ -373,7 +361,7 @@ class ChangePartitionManagerParallelWriteSuite extends CelebornFunSuite {
       2,
       makeLoc(partitionId, 2, workers.head.host),
       Some(StatusCode.SOFT_SPLIT),
-      150000L)
+      155000L)
     assert(changePartitionManager.desiredLocationCount(shuffleId, partitionId) == 4)
     changePartitionManager.recordAllocTime(shuffleId, partitionId, 3, 210000L)
     changePartitionManager.onEpochRetired(
@@ -408,15 +396,15 @@ class ChangePartitionManagerParallelWriteSuite extends CelebornFunSuite {
       Some(StatusCode.SOFT_SPLIT),
       30000L)
     assert(changePartitionManager.desiredLocationCount(shuffleId, partitionId) == 2)
-    // Epoch 5 fills later at t=95s: measured against its own allocTime, fillTime 45s <
-    // window and past the debounce window, boost, unaffected by the out-of-order event.
+    // Epoch 5 fills later at t=75s: measured against its own allocTime, fillTime 25s ->
+    // target 3, unaffected by the out-of-order event.
     changePartitionManager.onEpochRetired(
       shuffleId,
       partitionId,
       5,
       makeLoc(partitionId, 5, workers.head.host),
       Some(StatusCode.SOFT_SPLIT),
-      95000L)
+      75000L)
     assert(changePartitionManager.desiredLocationCount(shuffleId, partitionId) == 3)
   }
 
@@ -429,8 +417,8 @@ class ChangePartitionManagerParallelWriteSuite extends CelebornFunSuite {
     val changePartitionManager = new FakeClockManager(conf, lifecycleManager, 100000L)
     changePartitionManager.recordInitialAllocTime(shuffleId, Array(loc0), 100000L)
 
-    // Boost to 2 active locations first: active epochs {1, 2}.
-    changePartitionManager.advance(10000)
+    // Boost to 2 active locations first (fillTime 40s -> target 2): active epochs {1, 2}.
+    changePartitionManager.advance(40000)
     changePartitionManager.handleRequestPartitionLocation(
       new CapturingContext,
       shuffleId,
@@ -473,15 +461,15 @@ class ChangePartitionManagerParallelWriteSuite extends CelebornFunSuite {
     val changePartitionManager = new ChangePartitionManager(conf, lifecycleManager)
     changePartitionManager.recordInitialAllocTime(shuffleId, Array(loc0), 100000L)
 
-    // The first SOFT_SPLIT report of epoch 0 boosts desired to 2; reports of the same
-    // epoch queued from other executors are deduped.
+    // The first SOFT_SPLIT report of epoch 0 (fillTime 40s, target 2) boosts desired to
+    // 2; reports of the same epoch queued from other executors are deduped.
     changePartitionManager.onEpochRetired(
       shuffleId,
       partitionId,
       0,
       loc0,
       Some(StatusCode.SOFT_SPLIT),
-      110000L)
+      140000L)
     val context1 = new CapturingContext
     val context2 = new CapturingContext
     val requestSet = new util.HashSet[ChangePartitionRequest]()

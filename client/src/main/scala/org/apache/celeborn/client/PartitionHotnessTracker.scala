@@ -42,10 +42,9 @@ private[client] class HotState {
   val allocTimeMs = JavaUtils.newConcurrentHashMap[Int, java.lang.Long]()
   // Epochs whose first split report has been judged (dedupe repeated reports).
   val splitReported: util.Set[Integer] = ConcurrentHashMap.newKeySet[Integer]()
-  // Desired total number of active locations of the partition.
+  // Desired total number of active locations of the partition. Monotone increasing,
+  // capped at maxLocationsPerPartition.
   @volatile var desired: Int = 1
-  // Debounce: boost desired at most once per hot partition window.
-  @volatile var lastBoostTimeMs: Long = -1L
 }
 
 /**
@@ -93,9 +92,8 @@ private[client] class PartitionHotnessTracker(
   /**
    * Retire the epoch from the active epoch set and, when the retire is measure-eligible,
    * judge whether the partition is hot: fillTime = now - allocTime(epoch). A location
-   * filled faster than the configured hot partition window boosts the desired location
-   * count by one (at most once per window per partition, capped at
-   * maxLocationsPerPartition).
+   * filled faster than the configured hot partition window raises the desired location
+   * count proportionally (see below), capped at maxLocationsPerPartition.
    *
    * A retire is measure-eligible when the cause is SOFT_SPLIT or HARD_SPLIT and the worker
    * of the retired location is still available: both split kinds reflect a threshold
@@ -103,6 +101,13 @@ private[client] class PartitionHotnessTracker(
    * of a known-unavailable worker, a null oldPartition, and all push failure causes only
    * retire and never boost. Only the first eligible report of an epoch is judged; epochs
    * with unknown allocTime (e.g. legacy data) conservatively never boost.
+   *
+   * Proportional step-up (no per-window debounce): with K active locations each one fills
+   * in ~K * fillTime, so K = ceil(window / fillTime) locations push the per-location fill
+   * time above the window. The judgment jumps straight to that level instead of climbing
+   * +1 per window, so a very hot partition reaches the cap after its first split report.
+   * desired is monotone and capped, and each epoch is judged at most once, so no debounce
+   * is needed to bound the total number of boosts.
    */
   private[client] def onEpochRetired(
       shuffleId: Int,
@@ -138,13 +143,14 @@ private[client] class PartitionHotnessTracker(
     val state = getOrCreateHotState(shuffleId, partitionId)
     state.synchronized {
       if (state.splitReported.add(Integer.valueOf(epoch))) {
-        val debouncePassed = state.lastBoostTimeMs < 0 ||
-          nowMs - state.lastBoostTimeMs >= parallelWriteHotPartitionWindowMs
-        if (debouncePassed && state.desired < parallelWriteMaxLocations) {
-          state.desired += 1
-          state.lastBoostTimeMs = nowMs
+        val fillTimeMs = nowMs - allocTime
+        val target =
+          math.ceil(parallelWriteHotPartitionWindowMs.toDouble / fillTimeMs).toInt
+        val newDesired = math.min(parallelWriteMaxLocations, target)
+        if (newDesired > state.desired) {
+          state.desired = newDesired
           logInfo(s"Partition $shuffleId-$partitionId filled a location in " +
-            s"${nowMs - allocTime}ms (< ${parallelWriteHotPartitionWindowMs}ms), " +
+            s"${fillTimeMs}ms (< ${parallelWriteHotPartitionWindowMs}ms), " +
             s"boost desired location count to ${state.desired}.")
         }
       }

@@ -40,9 +40,9 @@ class PartitionHotnessTrackerSuite extends CelebornFunSuite {
     val loc0 = makeLoc(partitionId, 0, "host1")
     tracker.recordInitialAllocTime(shuffleId, Array(loc0), 0L)
 
-    // Epoch 0 hard-splits 10s after allocation (< 60s window) on a healthy worker:
-    // the threshold crossing is measured like a fast fill and boosts desired to 2.
-    tracker.onEpochRetired(shuffleId, partitionId, 0, loc0, Some(StatusCode.HARD_SPLIT), 10000L)
+    // Epoch 0 hard-splits 45s after allocation (< 60s window) on a healthy worker:
+    // the threshold crossing is measured like a fast fill, target = ceil(60/45) = 2.
+    tracker.onEpochRetired(shuffleId, partitionId, 0, loc0, Some(StatusCode.HARD_SPLIT), 45000L)
     assert(tracker.desiredLocationCount(shuffleId, partitionId) == 2)
   }
 
@@ -77,8 +77,8 @@ class PartitionHotnessTrackerSuite extends CelebornFunSuite {
       val loc0 = makeLoc(partitionId, 0, "host1")
       tracker.recordInitialAllocTime(shuffleId, Array(loc0), 0L)
 
-      // Fast fill of epoch 0: both causes boost desired to 2.
-      tracker.onEpochRetired(shuffleId, partitionId, 0, loc0, Some(cause), 10000L)
+      // Fast fill of epoch 0 (45s, target 2): both causes boost desired to 2.
+      tracker.onEpochRetired(shuffleId, partitionId, 0, loc0, Some(cause), 45000L)
       assert(tracker.desiredLocationCount(shuffleId, partitionId) == 2)
 
       // Slow fill of epoch 1 (70s > window): neither cause boosts.
@@ -87,5 +87,59 @@ class PartitionHotnessTrackerSuite extends CelebornFunSuite {
       tracker.onEpochRetired(shuffleId, partitionId, 1, loc1, Some(cause), 140000L)
       assert(tracker.desiredLocationCount(shuffleId, partitionId) == 2)
     }
+  }
+
+  test("fillTime proportionally steps desired, capped at maxLocationsPerPartition") {
+    val tracker = makeTracker(_ => true)
+    val loc0 = makeLoc(partitionId, 0, "host1")
+    tracker.recordInitialAllocTime(shuffleId, Array(loc0), 0L)
+
+    // fillTime 30s -> target ceil(60/30) = 2.
+    tracker.onEpochRetired(shuffleId, partitionId, 0, loc0, Some(StatusCode.SOFT_SPLIT), 30000L)
+    assert(tracker.desiredLocationCount(shuffleId, partitionId) == 2)
+
+    // fillTime 25s -> target ceil(60/25) = 3.
+    tracker.recordAllocTime(shuffleId, partitionId, 1, 30000L)
+    tracker.onEpochRetired(
+      shuffleId,
+      partitionId,
+      1,
+      makeLoc(partitionId, 1, "host1"),
+      Some(StatusCode.SOFT_SPLIT),
+      55000L)
+    assert(tracker.desiredLocationCount(shuffleId, partitionId) == 3)
+
+    // fillTime 10s -> target 6, capped at the configured max 4: a very hot partition
+    // reaches the cap after its first fast split report, without any debounce window.
+    tracker.recordAllocTime(shuffleId, partitionId, 2, 55000L)
+    tracker.onEpochRetired(
+      shuffleId,
+      partitionId,
+      2,
+      makeLoc(partitionId, 2, "host1"),
+      Some(StatusCode.SOFT_SPLIT),
+      65000L)
+    assert(tracker.desiredLocationCount(shuffleId, partitionId) == 4)
+  }
+
+  test("desired never decreases on slower subsequent fills") {
+    val tracker = makeTracker(_ => true)
+    val loc0 = makeLoc(partitionId, 0, "host1")
+    tracker.recordInitialAllocTime(shuffleId, Array(loc0), 0L)
+
+    // Very fast fill: jump straight to the cap.
+    tracker.onEpochRetired(shuffleId, partitionId, 0, loc0, Some(StatusCode.SOFT_SPLIT), 10000L)
+    assert(tracker.desiredLocationCount(shuffleId, partitionId) == 4)
+
+    // After the fan-out the next location fills slower (30s, target 3): desired stays 4.
+    tracker.recordAllocTime(shuffleId, partitionId, 1, 10000L)
+    tracker.onEpochRetired(
+      shuffleId,
+      partitionId,
+      1,
+      makeLoc(partitionId, 1, "host1"),
+      Some(StatusCode.SOFT_SPLIT),
+      40000L)
+    assert(tracker.desiredLocationCount(shuffleId, partitionId) == 4)
   }
 }

@@ -5411,7 +5411,7 @@ object CelebornConf extends Logging {
       .categories("client")
       .doc("Max number of active locations one partition can write in parallel when " +
         "celeborn.client.shuffle.parallelWrite.enabled is true. The LifecycleManager " +
-        "truncates the desired location count reported by executors to this value.")
+        "caps the judged desired location count of a partition to this value.")
       .version("0.7.0")
       .intConf
       .checkValue(v => v > 0, "Must be positive.")
@@ -5422,9 +5422,10 @@ object CelebornConf extends Logging {
       .categories("client")
       .doc("The window to judge whether a partition is hot when " +
         "celeborn.client.shuffle.parallelWrite.enabled is true. If a partition location " +
-        "is filled up (soft split) faster than this window, the desired active location " +
-        "count of the partition is boosted by one. This window also serves as the " +
-        "debounce interval of boosting.")
+        "is filled up (soft/hard split) faster than this window, the partition is hot " +
+        "and its desired active location count is raised to ceil(window / fillTime), " +
+        "i.e. the location count that would push the per-location fill time above this " +
+        "window, capped by celeborn.client.shuffle.parallelWrite.maxLocationsPerPartition.")
       .version("0.7.0")
       .timeConf(TimeUnit.MILLISECONDS)
       .createWithDefaultString("60s")
