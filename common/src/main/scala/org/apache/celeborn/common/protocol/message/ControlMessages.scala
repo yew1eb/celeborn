@@ -766,7 +766,6 @@ object ControlMessages extends Logging {
           .setPartitionId(req.partitionId)
           .setEpoch(req.epoch)
           .setStatus(req.cause.getValue)
-          .setDesiredLocationCount(req.desiredLocationCount)
         if (req.loc != null) {
           partitionInfoBuilder.setPartition(PbSerDeUtils.toPbPartitionLocation(req.loc))
         }
@@ -1334,8 +1333,6 @@ object ControlMessages extends Logging {
             info.getEpoch,
             partition,
             StatusCode.fromValue(info.getStatus))
-          // proto3 default 0 means legacy single-location semantics
-          reviveRequest.desiredLocationCount = Math.max(info.getDesiredLocationCount, 1)
           reviveRequests.add(reviveRequest)
         }
         Revive(

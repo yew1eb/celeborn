@@ -38,8 +38,27 @@ case class ChangePartitionRequest(
     partitionId: Int,
     epoch: Int,
     oldPartition: PartitionLocation,
-    causes: Option[StatusCode],
-    desiredLocationCount: Int = 1)
+    causes: Option[StatusCode])
+
+/**
+ * Driver-side hot state of one (shuffleId, partitionId), maintained by the
+ * ChangePartitionManager to decide whether a partition needs more than one writable
+ * location. All fields are mutated under this instance's monitor.
+ */
+private[client] class HotState {
+  // Active epochs, insertion-ordered. Registered only for partitions that ever revived in
+  // parallel-write mode; other partitions derive their active set as
+  // { latestPartitionLocation.epoch }.
+  val activeEpochs = new util.LinkedHashSet[Integer]()
+  // epoch -> when the location of the epoch was allocated (slots reserved) by this manager.
+  val allocTimeMs = JavaUtils.newConcurrentHashMap[Int, java.lang.Long]()
+  // Epochs whose first SOFT_SPLIT report has been judged (dedupe repeated reports).
+  val splitReported: util.Set[Integer] = ConcurrentHashMap.newKeySet[Integer]()
+  // Desired total number of active locations of the partition.
+  @volatile var desired: Int = 1
+  // Debounce: boost desired at most once per hot partition window.
+  @volatile var lastBoostTimeMs: Long = -1L
+}
 
 class ChangePartitionManager(
     conf: CelebornConf,
@@ -91,12 +110,21 @@ class ChangePartitionManager(
 
   private val parallelWriteEnabled = conf.clientShuffleParallelWriteEnabled
   private val parallelWriteMaxLocations = conf.clientShuffleParallelWriteMaxLocationsPerPartition
+  private val parallelWriteHotPartitionWindowMs =
+    conf.clientShuffleParallelWriteHotPartitionWindowMs
 
-  // shuffleId -> (partitionId -> active epochs). Sparse: only partitions that have ever
-  // been allocated multiple active locations (desired > 1) get an entry; the active set
-  // of any other partition is derived as { latestPartitionLocation.epoch }.
-  private val partitionActiveEpochs =
-    JavaUtils.newConcurrentHashMap[Int, ConcurrentHashMap[Integer, util.LinkedHashSet[Integer]]]()
+  // Injectable clock for testing.
+  private[client] var nowMs: () => Long = () => System.currentTimeMillis()
+
+  // shuffleId -> (partitionId -> hot state). Sparse: only partitions that have ever been
+  // revived in parallel-write mode get an entry; the active set of any other partition is
+  // derived as { latestPartitionLocation.epoch }.
+  private val partitionHotStates =
+    JavaUtils.newConcurrentHashMap[Int, ConcurrentHashMap[Integer, HotState]]()
+
+  // shuffleId -> when its initial (epoch 0) locations were allocated at registerShuffle.
+  private val shuffleInitialAllocTimeMs =
+    JavaUtils.newConcurrentHashMap[Int, java.lang.Long]()
 
   def start(): Unit = {
     batchHandleChangePartition = batchHandleChangePartitionSchedulerThread.map {
@@ -203,8 +231,7 @@ class ChangePartitionManager(
       oldEpoch: Int,
       oldPartition: PartitionLocation,
       cause: Option[StatusCode] = None,
-      isSegmentGranularityVisible: Boolean,
-      desiredLocationCount: Int = 1): Unit = {
+      isSegmentGranularityVisible: Boolean): Unit = {
 
     val changePartition = ChangePartitionRequest(
       context,
@@ -212,8 +239,7 @@ class ChangePartitionManager(
       partitionId,
       oldEpoch,
       oldPartition,
-      cause,
-      desiredLocationCount)
+      cause)
     // check if there exists request for the partition, if do just register
     val requests = changePartitionRequests.computeIfAbsent(shuffleId, rpcContextRegisterFunc)
     inBatchPartitions.computeIfAbsent(shuffleId, inBatchShuffleIdRegisterFunc)
@@ -223,9 +249,10 @@ class ChangePartitionManager(
       oldPartition,
       cause)
 
-    // The requested epoch is retiring, remove it from the active epoch set of the partition.
+    // The requested epoch is retiring: remove it from the active epoch set of the partition
+    // and, on SOFT_SPLIT, judge whether the partition is hot and needs more locations.
     if (parallelWriteEnabled && oldEpoch >= 0) {
-      removeActiveEpoch(shuffleId, partitionId, oldEpoch)
+      onEpochRetired(shuffleId, partitionId, oldEpoch, cause, nowMs())
     }
 
     val locksForShuffle = locks.computeIfAbsent(shuffleId, locksRegisterFunc)
@@ -265,45 +292,135 @@ class ChangePartitionManager(
     }
   }
 
-  private def removeActiveEpoch(shuffleId: Int, partitionId: Int, epoch: Int): Unit = {
-    val map = partitionActiveEpochs.get(shuffleId)
+  private def removeActiveEpoch(shuffleId: Int, partitionId: Int, epoch: Int): HotState = {
+    val map = partitionHotStates.get(shuffleId)
     if (map != null) {
       val entry = map.get(partitionId)
       if (entry != null) {
         entry.synchronized {
-          entry.remove(Integer.valueOf(epoch))
+          entry.activeEpochs.remove(Integer.valueOf(epoch))
+        }
+      }
+      entry
+    } else {
+      null
+    }
+  }
+
+  /**
+   * Retire the epoch from the active epoch set and, when the retire cause is SOFT_SPLIT,
+   * judge whether the partition is hot: fillTime = now - allocTime(epoch). A location filled
+   * faster than the configured hot partition window boosts the desired location count by one
+   * (at most once per window per partition, capped at maxLocationsPerPartition). Only the
+   * first SOFT_SPLIT report of an epoch is judged; other causes (HARD_SPLIT, push failures)
+   * only retire and never boost. Epochs with unknown allocTime (e.g. legacy data)
+   * conservatively never boost.
+   */
+  private[client] def onEpochRetired(
+      shuffleId: Int,
+      partitionId: Int,
+      epoch: Int,
+      cause: Option[StatusCode],
+      nowMs: Long): Unit = {
+    val hotState = removeActiveEpoch(shuffleId, partitionId, epoch)
+    if (!cause.contains(StatusCode.SOFT_SPLIT)) {
+      return
+    }
+    if (hotState != null && hotState.splitReported.contains(Integer.valueOf(epoch))) {
+      return
+    }
+    val allocTime = {
+      val recorded = if (hotState == null) null else hotState.allocTimeMs.get(epoch)
+      if (recorded != null) {
+        recorded
+      } else if (epoch == 0) {
+        shuffleInitialAllocTimeMs.get(shuffleId)
+      } else {
+        null
+      }
+    }
+    if (allocTime == null || nowMs - allocTime >= parallelWriteHotPartitionWindowMs) {
+      markSplitReported(hotState, epoch)
+      return
+    }
+    val state = getOrCreateHotState(shuffleId, partitionId)
+    state.synchronized {
+      if (state.splitReported.add(Integer.valueOf(epoch))) {
+        val debouncePassed = state.lastBoostTimeMs < 0 ||
+          nowMs - state.lastBoostTimeMs >= parallelWriteHotPartitionWindowMs
+        if (debouncePassed && state.desired < parallelWriteMaxLocations) {
+          state.desired += 1
+          state.lastBoostTimeMs = nowMs
+          logInfo(s"Partition $shuffleId-$partitionId filled a location in " +
+            s"${nowMs - allocTime}ms (< ${parallelWriteHotPartitionWindowMs}ms), " +
+            s"boost desired location count to ${state.desired}.")
         }
       }
     }
   }
 
-  private def getOrCreateActiveEpochs(
+  private def markSplitReported(hotState: HotState, epoch: Int): Unit = {
+    if (hotState != null) {
+      hotState.synchronized {
+        hotState.splitReported.add(Integer.valueOf(epoch))
+      }
+    }
+  }
+
+  /**
+   * Record when the initial (epoch 0) locations of a shuffle were allocated at
+   * registerShuffle, so that fill times of epoch 0 can be measured for hot partition
+   * detection. putIfAbsent semantics: a repeated registration does not overwrite.
+   */
+  private[client] def recordInitialAllocTime(
       shuffleId: Int,
-      partitionId: Int): util.LinkedHashSet[Integer] = {
-    val map = partitionActiveEpochs.computeIfAbsent(
+      partitionLocations: Array[PartitionLocation],
+      nowMs: Long): Unit = {
+    if (partitionLocations != null && partitionLocations.nonEmpty) {
+      shuffleInitialAllocTimeMs.putIfAbsent(shuffleId, nowMs)
+    }
+  }
+
+  /** Record when the location of a newly allocated epoch was reserved. */
+  private[client] def recordAllocTime(
+      shuffleId: Int,
+      partitionId: Int,
+      epoch: Int,
+      nowMs: Long): Unit = {
+    getOrCreateHotState(shuffleId, partitionId).allocTimeMs.putIfAbsent(epoch, nowMs)
+  }
+
+  /** The desired total location count of a partition: the registered value, 1 if none. */
+  private[client] def desiredLocationCount(shuffleId: Int, partitionId: Int): Int = {
+    val map = partitionHotStates.get(shuffleId)
+    val entry = if (map == null) null else map.get(partitionId)
+    if (entry == null) 1 else entry.desired
+  }
+
+  private def getOrCreateHotState(shuffleId: Int, partitionId: Int): HotState = {
+    val map = partitionHotStates.computeIfAbsent(
       shuffleId,
-      new util.function.Function[Int, ConcurrentHashMap[Integer, util.LinkedHashSet[Integer]]]() {
-        override def apply(s: Int): ConcurrentHashMap[Integer, util.LinkedHashSet[Integer]] =
+      new util.function.Function[Int, ConcurrentHashMap[Integer, HotState]]() {
+        override def apply(s: Int): ConcurrentHashMap[Integer, HotState] =
           JavaUtils.newConcurrentHashMap()
       })
     map.computeIfAbsent(
       partitionId,
-      new util.function.Function[Integer, util.LinkedHashSet[Integer]]() {
-        override def apply(p: Integer): util.LinkedHashSet[Integer] =
-          new util.LinkedHashSet[Integer]()
+      new util.function.Function[Integer, HotState]() {
+        override def apply(p: Integer): HotState = new HotState()
       })
   }
 
   /**
-   * The active epochs of a partition: the registered entry if the partition was ever boosted,
-   * otherwise derived as { latestPartitionLocation.epoch }.
+   * The active epochs of a partition: the registered entry if the partition was ever
+   * revived in parallel-write mode, otherwise derived as { latestPartitionLocation.epoch }.
    */
   private def currentActiveEpochs(shuffleId: Int, partitionId: Int): Set[Int] = {
-    val map = partitionActiveEpochs.get(shuffleId)
+    val map = partitionHotStates.get(shuffleId)
     val entry = if (map == null) null else map.get(partitionId)
     if (entry != null) {
       entry.synchronized {
-        entry.asScala.map(_.intValue()).toSet
+        entry.activeEpochs.asScala.map(_.intValue()).toSet
       }
     } else {
       latestEpoch(shuffleId, partitionId).toSet
@@ -599,19 +716,22 @@ class ChangePartitionManager(
         s"$changes.")
     }
 
-    // Register the active epoch set for boosted partitions (sparse): only partitions that
-    // were ever allocated multiple active locations get an entry.
+    // Register the hot state of revived partitions (sparse): record the allocation time of
+    // every newly reserved epoch and the surviving active epoch set.
     if (parallelWriteEnabled) {
+      val allocTimeMs = nowMs()
       parallelAllocations.foreach { case (partitionId, allocation) =>
-        if (allocation.newEpochs.nonEmpty
-          && (allocation.desired > 1 || hasActiveEpochsEntry(shuffleId, partitionId))) {
-          val entry = getOrCreateActiveEpochs(shuffleId, partitionId)
+        if (allocation.newEpochs.nonEmpty) {
+          val entry = getOrCreateHotState(shuffleId, partitionId)
           entry.synchronized {
             (allocation.survivingEpochs ++ allocation.newEpochs).foreach { epoch =>
               val boxed = Integer.valueOf(epoch)
-              if (!entry.contains(boxed)) {
-                entry.add(boxed)
+              if (!entry.activeEpochs.contains(boxed)) {
+                entry.activeEpochs.add(boxed)
               }
+            }
+            allocation.newEpochs.foreach { epoch =>
+              entry.allocTimeMs.putIfAbsent(epoch, allocTimeMs)
             }
           }
         }
@@ -626,36 +746,26 @@ class ChangePartitionManager(
   }
 
   private case class ParallelAllocation(
-      desired: Int,
       survivingEpochs: Set[Int],
       newEpochs: Set[Int])
 
-  private def hasActiveEpochsEntry(shuffleId: Int, partitionId: Int): Boolean = {
-    val map = partitionActiveEpochs.get(shuffleId)
-    map != null && map.containsKey(partitionId)
-  }
-
   /**
-   * Allocate new locations for each requested partition by the gap between the max desired
-   * location count (over all queued requests of the partition, truncated to the configured
-   * upper bound) and the current active location count. The gap can be 0 when another
-   * executor has already triggered the allocation. Newly allocated locations of one
-   * partition are placed on mutually different workers (best effort) with increasing epochs.
+   * Allocate new locations for each requested partition by the gap between the desired
+   * location count (judged locally from SOFT_SPLIT reports, capped at the configured upper
+   * bound) and the current active location count. The gap can be 0 when another executor
+   * has already triggered the allocation. Newly allocated locations of one partition are
+   * placed on mutually different workers (best effort) with increasing epochs.
    */
   private def allocateParallelLocations(
       shuffleId: Int,
       changePartitions: List[ChangePartitionRequest],
       candidates: List[WorkerInfo]): (WorkerResource, Map[Int, ParallelAllocation]) = {
     val slots = new WorkerResource()
-    val requestsMap = changePartitionRequests.get(shuffleId)
     val allocations = scala.collection.mutable.Map[Int, ParallelAllocation]()
     changePartitions.foreach { change =>
       val partitionId = change.partitionId
-      val queued = if (requestsMap == null) null else requestsMap.get(partitionId)
-      val desiredFromQueue =
-        if (queued == null) 1 else queued.asScala.map(_.desiredLocationCount).max
       val desired = math.min(
-        math.max(desiredFromQueue, change.desiredLocationCount),
+        desiredLocationCount(shuffleId, partitionId),
         parallelWriteMaxLocations)
       // The requested epoch was already removed from the registered active entry when the
       // request arrived; for the derived case (no entry) remove it here.
@@ -666,9 +776,9 @@ class ChangePartitionManager(
           latestEpoch(shuffleId, partitionId).getOrElse(change.epoch),
           (surviving + change.epoch).max)
         val newEpochs = allocateGapLocations(partitionId, baseEpoch, gap, candidates, slots)
-        allocations.put(partitionId, ParallelAllocation(desired, surviving, newEpochs))
+        allocations.put(partitionId, ParallelAllocation(surviving, newEpochs))
       } else {
-        allocations.put(partitionId, ParallelAllocation(desired, surviving, Set.empty))
+        allocations.put(partitionId, ParallelAllocation(surviving, Set.empty))
       }
     }
     (slots, allocations.toMap)
@@ -747,6 +857,7 @@ class ChangePartitionManager(
     locks.remove(shuffleId)
     partitionReviveCounts.remove(shuffleId)
     reviveCauseCounts.remove(shuffleId)
-    partitionActiveEpochs.remove(shuffleId)
+    partitionHotStates.remove(shuffleId)
+    shuffleInitialAllocTimeMs.remove(shuffleId)
   }
 }

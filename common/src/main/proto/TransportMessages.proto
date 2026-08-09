@@ -342,8 +342,6 @@ message PbRevivePartitionInfo {
   int32 epoch = 2;
   PbPartitionLocation partition = 3;
   int32 status = 4;
-  // Desired total number of active locations for the partition, 0/absent means 1.
-  int32 desiredLocationCount = 5;
 }
 
 message PbRevive {

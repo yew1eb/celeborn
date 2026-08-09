@@ -34,9 +34,6 @@ import org.apache.celeborn.common.protocol.message.StatusCode;
 
 public class LocationGroupSuiteJ {
 
-  private static final long WINDOW_MS = 60000;
-  private static final int MAX_LOCATIONS = 4;
-
   private PartitionLocation loc(int epoch, String host) {
     return new PartitionLocation(
         0, epoch, host, 1234, 1235, 1236, 1237, PartitionLocation.Mode.PRIMARY);
@@ -45,14 +42,13 @@ public class LocationGroupSuiteJ {
   @Test
   public void testFastPathSingleLocation() {
     PartitionLocation loc = loc(0, "w1");
-    LocationGroup group = new LocationGroup(loc, WINDOW_MS, MAX_LOCATIONS);
+    LocationGroup group = new LocationGroup(loc);
     assertFalse(group.isInflated());
     assertSame(loc, group.currentFor(0));
     assertSame(loc, group.currentFor(7));
     assertSame(loc, group.latest());
     assertEquals(0, group.maxEpoch());
     assertTrue(group.hasUsable());
-    assertEquals(1, group.desiredLocationCount());
     assertSame(loc, group.anotherActiveFor(0, 3));
     assertNull(group.anotherActiveFor(0, 0));
 
@@ -66,7 +62,7 @@ public class LocationGroupSuiteJ {
 
   @Test
   public void testRetireSwitchesCurrent() {
-    LocationGroup group = new LocationGroup(loc(0, "w1"), WINDOW_MS, MAX_LOCATIONS);
+    LocationGroup group = new LocationGroup(loc(0, "w1"));
     assertTrue(group.retire(0, StatusCode.SOFT_SPLIT));
     assertFalse(group.retire(0, StatusCode.SOFT_SPLIT));
     assertTrue(group.isInflated());
@@ -93,7 +89,7 @@ public class LocationGroupSuiteJ {
 
   @Test
   public void testMergeAllConvergesOutOfOrderEpochs() {
-    LocationGroup group = new LocationGroup(loc(5, "w1"), WINDOW_MS, MAX_LOCATIONS);
+    LocationGroup group = new LocationGroup(loc(5, "w1"));
     // Full active set delivered out of order, including epochs not known locally.
     group.mergeAll(Arrays.asList(loc(3, "w3"), loc(7, "w7"), loc(1, "w1")));
     assertEquals(4, group.activeCount());
@@ -115,7 +111,7 @@ public class LocationGroupSuiteJ {
 
   @Test
   public void testAllUnusable() {
-    LocationGroup group = new LocationGroup(loc(0, "w1"), WINDOW_MS, MAX_LOCATIONS);
+    LocationGroup group = new LocationGroup(loc(0, "w1"));
     group.mergeAll(Arrays.asList(loc(0, "w1"), loc(1, "w2")));
     group.retire(0, StatusCode.HARD_SPLIT);
     assertTrue(group.hasUsable());
@@ -127,7 +123,7 @@ public class LocationGroupSuiteJ {
 
   @Test
   public void testAnotherActiveFor() {
-    LocationGroup group = new LocationGroup(loc(0, "w1"), WINDOW_MS, MAX_LOCATIONS);
+    LocationGroup group = new LocationGroup(loc(0, "w1"));
     group.mergeAll(Arrays.asList(loc(0, "w1"), loc(1, "w2")));
     assertEquals(1, group.anotherActiveFor(0, 0).getEpoch());
     assertEquals(0, group.anotherActiveFor(0, 1).getEpoch());
@@ -135,7 +131,7 @@ public class LocationGroupSuiteJ {
     group.retire(1, StatusCode.HARD_SPLIT);
     assertNull(group.anotherActiveFor(0, 0));
     // Soft-retired other location is still usable for re-push.
-    LocationGroup group2 = new LocationGroup(loc(0, "w1"), WINDOW_MS, MAX_LOCATIONS);
+    LocationGroup group2 = new LocationGroup(loc(0, "w1"));
     group2.mergeAll(Arrays.asList(loc(0, "w1"), loc(1, "w2")));
     group2.retire(1, StatusCode.SOFT_SPLIT);
     assertEquals(1, group2.anotherActiveFor(0, 0).getEpoch());

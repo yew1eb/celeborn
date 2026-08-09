@@ -409,14 +409,12 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
       val epochs = new util.ArrayList[Integer]()
       val oldPartitions = new util.ArrayList[PartitionLocation]()
       val causes = new util.ArrayList[StatusCode]()
-      val desiredLocationCounts = new util.ArrayList[Integer]()
       (0 until reviveRequests.size()).foreach { idx =>
         val request = reviveRequests.get(idx)
         partitionIds.add(request.partitionId)
         epochs.add(request.epoch)
         oldPartitions.add(request.loc)
         causes.add(request.cause)
-        desiredLocationCounts.add(request.desiredLocationCount)
       }
       logDebug(s"Received Revive request, number of partitions ${partitionIds.size()}")
       handleRevive(
@@ -427,8 +425,7 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
         epochs,
         oldPartitions,
         causes,
-        serdeVersion,
-        desiredLocationCounts)
+        serdeVersion)
 
     case pb: PbPartitionSplit =>
       val shuffleId = pb.getShuffleId
@@ -903,6 +900,14 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
       // Fifth, reply the allocated partition location to ShuffleClient.
       logInfo(s"Handle RegisterShuffle Success for $shuffleId.")
       val allPrimaryPartitionLocations = slots.asScala.flatMap(_._2._1.asScala).toArray
+      // Record the allocation time of the initial (epoch 0) locations so that
+      // ChangePartitionManager can measure fill times for hot partition detection.
+      if (conf.clientShuffleParallelWriteEnabled) {
+        changePartitionManager.recordInitialAllocTime(
+          shuffleId,
+          allPrimaryPartitionLocations,
+          System.currentTimeMillis())
+      }
       replyRegisterShuffle(RegisterShuffleResponse(
         StatusCode.SUCCESS,
         allPrimaryPartitionLocations,
@@ -918,8 +923,7 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
       oldEpochs: util.List[Integer],
       oldPartitions: util.List[PartitionLocation],
       causes: util.List[StatusCode],
-      serdeVersion: SerdeVersion,
-      desiredLocationCounts: util.List[Integer] = util.Collections.emptyList()): Unit = {
+      serdeVersion: SerdeVersion): Unit = {
     val contextWrapper =
       ChangeLocationsCallContext(context, partitionIds.size(), serdeVersion)
     // If shuffle not registered, reply ShuffleNotRegistered and return
@@ -956,12 +960,6 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
     }
 
     (0 until partitionIds.size()).foreach { idx =>
-      val desiredLocationCount =
-        if (idx < desiredLocationCounts.size()) {
-          math.max(desiredLocationCounts.get(idx), 1)
-        } else {
-          1
-        }
       changePartitionManager.handleRequestPartitionLocation(
         contextWrapper,
         shuffleId,
@@ -969,8 +967,7 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
         oldEpochs.get(idx),
         oldPartitions.get(idx),
         Some(causes.get(idx)),
-        commitManager.isSegmentGranularityVisible(shuffleId),
-        desiredLocationCount)
+        commitManager.isSegmentGranularityVisible(shuffleId))
     }
   }
 

@@ -168,8 +168,6 @@ public class ShuffleClientImpl extends ShuffleClient {
   private final boolean dataPushFailureTrackingEnabled;
 
   private final boolean parallelWriteEnabled;
-  private final int parallelWriteMaxLocations;
-  private final long parallelWriteHotPartitionWindowMs;
 
   public static class ReduceFileGroups {
     public Map<Integer, Set<PartitionLocation>> partitionGroups;
@@ -234,8 +232,6 @@ public class ShuffleClientImpl extends ShuffleClient {
     authEnabled = conf.authEnabledOnClient();
     dataPushFailureTrackingEnabled = conf.clientAdaptiveOptimizeSkewedPartitionReadEnabled();
     parallelWriteEnabled = conf.clientShuffleParallelWriteEnabled();
-    parallelWriteMaxLocations = conf.clientShuffleParallelWriteMaxLocationsPerPartition();
-    parallelWriteHotPartitionWindowMs = conf.clientShuffleParallelWriteHotPartitionWindowMs();
     slowPushThresholdNanos = TimeUnit.MILLISECONDS.toNanos(conf.clientPushSlowPushThresholdMs());
 
     // init rpc env
@@ -716,11 +712,7 @@ public class ShuffleClientImpl extends ShuffleClient {
                   registerShuffle(shuffleId, numMappers, numPartitions);
               ConcurrentHashMap<Integer, LocationGroup> groups = JavaUtils.newConcurrentHashMap();
               locations.forEach(
-                  (partitionId, loc) ->
-                      groups.put(
-                          partitionId,
-                          new LocationGroup(
-                              loc, parallelWriteHotPartitionWindowMs, parallelWriteMaxLocations)));
+                  (partitionId, loc) -> groups.put(partitionId, new LocationGroup(loc)));
               return groups;
             } catch (CelebornIOException e) {
               throw new RuntimeException(e);
@@ -1037,11 +1029,7 @@ public class ShuffleClientImpl extends ShuffleClient {
         if (StatusCode.SUCCESS == statusCode) {
           PartitionLocation loc = entry.getValue()._3();
           LocationGroup group =
-              partitionLocationMap.computeIfAbsent(
-                  partitionId,
-                  id ->
-                      new LocationGroup(
-                          loc, parallelWriteHotPartitionWindowMs, parallelWriteMaxLocations));
+              partitionLocationMap.computeIfAbsent(partitionId, id -> new LocationGroup(loc));
           if (parallelWriteEnabled) {
             // Converge to the full active set delivered by the LifecycleManager.
             List<PartitionLocation> allActive = new ArrayList<>();
@@ -1166,7 +1154,7 @@ public class ShuffleClientImpl extends ShuffleClient {
     PartitionLocation currentLoc = group == null ? null : group.currentFor(mapId);
     if (currentLoc == null && group != null && parallelWriteEnabled) {
       // All known locations of this partition are unusable, synchronously revive for a
-      // fresh location (urgent path, same semantics as the legacy single-location revive).
+      // fresh location (same semantics as the legacy single-location revive).
       if (!revive(
           shuffleId,
           mapId,
@@ -1317,12 +1305,12 @@ public class ShuffleClientImpl extends ShuffleClient {
                   if (parallelWriteEnabled) {
                     LocationGroup latestGroup = locationGroup(shuffleId, partitionId);
                     if (latestGroup != null) {
-                      int desired = latestGroup.onSoftSplit(latest.getEpoch());
                       boolean newlyRetired =
                           latestGroup.retire(latest.getEpoch(), StatusCode.SOFT_SPLIT);
                       if (newlyRetired && !mapperEnded(shuffleId, mapId)) {
-                        // Data already landed on the worker, do not block writes: send a
-                        // non-urgent revive to ask for the desired location count.
+                        // Data already landed on the worker, do not block writes: report the
+                        // retired epoch so the LifecycleManager can allocate a replacement
+                        // (and boost the location count when the partition is hot).
                         ReviveRequest reviveRequest =
                             new ReviveRequest(
                                 shuffleId,
@@ -1332,8 +1320,6 @@ public class ShuffleClientImpl extends ShuffleClient {
                                 latest.getEpoch(),
                                 latest,
                                 StatusCode.SOFT_SPLIT);
-                        reviveRequest.desiredLocationCount = desired;
-                        reviveRequest.urgent = false;
                         reviveManager.addRequest(reviveRequest);
                       }
                     }
@@ -1830,7 +1816,6 @@ public class ShuffleClientImpl extends ShuffleClient {
                     if (parallelWriteEnabled) {
                       LocationGroup splitGroup = locationGroup(shuffleId, loc.getId());
                       if (splitGroup != null) {
-                        int desired = splitGroup.onSoftSplit(loc.getEpoch());
                         boolean newlyRetired =
                             splitGroup.retire(loc.getEpoch(), StatusCode.SOFT_SPLIT);
                         if (newlyRetired && !mapperEnded(shuffleId, mapId)) {
@@ -1843,8 +1828,6 @@ public class ShuffleClientImpl extends ShuffleClient {
                                   loc.getEpoch(),
                                   loc,
                                   StatusCode.SOFT_SPLIT);
-                          reviveRequest.desiredLocationCount = desired;
-                          reviveRequest.urgent = false;
                           reviveManager.addRequest(reviveRequest);
                         }
                       }

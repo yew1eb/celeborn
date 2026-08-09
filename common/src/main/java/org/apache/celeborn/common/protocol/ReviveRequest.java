@@ -28,10 +28,6 @@ public class ReviveRequest {
   public PartitionLocation loc;
   public StatusCode cause;
   public volatile int reviveStatus;
-  // Desired total number of active locations for the partition (parallel write). 1 = legacy.
-  public int desiredLocationCount = 1;
-  // Pure client-side semantics (not on wire): false means no retry task waits on this request.
-  public boolean urgent = true;
 
   public ReviveRequest(
       int shuffleId,
