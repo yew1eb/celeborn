@@ -18,7 +18,9 @@
 package org.apache.celeborn.client;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 
@@ -37,7 +39,7 @@ import org.apache.celeborn.common.protocol.message.StatusCode;
  * <p>Selection policy: {@code mapId % activeCount}, preferring non-retired locations; soft-retired
  * (draining) locations are used as fallback so in-flight writes are never dropped.
  */
-public class LocationGroup {
+public class PartitionLocationGroup {
 
   /**
    * The only location of this partition before inflation. Only read on the non-inflated fast path
@@ -50,7 +52,7 @@ public class LocationGroup {
   /** null until inflated; all mutating methods go through double-checked inflation. */
   private volatile ParallelState parallel;
 
-  public LocationGroup(PartitionLocation loc) {
+  public PartitionLocationGroup(PartitionLocation loc) {
     this.single = loc;
   }
 
@@ -130,38 +132,56 @@ public class LocationGroup {
   }
 
   /**
-   * Pick an active location other than {@code excludeEpoch} for {@code mapId}, used to re-push
-   * batches without waiting for revive when the partition has more than one active location.
+   * Pick a usable location other than {@code excludeEpoch} for {@code mapId}, used to re-push
+   * batches without waiting for revive when the partition has more than one usable location.
    * Returns null if there is no other usable location.
    */
-  public PartitionLocation anotherActiveFor(int mapId, int excludeEpoch) {
+  public PartitionLocation anotherUsableFor(int mapId, int excludeEpoch) {
     return pick(mapId, excludeEpoch);
   }
 
   /**
    * Mark {@code epoch} as retired with {@code cause}. Soft-retired locations keep draining;
-   * hard-retired ones are skipped by {@link #currentFor(int)}.
+   * hard-retired ones are skipped by {@link #currentFor(int)}. A later non-soft cause upgrades a
+   * previous SOFT_SPLIT retire (the draining location hard-split or failed afterwards), so it stops
+   * being a write fallback; a harder cause is never downgraded back to SOFT_SPLIT.
    *
    * @return true if this is the first time the epoch is retired (dedupe signal for the caller to
    *     send at most one revive per epoch).
    */
   public boolean retire(int epoch, StatusCode cause) {
     ParallelState p = inflateIfNeeded();
-    return p.retired.putIfAbsent(epoch, cause) == null;
+    boolean[] firstRetire = {false};
+    p.retired.compute(
+        epoch,
+        (k, existing) -> {
+          if (existing == null) {
+            firstRetire[0] = true;
+            return cause;
+          }
+          return existing == StatusCode.SOFT_SPLIT && cause != StatusCode.SOFT_SPLIT
+              ? cause
+              : existing;
+        });
+    return firstRetire[0];
   }
 
   /**
-   * Converge to the full active set delivered by the LifecycleManager: add locally missing epochs,
-   * never re-add locally retired ones. Synchronized because the check-then-add of {@link
-   * #insertActive} is not atomic across concurrent revive responses.
+   * Converge to the active set delivered by the LifecycleManager: add locally missing epochs, never
+   * re-add locally retired ones. When {@code fullSet} is true the list is the LM's full active set,
+   * so retired epochs that the LM no longer reports (it has processed the retirement and allocated
+   * replacements) are dropped from both the active list and the retired map — this bounds the list
+   * size and keeps {@code mapId}-based routing uniform among live locations. Synchronized because
+   * the check-then-add of {@link #insertActive} is not atomic across concurrent revive responses.
    */
-  public synchronized void mergeAll(List<PartitionLocation> locations) {
+  public synchronized void mergeActiveLocations(
+      List<PartitionLocation> locations, boolean fullSet) {
     if (locations == null || locations.isEmpty()) {
       return;
     }
     if (parallel == null && locations.size() == 1) {
       // Stay in thin-wrapper mode when the LM only knows one active location.
-      updateSingle(locations.get(0));
+      updateLatest(locations.get(0));
       return;
     }
     ParallelState p = inflateIfNeeded();
@@ -174,10 +194,21 @@ public class LocationGroup {
         p.maxEpoch = loc.getEpoch();
       }
     }
+    if (fullSet && !p.retired.isEmpty()) {
+      Set<Integer> reported = new HashSet<>();
+      for (PartitionLocation loc : locations) {
+        if (loc != null) {
+          reported.add(loc.getEpoch());
+        }
+      }
+      p.active.removeIf(
+          loc -> p.retired.containsKey(loc.getEpoch()) && !reported.contains(loc.getEpoch()));
+      p.retired.keySet().removeIf(epoch -> !reported.contains(epoch));
+    }
   }
 
   /** Legacy single-location update (adaptive parallelism disabled or single-location response). */
-  public void updateSingle(PartitionLocation loc) {
+  public void updateLatest(PartitionLocation loc) {
     ParallelState p = parallel;
     if (p == null) {
       PartitionLocation cur = single;
@@ -187,11 +218,11 @@ public class LocationGroup {
     } else {
       List<PartitionLocation> one = new ArrayList<>(1);
       one.add(loc);
-      mergeAll(one);
+      mergeActiveLocations(one, false);
     }
   }
 
-  public boolean isInflated() {
+  public boolean hasParallelState() {
     return parallel != null;
   }
 

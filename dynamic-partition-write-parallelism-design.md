@@ -65,8 +65,8 @@ PR #3260：作者 ErikFang，2025-05 创建（[WIP]），diff ~3800 行，2026-0
 | **执行通道** | 双通道：紧急只补 1、非紧急异步预分配（回复可空 + 50ms 轮询收敛） | 单通道原生 revive；**全集回复一次收敛**；HARD_SPLIT/失败预置 SUCCESS 立即换路 |
 | **epoch 语义** | 重用为并行度刻度（连锁改 ChangePartitionRequest / inBatch 去重 / proto） | 保持单值 max 语义；新 location epoch 递增分配 |
 | **协议兼容** | `partition` 单值→repeated（旧 client 多元素 merge 畸形风险）+ 新 MessageType/StatusCode | proto3 additive `additionalPartitions`（field 5），双向降级安全（§10） |
-| **executor 改动** | LocationManager 392 行 + 重试状态机重写（无单测） | LocationGroup 244 行薄包装 + 退休上报，重试路径复用 |
-| **测试** | Monitor 4 例 + 端到端时间断言 | 19 例（LocationGroup 5 + 判定/分配 10 + tracker 6） |
+| **executor 改动** | LocationManager 392 行 + 重试状态机重写（无单测） | PartitionLocationGroup 276 行薄包装 + 退休上报，重试路径复用 |
+| **测试** | Monitor 4 例 + 端到端时间断言 | 23 例（PartitionLocationGroup 7 + 判定/分配 10 + tracker 6） |
 | **实现规模** | ~3800 行（WIP） | **~1300 行含测试** |
 | **上限/回收** | maxActiveLocation 默认 numMappers；只升不降 | maxLocations 默认 4；只升不降（同） |
 
@@ -82,7 +82,7 @@ PR #3260：作者 ErikFang，2025-05 创建（[WIP]），diff ~3800 行，2026-0
 
 **协议与兼容**：CIP-20 把 `partition` 单值改 repeated，旧 client 收到多元素响应有 merge 畸形风险，且新增 MessageType 92 / StatusCode URGENT_REVIVE 对旧 LM 不可识别。本方案只新增 additive 字段 `additionalPartitions`：老 client 忽略、新 client 缺失时退化为单 location。
 
-**executor 侵入**：CIP-20 重写重试状态机（轮询替代 reviveStatus 等待）且核心类无单测；本方案 LocationGroup 244 行薄包装（快路径与现状零差异），重试路径复用现有 reviveStatus 机制（HARD_SPLIT/失败时预置 SUCCESS 实现立即换路）。
+**executor 侵入**：CIP-20 重写重试状态机（轮询替代 reviveStatus 等待）且核心类无单测；本方案 PartitionLocationGroup 276 行薄包装（快路径与现状零差异），重试路径复用现有 reviveStatus 机制（HARD_SPLIT/失败时预置 SUCCESS 实现立即换路）。
 
 **复杂度与规模**：CIP-20 ~3800 行 WIP；本方案 ~1300 行含测试。差异来源：不重写重试状态机、不动 epoch 语义、不引入滑窗/速率估算、不引入第二条消息通道。
 
@@ -112,7 +112,7 @@ PR #3260：作者 ErikFang，2025-05 创建（[WIP]），diff ~3800 行，2026-0
 ```
 mapper pushData(partitionId)
    └─ ShuffleClientImpl.pushOrMergeData
-        └─ LocationGroup.currentFor(mapId)          ← mapId % K 选活跃 location
+        └─ PartitionLocationGroup.currentFor(mapId) ← mapId % K 选活跃 location
              ├─ 正常 → 走现有 push/merge 路径（PushState 按 host 分桶，天然兼容）
              ├─ SOFT_SPLIT → group.retire(epoch, SOFT_SPLIT)（排水语义，写不阻塞）
              │     └─ 首次退休才发原生 ReviveRequest(epoch, SOFT_SPLIT) 上报 ← 唯一 executor 义务
@@ -158,28 +158,28 @@ message PbChangeLocationPartitionInfo {
 ## 7. Executor client 侧实现
 
 ### 7.0 内存开销：薄包装 + 懒加载
-- `reducePartitionMap` 值类型为 `LocationGroup`（244 行，其中核心逻辑 ~100 行），初始是**薄包装**：`volatile PartitionLocation single` + `volatile ParallelState parallel = null`（只比现状多一个对象头+一个字段）；
+- `reducePartitionMap` 值类型为 `PartitionLocationGroup`（276 行，其中核心逻辑 ~120 行），初始是**薄包装**：`volatile PartitionLocation single` + `volatile ParallelState parallel = null`（只比现状多一个对象头+一个字段）；
 - `ParallelState`（active 列表 / retired 表 / maxEpoch）**只在首次 SOFT_SPLIT/HARD_SPLIT/push 失败或 revive 响应携带多 location 时 inflate**（双重检查锁）；
 - `currentFor(mapId)` 快路径：`parallel == null` 直接返回 `single`，与现状开销相同；膨胀后 `single` 不再同步，`active` 列表是唯一事实源；
 - 内存账目（5 万 partition/executor）：薄包装增量 ≈ 1MB；ParallelState 仅热点 partition 存在（个位数~几十个）。
 
-### 7.1 LocationGroup 行为语义
-- **选择策略 `mapId % K`**（`Math.floorMod`）：`currentFor` 与 `anotherActiveFor` 统一委托私有方法 `pick(mapId, excludeEpoch)`——两遍扫描：先选非退休 location，**soft-retired location 兜底**（SOFT 语义允许排水续写）；全部不可用返回 null。同一 map task 稳定写同一 location（保住 PushState 按 host 聚合语义）；不同 map task 散到不同 worker；
-- **退休语义**：`retire(epoch, cause)` 返回是否首次退休（调用方据此保证每 (partition,epoch) 只上报一次 revive）；
-- **`anotherActiveFor(mapId, excludeEpoch)`**：HARD_SPLIT/push 失败时在其余活跃 location 中挑一个立即重推；
-- **全集收敛**：`mergeAll(locations)`（`synchronized`，消除并发 revive 响应下"检查重复→插入"的竞态）以 LM 下发的活跃全集为准，按 epoch 有序插入——不同 executor 收敛到**相同顺序**的 active 列表，`mapId % K` 分派一致；跳过本地已退休 epoch；单 location 响应走 `updateSingle` 保持薄包装不膨胀；
+### 7.1 PartitionLocationGroup 行为语义
+- **选择策略 `mapId % K`**（`Math.floorMod`）：`currentFor` 与 `anotherUsableFor` 统一委托私有方法 `pick(mapId, excludeEpoch)`——两遍扫描：先选非退休 location，**soft-retired location 兜底**（SOFT 语义允许排水续写）；全部不可用返回 null。同一 map task 稳定写同一 location（保住 PushState 按 host 聚合语义）；不同 map task 散到不同 worker；
+- **退休语义**：`retire(epoch, cause)` 返回是否首次退休（调用方据此保证每 (partition,epoch) 只上报一次 revive）；**cause 可升级不可降级**——已 SOFT_SPLIT 退休的 epoch 之后又 HARD_SPLIT/失败时升级为硬性 cause（不再充当兜底写目标，与 CIP-20 的 SOFT→HARD 升级对齐），反向不降级；
+- **`anotherUsableFor(mapId, excludeEpoch)`**：HARD_SPLIT/push 失败时在其余可用 location 中挑一个立即重推；
+- **全集收敛**：`mergeActiveLocations(locations, fullSet)`（`synchronized`，消除并发 revive 响应下"检查重复→插入"的竞态）以 LM 下发的活跃全集为准，按 epoch 有序插入——不同 executor 收敛到**相同顺序**的 active 列表，`mapId % K` 分派一致；跳过本地已退休 epoch；单 location 响应走 `updateLatest` 保持薄包装不膨胀；`fullSet=true` 时**清理已被 LM 消化（全集中不再出现）的退休 epoch**——退休条目规模收敛到"在途退休"量级，`mapId % K` 路由不会被死条目稀释（非全集的 `updateLatest` 单条更新不触发清理）；
 - K 变化时 mapId 映射偏移——不影响正确性（读侧按 (mapId,attemptId,batchId) 去重）。
 
 ### 7.2 ShuffleClientImpl 接入（实现版）
 | 位置 | 实现 |
 |---|---|
-| `reducePartitionMap` | 值类型 `LocationGroup`；私有 `getPartitionLocationMap()`；**公开 `getPartitionLocation()` 签名不变**，内部投影 `group.latest()` |
+| `reducePartitionMap` | 值类型 `PartitionLocationGroup`；私有 `getPartitionLocationMap()`；**公开 `getPartitionLocation()` 签名不变**，内部投影 `group.latest()` |
 | `pushOrMergeData` | 选 location 改为 `group.currentFor(mapId)`；全不可用且开关开启时走同步 revive 后重取 |
 | SOFT_SPLIT 回调（pushData 与 mergeData 两处） | 收敛于 `handleSoftSplitRetire`：`newlyRetired = group.retire(epoch, SOFT_SPLIT)`；仅首次退休且 `!mapperEnded` 发原生 ReviveRequest（无任何附加字段）。数据已落 worker，写不阻塞，继续写排水 location。**判定逻辑零残留** |
-| HARD_SPLIT / push 失败 / mergeData 重提交 | 收敛于 `retireAndPresetIfAnotherActive`：发 ReviveRequest + `group.retire(epoch, cause)`；若 `anotherActiveFor(mapId, epoch) != null`，**预置 `reviveStatus=SUCCESS`**，重推线程立即从 `currentFor(mapId)` 取另一活跃 location 重推，不等 LM 响应；否则走现有 urgent revive+重推 |
+| HARD_SPLIT / push 失败 / mergeData 重提交 | 收敛于 `retireAndPresetIfAnotherUsable`：发 ReviveRequest + `group.retire(epoch, cause)`；若 `anotherUsableFor(mapId, epoch) != null`，**预置 `reviveStatus=SUCCESS`**，重推线程立即从 `currentFor(mapId)` 取另一可用 location 重推，不等 LM 响应；否则走现有 urgent revive+重推 |
 | 重推 SUCCESS 分支 | 取 `group.currentFor(mapId)`（已退休 epoch 被排除） |
 | `newerPartitionLocationExists` | `group.maxEpoch() > epoch` |
-| `reviveBatch` 响应处理 | 开关开启：`group.mergeAll(partition + additionalLocs)` 全集收敛；关闭：`group.updateSingle(loc)`。含 `loc == null` NPE 保护 |
+| `reviveBatch` 响应处理 | 开关开启：`group.mergeActiveLocations(partition + additionalLocs, true)` 全集收敛（含退休条目清理）；关闭：`group.updateLatest(loc)`。含 `loc == null` NPE 保护 |
 | mergeData 路径、`PushState` | 零改动 |
 
 ### 7.3 executor 的唯一义务：退休上报
@@ -258,14 +258,14 @@ SOFT_SPLIT 语义允许排水续写，提前增量 commit 会使排水 push 命�
 | `celeborn.client.shuffle.adaptivePartitionWriteParallelism.maxLocations` | 4 | **LM** | 单 partition 活跃 location 上限 |
 | `celeborn.client.shuffle.adaptivePartitionWriteParallelism.hotWindow` | 60s | **LM** | 单 location 写满耗时的热点判定窗口；升档目标 = ceil(窗口 / 写满耗时) |
 
-开关关闭时所有代码路径与现状等价（LocationGroup 薄包装快路径、LM 走原有 `replySuccess`、不建 HotState）。
+开关关闭时所有代码路径与现状等价（PartitionLocationGroup 薄包装快路径、LM 走原有 `replySuccess`、不建 HotState）。仅有的 3 处微观差异（均有意识保留、方向更安全）：`updateLatest` 丢弃低 epoch 的迟到响应（现状是无条件覆盖）；SOFT_SPLIT 上报前增加 `!mapperEnded` 前置过滤（现状靠 ReviveManager 后置过滤，效果等价）；DataPushQueue 拥塞门控取 `group.latest()` 作为 partition 的代表 location（并行写下门控粒度略粗，不影响正确性）。
 
 ## 10. 兼容性矩阵
 
 | 组合 | 行为 |
 |---|---|
 | 新 client + 新 LM | 全功能 |
-| 新 client + 老 LM | 响应无 additionalPartitions → executor 的 mergeAll 只收单 location，退化为现状，无异常 |
+| 新 client + 老 LM | 响应无 additionalPartitions → executor 的 mergeActiveLocations 只收单 location，退化为现状，无异常 |
 | 老 client + 新 LM | 响应新字段被老 client 忽略；LM 的 HotState 判定照常（老 client 的原生 revive 就是判定输入），只是老 client 不会使用多 location |
 | worker 任意版本 | 无感（协议未动 worker 面） |
 | Flink client | 直接消费 `PbChangeLocationResponse` proto，新增字段无感；不启用并行写 |
@@ -273,19 +273,19 @@ SOFT_SPLIT 语义允许排水续写，提前增量 commit 会使排水 push 命�
 
 ## 11. 实际改动清单
 
-Phase 1（commit `f398d73dc`）→ Phase 1.1（commit `5342d934c`，判定迁移 LM + LocationGroup 简化）→ Phase 1.2（commit `6edd5b06e`，统一计量 + tracker 提取）→ Phase 1.3（比例步进 + 定名 adaptivePartitionWriteParallelism）合计：
+Phase 1（commit `f398d73dc`）→ Phase 1.1（commit `5342d934c`，判定迁移 LM + 组类简化）→ Phase 1.2（commit `6edd5b06e`，统一计量 + tracker 提取）→ Phase 1.3（比例步进 + 定名 adaptivePartitionWriteParallelism）→ Phase 1.4（retire cause 升级 + 全集收敛清理 + 命名定版）合计：
 
 | 文件 | 内容 | 规模 |
 |---|---|---|
 | `common/src/main/proto/TransportMessages.proto` | `additionalPartitions` 一个字段 | +2 |
 | `common/.../message/ControlMessages.scala` | additionalLocs 字段 + 双向 serde | +25 |
 | `common/.../CelebornConf.scala` + `docs/configuration/client.md` | 3 个配置 + 文档再生成 | +43 |
-| `client/.../LocationGroup.java` | 薄包装 + ParallelState + 统一 pick 选择（无判定逻辑） | 244 |
-| `client/.../ShuffleClientImpl.java`、`ReviveManager.java` | §7.2 接入；`handleSoftSplitRetire` / `retireAndPresetIfAnotherActive` 收敛三处重复 | ~+200 |
+| `client/.../PartitionLocationGroup.java` | 薄包装 + ParallelState + 统一 pick 选择（无判定逻辑）；retire cause 升级 + 全集收敛清理 | 276 |
+| `client/.../ShuffleClientImpl.java`、`ReviveManager.java` | §7.2 接入；`handleSoftSplitRetire` / `retireAndPresetIfAnotherUsable` 收敛三处重复 | ~+200 |
 | `client/.../ChangePartitionManager.scala` | 补差分配 + 全集回复；热点状态全部委托给 tracker（自身 734 行） | ~+250 |
 | `client/.../PartitionHotnessTracker.scala` | HotState + 统一计量判定 + 比例步进 + 依赖注入（latestEpoch / workerAvailable / 时钟） | 233 |
 | `client/.../LifecycleManager.scala`、`RequestLocationCallContext.scala` | registerShuffle 记录 allocTime、additionalLocs 透传 | ~+60 |
-| `client/src/test/.../LocationGroupSuiteJ.java` | 5 例 | 139 |
+| `client/src/test/.../PartitionLocationGroupSuiteJ.java` | 7 例 | 190 |
 | `client/src/test/.../ChangePartitionManagerAdaptiveParallelismSuite.scala` | 10 例（判定逻辑 + 分配回复） | 511 |
 | `client/src/test/.../PartitionHotnessTrackerSuite.scala` | 6 例：HARD+健康升档 / HARD+不可用不升档 / push 失败不升档 / HARD 与 SOFT 等价 / 比例步进直达上限 / 慢速后续不降级 | 145 |
 
@@ -315,6 +315,12 @@ Phase 1（commit `f398d73dc`）→ Phase 1.1（commit `5342d934c`，判定迁移
 - `ChangePartitionManagerAdaptiveParallelismSuite` 适配比例步进语义（"debounce"例重写为"比例步进无去抖直达上限"，"上限截断"例改为 40s→2 / 25s→3 / 15s→4 / 10s→封顶）；
 - 功能定名 `adaptivePartitionWriteParallelism`，配置 key 全量替换，编译 + spotless + 配置文档 golden 检查通过；
 - **定向回归全绿**（rename + R4 后）：LocationGroupSuiteJ 5/5（JUnit）+ ScalaTest 49/49（含 tracker 新增 2 例）。
+
+**Phase 1.4（retire 语义修正 + 收敛清理 + 命名定版）验证**：
+- 实证复审发现两个 executor 侧缺陷并修复：(a) `retire()` 原用 `putIfAbsent`，SOFT_SPLIT 退休的 epoch 之后再 hard-fail 时 cause 不升级、永远充当兜底写目标——改为 `compute` 实现"可升级（SOFT→硬性）不降级"，与 CIP-20 的 SOFT→HARD 升级语义对齐；(b) 退休条目原只增不删，`mapId % size` 哈希槽被死条目稀释导致路由不均——`mergeActiveLocations(locations, fullSet)` 在全集回复时清理"已退休且 LM 不再报告"的 epoch（LM 已消化该退休），非全集的 `updateLatest` 不触发清理；
+- 命名定版：`LocationGroup` → `PartitionLocationGroup`（补 partition 锚点）、`anotherActiveFor` → `anotherUsableFor`（pass-1 会返回 soft-retired，"Active" 名不副实）、`updateSingle` → `updateLatest`、`isInflated` → `hasParallelState`、`mergeAll` → `mergeActiveLocations`；LM 侧命名不动；
+- `PartitionLocationGroupSuiteJ` 5→7 例：新增 `testRetireCauseUpgrade`（SOFT→HARD 升级后不再兜底、硬性 cause 不降级）与 `testFullSetMergeEvictsProcessedRetiredEpochs`（LM 未消化时保留、消化后清理、非全集更新不清理）；
+- **定向回归全绿**：PartitionLocationGroupSuiteJ 7/7（JUnit）+ ScalaTest 49/49；`spotless:check` 通过。
 
 **待办（上生产前必须做）**：
 - 集成测试（`tests/spark-it`）：`partitionSplit.threshold=10m`、重倾斜 Spark 作业——(a) reducer 数据与原生 shuffle 对拍一致；(b) 该 partition 最终有 >1 个 committed location 且数据无重复无丢失；(c) 写阶段无 revive 长尾（对比开关前后耗时）；
