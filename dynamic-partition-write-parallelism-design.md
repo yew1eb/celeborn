@@ -314,7 +314,7 @@ Phase 1（commit `f398d73dc`）→ Phase 1.1（commit `5342d934c`，判定迁移
 - `PartitionHotnessTrackerSuite` 4→6 例：新增"比例步进直达上限"（30s→2、25s→3、10s→封顶 4）与"慢速后续不降级"两例；
 - `ChangePartitionManagerAdaptiveParallelismSuite` 适配比例步进语义（"debounce"例重写为"比例步进无去抖直达上限"，"上限截断"例改为 40s→2 / 25s→3 / 15s→4 / 10s→封顶）；
 - 功能定名 `adaptivePartitionWriteParallelism`，配置 key 全量替换，编译 + spotless + 配置文档 golden 检查通过；
-- 定向套件与全量回归：结果回填于此。
+- **定向回归全绿**（rename + R4 后）：LocationGroupSuiteJ 5/5（JUnit）+ ScalaTest 49/49（含 tracker 新增 2 例）。
 
 **待办（上生产前必须做）**：
 - 集成测试（`tests/spark-it`）：`partitionSplit.threshold=10m`、重倾斜 Spark 作业——(a) reducer 数据与原生 shuffle 对拍一致；(b) 该 partition 最终有 >1 个 committed location 且数据无重复无丢失；(c) 写阶段无 revive 长尾（对比开关前后耗时）；
