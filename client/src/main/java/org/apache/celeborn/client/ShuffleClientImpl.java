@@ -114,8 +114,8 @@ public class ShuffleClientImpl extends ShuffleClient {
   // key: appShuffleIdentifier, value: shuffleId
   protected Map<String, Tuple2<Integer, Boolean>> shuffleIdCache = JavaUtils.newConcurrentHashMap();
 
-  // key: shuffleId, value: (partitionId, PartitionLocation)
-  final Map<Integer, ConcurrentHashMap<Integer, PartitionLocation>> reducePartitionMap =
+  // key: shuffleId, value: (partitionId, LocationGroup)
+  final Map<Integer, ConcurrentHashMap<Integer, LocationGroup>> reducePartitionMap =
       JavaUtils.newConcurrentHashMap();
 
   // key: shuffleId, value: Set(mapId)
@@ -166,6 +166,10 @@ public class ShuffleClientImpl extends ShuffleClient {
   private final ReviveManager reviveManager;
 
   private final boolean dataPushFailureTrackingEnabled;
+
+  private final boolean parallelWriteEnabled;
+  private final int parallelWriteMaxLocations;
+  private final long parallelWriteHotPartitionWindowMs;
 
   public static class ReduceFileGroups {
     public Map<Integer, Set<PartitionLocation>> partitionGroups;
@@ -229,6 +233,9 @@ public class ShuffleClientImpl extends ShuffleClient {
     }
     authEnabled = conf.authEnabledOnClient();
     dataPushFailureTrackingEnabled = conf.clientAdaptiveOptimizeSkewedPartitionReadEnabled();
+    parallelWriteEnabled = conf.clientShuffleParallelWriteEnabled();
+    parallelWriteMaxLocations = conf.clientShuffleParallelWriteMaxLocationsPerPartition();
+    parallelWriteHotPartitionWindowMs = conf.clientShuffleParallelWriteHotPartitionWindowMs();
     slowPushThresholdNanos = TimeUnit.MILLISECONDS.toNanos(conf.clientPushSlowPushThresholdMs());
 
     // init rpc env
@@ -367,7 +374,14 @@ public class ShuffleClientImpl extends ShuffleClient {
                   + ", old location: "
                   + request.loc));
     } else {
-      PartitionLocation newLoc = reducePartitionMap.get(shuffleId).get(partitionId);
+      LocationGroup newLocGroup = locationGroup(shuffleId, partitionId);
+      PartitionLocation newLoc = newLocGroup == null ? null : newLocGroup.currentFor(mapId);
+      if (newLoc == null) {
+        pushDataRpcResponseCallback.onFailure(
+            new CelebornIOException(
+                cause + " then revive but no usable location for partition " + partitionId));
+        return;
+      }
       logger.info(
           "Revive for push data success after waiting {} ms, new location for shuffle {} map {} attempt {} partition {} batch {} is location {}.",
           accumulatedTime,
@@ -434,6 +448,32 @@ public class ShuffleClientImpl extends ShuffleClient {
     return reviveRequests;
   }
 
+  private LocationGroup locationGroup(int shuffleId, int partitionId) {
+    ConcurrentHashMap<Integer, LocationGroup> partitionMap = reducePartitionMap.get(shuffleId);
+    return partitionMap == null ? null : partitionMap.get(partitionId);
+  }
+
+  /**
+   * For parallel write: retire the failed epochs locally, and for partitions that still have
+   * another active location, preset the revive request status to SUCCESS so that the retry thread
+   * re-pushes to the other active location immediately instead of waiting for revive.
+   */
+  private void presetSuccessIfAnotherActive(
+      int shuffleId, int mapId, ReviveRequest[] requests, StatusCode cause) {
+    if (!parallelWriteEnabled) {
+      return;
+    }
+    for (ReviveRequest request : requests) {
+      LocationGroup group = locationGroup(shuffleId, request.partitionId);
+      if (group != null) {
+        group.retire(request.epoch, cause);
+        if (group.anotherActiveFor(mapId, request.epoch) != null) {
+          request.reviveStatus = StatusCode.SUCCESS.getValue();
+        }
+      }
+    }
+  }
+
   private void submitRetryPushMergedData(
       PushState pushState,
       int shuffleId,
@@ -465,10 +505,22 @@ public class ShuffleClientImpl extends ShuffleClient {
               request.partitionId,
               oldGroupedBatchId);
         } else if (request.reviveStatus == StatusCode.SUCCESS.getValue()) {
-          PartitionLocation newLoc = reducePartitionMap.get(shuffleId).get(request.partitionId);
-          DataBatches newDataBatches =
-              newDataBatchesMap.computeIfAbsent(genAddressPair(newLoc), (s) -> new DataBatches());
-          newDataBatches.addDataBatch(newLoc, batch.batchId, batch.body);
+          LocationGroup newLocGroup = locationGroup(shuffleId, request.partitionId);
+          PartitionLocation newLoc = newLocGroup == null ? null : newLocGroup.currentFor(mapId);
+          if (newLoc != null) {
+            DataBatches newDataBatches =
+                newDataBatchesMap.computeIfAbsent(genAddressPair(newLoc), (s) -> new DataBatches());
+            newDataBatches.addDataBatch(newLoc, batch.batchId, batch.body);
+          } else if (remainReviveTimes > 0) {
+            reviveFailedBatchesMap.add(batch);
+          } else {
+            String errorMsg =
+                String.format(
+                    "Revive succeeded but no usable location while pushing merged for shuffle %d map %d attempt %d partition %d batch %d location %s.",
+                    shuffleId, mapId, attemptId, request.partitionId, oldGroupedBatchId, batch.loc);
+            pushState.exception.compareAndSet(null, new CelebornIOException(errorMsg));
+            return;
+          }
         } else {
           if (remainReviveTimes > 0) {
             reviveFailedBatchesMap.add(batch);
@@ -640,12 +692,36 @@ public class ShuffleClientImpl extends ShuffleClient {
   @Override
   public ConcurrentHashMap<Integer, PartitionLocation> getPartitionLocation(
       int shuffleId, int numMappers, int numPartitions) throws CelebornIOException {
+    ConcurrentHashMap<Integer, LocationGroup> groupMap =
+        getPartitionLocationMap(shuffleId, numMappers, numPartitions);
+    ConcurrentHashMap<Integer, PartitionLocation> result = JavaUtils.newConcurrentHashMap();
+    groupMap.forEach(
+        (partitionId, group) -> {
+          PartitionLocation loc = group.latest();
+          if (loc != null) {
+            result.put(partitionId, loc);
+          }
+        });
+    return result;
+  }
+
+  private ConcurrentHashMap<Integer, LocationGroup> getPartitionLocationMap(
+      int shuffleId, int numMappers, int numPartitions) throws CelebornIOException {
     try {
       return reducePartitionMap.computeIfAbsent(
           shuffleId,
           (id) -> {
             try {
-              return registerShuffle(shuffleId, numMappers, numPartitions);
+              ConcurrentHashMap<Integer, PartitionLocation> locations =
+                  registerShuffle(shuffleId, numMappers, numPartitions);
+              ConcurrentHashMap<Integer, LocationGroup> groups = JavaUtils.newConcurrentHashMap();
+              locations.forEach(
+                  (partitionId, loc) ->
+                      groups.put(
+                          partitionId,
+                          new LocationGroup(
+                              loc, parallelWriteHotPartitionWindowMs, parallelWriteMaxLocations)));
+              return groups;
             } catch (CelebornIOException e) {
               throw new RuntimeException(e);
             }
@@ -837,16 +913,16 @@ public class ShuffleClientImpl extends ShuffleClient {
   /**
    * Check if a newer PartitionLocation(with larger epoch) exists in local cache.
    *
-   * @param shuffleMap The mapping between shuffle id and partition location.
+   * @param shuffleMap The mapping between shuffle id and partition location group.
    * @param partitionId The id of partition.
    * @param epoch The epoch of revive.
    * @param wait Whether to wait for some time for a newer partition location.
    * @return whether newer partition location exists in local cache.
    */
   boolean newerPartitionLocationExists(
-      Map<Integer, PartitionLocation> shuffleMap, int partitionId, int epoch, boolean wait) {
-    PartitionLocation currentLocation = shuffleMap.get(partitionId);
-    if (currentLocation != null && currentLocation.getEpoch() > epoch) {
+      Map<Integer, LocationGroup> shuffleMap, int partitionId, int epoch, boolean wait) {
+    LocationGroup currentGroup = shuffleMap == null ? null : shuffleMap.get(partitionId);
+    if (currentGroup != null && currentGroup.maxEpoch() > epoch) {
       return true;
     } else if (wait) {
       long sleepTimeMs = RND.nextInt(50);
@@ -859,8 +935,8 @@ public class ShuffleClientImpl extends ShuffleClient {
         }
       }
 
-      currentLocation = shuffleMap.get(partitionId);
-      return currentLocation != null && currentLocation.getEpoch() > epoch;
+      currentGroup = shuffleMap == null ? null : shuffleMap.get(partitionId);
+      return currentGroup != null && currentGroup.maxEpoch() > epoch;
     } else {
       return false;
     }
@@ -923,8 +999,8 @@ public class ShuffleClientImpl extends ShuffleClient {
     // partitionId -> StatusCode#getValue
     Map<Integer, Integer> results = new HashMap<>();
 
-    // Local cached map of (partitionId -> PartitionLocation)
-    ConcurrentHashMap<Integer, PartitionLocation> partitionLocationMap =
+    // Local cached map of (partitionId -> LocationGroup)
+    ConcurrentHashMap<Integer, LocationGroup> partitionLocationMap =
         reducePartitionMap.get(shuffleId);
 
     Map<Integer, PartitionLocation> oldLocMap = new HashMap<>();
@@ -960,10 +1036,31 @@ public class ShuffleClientImpl extends ShuffleClient {
 
         if (StatusCode.SUCCESS == statusCode) {
           PartitionLocation loc = entry.getValue()._3();
-          partitionLocationMap.put(partitionId, loc);
-          pushExcludedWorkers.remove(loc.hostAndPushPort());
-          if (loc.hasPeer()) {
-            pushExcludedWorkers.remove(loc.getPeer().hostAndPushPort());
+          LocationGroup group =
+              partitionLocationMap.computeIfAbsent(
+                  partitionId,
+                  id ->
+                      new LocationGroup(
+                          loc, parallelWriteHotPartitionWindowMs, parallelWriteMaxLocations));
+          if (parallelWriteEnabled) {
+            // Converge to the full active set delivered by the LifecycleManager.
+            List<PartitionLocation> allActive = new ArrayList<>();
+            if (loc != null) {
+              allActive.add(loc);
+            }
+            List<PartitionLocation> additionals = response.additionalLocs().get(partitionId);
+            if (additionals != null) {
+              allActive.addAll(additionals);
+            }
+            group.mergeAll(allActive);
+          } else if (loc != null) {
+            group.updateSingle(loc);
+          }
+          if (loc != null) {
+            pushExcludedWorkers.remove(loc.hostAndPushPort());
+            if (loc.hasPeer()) {
+              pushExcludedWorkers.remove(loc.getPeer().hostAndPushPort());
+            }
           }
         } else if (StatusCode.STAGE_ENDED == statusCode) {
           stageEndShuffleSet.add(shuffleId);
@@ -1031,8 +1128,8 @@ public class ShuffleClientImpl extends ShuffleClient {
       return 0;
     }
     // register shuffle if not registered
-    final ConcurrentHashMap<Integer, PartitionLocation> map =
-        getPartitionLocation(shuffleId, numMappers, numPartitions);
+    final ConcurrentHashMap<Integer, LocationGroup> map =
+        getPartitionLocationMap(shuffleId, numMappers, numPartitions);
 
     // get location
     // If rerun or speculation task running after LifecycleManager call stageEnd,
@@ -1065,7 +1162,27 @@ public class ShuffleClientImpl extends ShuffleClient {
       return 0;
     }
 
-    final PartitionLocation loc = map.get(partitionId);
+    LocationGroup group = map.get(partitionId);
+    PartitionLocation currentLoc = group == null ? null : group.currentFor(mapId);
+    if (currentLoc == null && group != null && parallelWriteEnabled) {
+      // All known locations of this partition are unusable, synchronously revive for a
+      // fresh location (urgent path, same semantics as the legacy single-location revive).
+      if (!revive(
+          shuffleId,
+          mapId,
+          attemptId,
+          partitionId,
+          group.maxEpoch(),
+          group.latest(),
+          StatusCode.PUSH_DATA_FAIL_NON_CRITICAL_CAUSE_PRIMARY)) {
+        throw new CelebornIOException(
+            String.format(
+                "Revive for shuffle %s partition %d failed, all locations unusable.",
+                shuffleId, partitionId));
+      }
+      currentLoc = group.currentFor(mapId);
+    }
+    final PartitionLocation loc = currentLoc;
     if (loc == null) {
       throw new CelebornIOException(
           String.format(
@@ -1197,7 +1314,30 @@ public class ShuffleClientImpl extends ShuffleClient {
                       attemptId,
                       partitionId,
                       nextBatchId);
-                  if (!newerPartitionLocationExists(
+                  if (parallelWriteEnabled) {
+                    LocationGroup latestGroup = locationGroup(shuffleId, partitionId);
+                    if (latestGroup != null) {
+                      int desired = latestGroup.onSoftSplit(latest.getEpoch());
+                      boolean newlyRetired =
+                          latestGroup.retire(latest.getEpoch(), StatusCode.SOFT_SPLIT);
+                      if (newlyRetired && !mapperEnded(shuffleId, mapId)) {
+                        // Data already landed on the worker, do not block writes: send a
+                        // non-urgent revive to ask for the desired location count.
+                        ReviveRequest reviveRequest =
+                            new ReviveRequest(
+                                shuffleId,
+                                mapId,
+                                attemptId,
+                                partitionId,
+                                latest.getEpoch(),
+                                latest,
+                                StatusCode.SOFT_SPLIT);
+                        reviveRequest.desiredLocationCount = desired;
+                        reviveRequest.urgent = false;
+                        reviveManager.addRequest(reviveRequest);
+                      }
+                    }
+                  } else if (!newerPartitionLocationExists(
                       reducePartitionMap.get(shuffleId), partitionId, latest.getEpoch(), false)) {
                     ReviveRequest reviveRequest =
                         new ReviveRequest(
@@ -1240,6 +1380,18 @@ public class ShuffleClientImpl extends ShuffleClient {
                   reviveManager.addRequest(reviveRequest);
                   recordPushEvent(
                       shuffleId, mapId, attemptId, latest.hostAndPushPort(), PushEvent.HARD_SPLIT);
+                  if (parallelWriteEnabled) {
+                    LocationGroup latestGroup = locationGroup(shuffleId, partitionId);
+                    if (latestGroup != null) {
+                      latestGroup.retire(latest.getEpoch(), StatusCode.HARD_SPLIT);
+                      if (latestGroup.anotherActiveFor(mapId, latest.getEpoch()) != null) {
+                        // Another active location is available: re-push to it immediately
+                        // without waiting for the revive response. The retry thread reads
+                        // the preset SUCCESS and picks the other active location.
+                        reviveRequest.reviveStatus = StatusCode.SUCCESS.getValue();
+                      }
+                    }
+                  }
                   long dueTime =
                       System.currentTimeMillis()
                           + conf.clientRpcRequestPartitionLocationAskTimeout()
@@ -1346,6 +1498,17 @@ public class ShuffleClientImpl extends ShuffleClient {
                     new ReviveRequest(
                         shuffleId, mapId, attemptId, partitionId, latest.getEpoch(), latest, cause);
                 reviveManager.addRequest(reviveRequest);
+                if (parallelWriteEnabled) {
+                  LocationGroup latestGroup = locationGroup(shuffleId, partitionId);
+                  if (latestGroup != null) {
+                    latestGroup.retire(latest.getEpoch(), cause);
+                    if (latestGroup.anotherActiveFor(mapId, latest.getEpoch()) != null) {
+                      // Another active location is available: re-push to it immediately
+                      // without waiting for the revive response.
+                      reviveRequest.reviveStatus = StatusCode.SUCCESS.getValue();
+                    }
+                  }
+                }
                 long dueTime =
                     System.currentTimeMillis()
                         + conf.clientRpcRequestPartitionLocationAskTimeout().duration().toMillis();
@@ -1664,7 +1827,28 @@ public class ShuffleClientImpl extends ShuffleClient {
                           StatusCode.fromValue(statusCodeList.get(i).byteValue())));
                   if (statusCodeList.get(i) == StatusCode.SOFT_SPLIT.getValue()) {
                     PartitionLocation loc = batches.get(partitionIndex).loc;
-                    if (!newerPartitionLocationExists(
+                    if (parallelWriteEnabled) {
+                      LocationGroup splitGroup = locationGroup(shuffleId, loc.getId());
+                      if (splitGroup != null) {
+                        int desired = splitGroup.onSoftSplit(loc.getEpoch());
+                        boolean newlyRetired =
+                            splitGroup.retire(loc.getEpoch(), StatusCode.SOFT_SPLIT);
+                        if (newlyRetired && !mapperEnded(shuffleId, mapId)) {
+                          ReviveRequest reviveRequest =
+                              new ReviveRequest(
+                                  shuffleId,
+                                  mapId,
+                                  attemptId,
+                                  loc.getId(),
+                                  loc.getEpoch(),
+                                  loc,
+                                  StatusCode.SOFT_SPLIT);
+                          reviveRequest.desiredLocationCount = desired;
+                          reviveRequest.urgent = false;
+                          reviveManager.addRequest(reviveRequest);
+                        }
+                      }
+                    } else if (!newerPartitionLocationExists(
                         reducePartitionMap.get(shuffleId), loc.getId(), loc.getEpoch(), false)) {
                       ReviveRequest reviveRequest =
                           new ReviveRequest(
@@ -1728,6 +1912,7 @@ public class ShuffleClientImpl extends ShuffleClient {
                 ReviveRequest[] requests =
                     addAndGetReviveRequests(
                         shuffleId, mapId, attemptId, batchesNeedResubmit, StatusCode.HARD_SPLIT);
+                presetSuccessIfAnotherActive(shuffleId, mapId, requests, StatusCode.HARD_SPLIT);
                 pushDataRetryPool.submit(
                     () ->
                         submitRetryPushMergedData(
@@ -1818,6 +2003,7 @@ public class ShuffleClientImpl extends ShuffleClient {
             if (!mapperEnded(shuffleId, mapId)) {
               ReviveRequest[] requests =
                   addAndGetReviveRequests(shuffleId, mapId, attemptId, batches, cause);
+              presetSuccessIfAnotherActive(shuffleId, mapId, requests, cause);
               pushDataRetryPool.submit(
                   () ->
                       submitRetryPushMergedData(

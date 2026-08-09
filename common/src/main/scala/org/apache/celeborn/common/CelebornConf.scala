@@ -1157,6 +1157,11 @@ class CelebornConf(loadDefaults: Boolean) extends Cloneable with Logging with Se
   def shufflePartitionSplitMode: PartitionSplitMode =
     PartitionSplitMode.valueOf(get(SHUFFLE_PARTITION_SPLIT_MODE))
   def shufflePartitionSplitThreshold: Long = get(SHUFFLE_PARTITION_SPLIT_THRESHOLD)
+  def clientShuffleParallelWriteEnabled: Boolean = get(CLIENT_SHUFFLE_PARALLEL_WRITE_ENABLED)
+  def clientShuffleParallelWriteMaxLocationsPerPartition: Int =
+    get(CLIENT_SHUFFLE_PARALLEL_WRITE_MAX_LOCATIONS_PER_PARTITION)
+  def clientShuffleParallelWriteHotPartitionWindowMs: Long =
+    get(CLIENT_SHUFFLE_PARALLEL_WRITE_HOT_PARTITION_WINDOW)
   def batchHandleChangePartitionEnabled: Boolean = get(CLIENT_BATCH_HANDLE_CHANGE_PARTITION_ENABLED)
   def batchHandleChangePartitionBuckets: Int =
     get(CLIENT_BATCH_HANDLE_CHANGE_PARTITION_BUCKETS)
@@ -5388,6 +5393,41 @@ object CelebornConf extends Logging {
       .transform(_.toUpperCase(Locale.ROOT))
       .checkValues(Set(PartitionSplitMode.SOFT.name, PartitionSplitMode.HARD.name))
       .createWithDefault(PartitionSplitMode.SOFT.name)
+
+  val CLIENT_SHUFFLE_PARALLEL_WRITE_ENABLED: ConfigEntry[Boolean] =
+    buildConf("celeborn.client.shuffle.parallelWrite.enabled")
+      .categories("client")
+      .doc("Whether to enable writing one partition to multiple partition locations " +
+        "in parallel. When enabled, a hot partition (whose location is filled up faster " +
+        "than the hot partition window) is gradually assigned more active locations, and " +
+        "mappers are dispatched to active locations by mapId % activeCount. When disabled, " +
+        "the behavior is identical to the legacy single active location per partition.")
+      .version("0.7.0")
+      .booleanConf
+      .createWithDefault(false)
+
+  val CLIENT_SHUFFLE_PARALLEL_WRITE_MAX_LOCATIONS_PER_PARTITION: ConfigEntry[Int] =
+    buildConf("celeborn.client.shuffle.parallelWrite.maxLocationsPerPartition")
+      .categories("client")
+      .doc("Max number of active locations one partition can write in parallel when " +
+        "celeborn.client.shuffle.parallelWrite.enabled is true. The LifecycleManager " +
+        "truncates the desired location count reported by executors to this value.")
+      .version("0.7.0")
+      .intConf
+      .checkValue(v => v > 0, "Must be positive.")
+      .createWithDefault(4)
+
+  val CLIENT_SHUFFLE_PARALLEL_WRITE_HOT_PARTITION_WINDOW: ConfigEntry[Long] =
+    buildConf("celeborn.client.shuffle.parallelWrite.hotPartitionWindow")
+      .categories("client")
+      .doc("The window to judge whether a partition is hot when " +
+        "celeborn.client.shuffle.parallelWrite.enabled is true. If a partition location " +
+        "is filled up (soft split) faster than this window, the desired active location " +
+        "count of the partition is boosted by one. This window also serves as the " +
+        "debounce interval of boosting.")
+      .version("0.7.0")
+      .timeConf(TimeUnit.MILLISECONDS)
+      .createWithDefaultString("60s")
 
   val SHUFFLE_COMPRESSION_CODEC: ConfigEntry[String] =
     buildConf("celeborn.client.shuffle.compression.codec")

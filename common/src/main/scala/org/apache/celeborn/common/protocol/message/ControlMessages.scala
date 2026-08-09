@@ -254,7 +254,9 @@ object ControlMessages extends Logging {
   case class ChangeLocationResponse(
       endedMapIds: util.List[Integer],
       newLocs: util.Map[Integer, (StatusCode, java.lang.Boolean, PartitionLocation)],
-      serdeVersion: SerdeVersion) extends MasterMessage
+      serdeVersion: SerdeVersion,
+      additionalLocs: util.Map[Integer, util.List[PartitionLocation]] =
+        new util.HashMap[Integer, util.List[PartitionLocation]]()) extends MasterMessage
 
   case class MapperEnd(
       shuffleId: Int,
@@ -764,6 +766,7 @@ object ControlMessages extends Logging {
           .setPartitionId(req.partitionId)
           .setEpoch(req.epoch)
           .setStatus(req.cause.getValue)
+          .setDesiredLocationCount(req.desiredLocationCount)
         if (req.loc != null) {
           partitionInfoBuilder.setPartition(PbSerDeUtils.toPbPartitionLocation(req.loc))
         }
@@ -772,7 +775,7 @@ object ControlMessages extends Logging {
       val payload = builder.build().toByteArray
       new TransportMessage(MessageType.CHANGE_LOCATION, payload, serdeVersion)
 
-    case ChangeLocationResponse(mapIds, newLocs, serdeVersion) =>
+    case ChangeLocationResponse(mapIds, newLocs, serdeVersion, additionalLocs) =>
       val builder = PbChangeLocationResponse.newBuilder()
       builder.addAllEndedMapId(mapIds)
       newLocs.asScala.foreach { case (partitionId, (status, available, loc)) =>
@@ -782,6 +785,14 @@ object ControlMessages extends Logging {
           .setOldAvailable(available)
         if (loc != null) {
           pbChangeLocationPartitionInfoBuilder.setPartition(PbSerDeUtils.toPbPartitionLocation(loc))
+        }
+        Option(additionalLocs).flatMap(m => Option(m.get(partitionId))).foreach { additionals =>
+          additionals.asScala.foreach { additionalLoc =>
+            if (additionalLoc != null) {
+              pbChangeLocationPartitionInfoBuilder.addAdditionalPartitions(
+                PbSerDeUtils.toPbPartitionLocation(additionalLoc))
+            }
+          }
         }
         builder.addPartitionInfo(pbChangeLocationPartitionInfoBuilder.build())
       }
@@ -1323,6 +1334,8 @@ object ControlMessages extends Logging {
             info.getEpoch,
             partition,
             StatusCode.fromValue(info.getStatus))
+          // proto3 default 0 means legacy single-location semantics
+          reviveRequest.desiredLocationCount = Math.max(info.getDesiredLocationCount, 1)
           reviveRequests.add(reviveRequest)
         }
         Revive(
@@ -1335,6 +1348,7 @@ object ControlMessages extends Logging {
         val pbChangeLocationResponse = PbChangeLocationResponse.parseFrom(message.getPayload)
         val newLocs =
           new util.HashMap[Integer, (StatusCode, java.lang.Boolean, PartitionLocation)]()
+        val additionalLocs = new util.HashMap[Integer, util.List[PartitionLocation]]()
         val partitionInfos = pbChangeLocationResponse.getPartitionInfoList
         (0 until partitionInfos.size).foreach { idx =>
           val info = partitionInfos.get(idx)
@@ -1345,11 +1359,19 @@ object ControlMessages extends Logging {
           newLocs.put(
             info.getPartitionId,
             (StatusCode.fromValue(info.getStatus), info.getOldAvailable, partition))
+          if (info.getAdditionalPartitionsCount > 0) {
+            val additionals = new util.ArrayList[PartitionLocation]()
+            info.getAdditionalPartitionsList.asScala.foreach { pbLoc =>
+              additionals.add(PbSerDeUtils.fromPbPartitionLocation(pbLoc))
+            }
+            additionalLocs.put(info.getPartitionId, additionals)
+          }
         }
         ChangeLocationResponse(
           pbChangeLocationResponse.getEndedMapIdList,
           newLocs,
-          message.getSerdeVersion)
+          message.getSerdeVersion,
+          additionalLocs)
 
       case MAPPER_END_VALUE =>
         val pbMapperEnd = PbMapperEnd.parseFrom(message.getPayload)
