@@ -217,7 +217,7 @@ class ChangePartitionManagerParallelWriteSuite extends CelebornFunSuite {
       .map(_.getEpoch).toSet == Set(1))
   }
 
-  test("HARD_SPLIT only retires, never boosts") {
+  test("HARD_SPLIT with an unavailable worker only retires, never boosts") {
     val conf = makeConf()
     val shuffleId = 1
     val partitionId = 0
@@ -225,6 +225,10 @@ class ChangePartitionManagerParallelWriteSuite extends CelebornFunSuite {
     val loc0 = prepareLifecycleManager(conf, shuffleId, partitionId, workers)
     val changePartitionManager = new FakeClockManager(conf, lifecycleManager, 100000L)
     changePartitionManager.recordInitialAllocTime(shuffleId, Array(loc0), 100000L)
+    // The worker of epoch 0 is known unavailable: the HARD_SPLIT is not measured.
+    lifecycleManager.workerStatusTracker.excludedWorkers.put(
+      loc0.getWorker,
+      (StatusCode.PUSH_DATA_CONNECTION_EXCEPTION_PRIMARY, 100000L))
 
     // Epoch 0 hard-splits 10s after allocation: even a fast fill does not boost.
     changePartitionManager.advance(10000)
@@ -349,6 +353,7 @@ class ChangePartitionManagerParallelWriteSuite extends CelebornFunSuite {
       shuffleId,
       partitionId,
       0,
+      loc0,
       Some(StatusCode.SOFT_SPLIT),
       10000L)
     assert(changePartitionManager.desiredLocationCount(shuffleId, partitionId) == 2)
@@ -357,6 +362,7 @@ class ChangePartitionManagerParallelWriteSuite extends CelebornFunSuite {
       shuffleId,
       partitionId,
       1,
+      makeLoc(partitionId, 1, workers.head.host),
       Some(StatusCode.SOFT_SPLIT),
       80000L)
     assert(changePartitionManager.desiredLocationCount(shuffleId, partitionId) == 3)
@@ -365,6 +371,7 @@ class ChangePartitionManagerParallelWriteSuite extends CelebornFunSuite {
       shuffleId,
       partitionId,
       2,
+      makeLoc(partitionId, 2, workers.head.host),
       Some(StatusCode.SOFT_SPLIT),
       150000L)
     assert(changePartitionManager.desiredLocationCount(shuffleId, partitionId) == 4)
@@ -373,6 +380,7 @@ class ChangePartitionManagerParallelWriteSuite extends CelebornFunSuite {
       shuffleId,
       partitionId,
       3,
+      makeLoc(partitionId, 3, workers.head.host),
       Some(StatusCode.SOFT_SPLIT),
       220000L)
     // The configured upper bound is 4.
@@ -396,6 +404,7 @@ class ChangePartitionManagerParallelWriteSuite extends CelebornFunSuite {
       shuffleId,
       partitionId,
       10,
+      makeLoc(partitionId, 10, workers.head.host),
       Some(StatusCode.SOFT_SPLIT),
       30000L)
     assert(changePartitionManager.desiredLocationCount(shuffleId, partitionId) == 2)
@@ -405,6 +414,7 @@ class ChangePartitionManagerParallelWriteSuite extends CelebornFunSuite {
       shuffleId,
       partitionId,
       5,
+      makeLoc(partitionId, 5, workers.head.host),
       Some(StatusCode.SOFT_SPLIT),
       95000L)
     assert(changePartitionManager.desiredLocationCount(shuffleId, partitionId) == 3)
@@ -469,6 +479,7 @@ class ChangePartitionManagerParallelWriteSuite extends CelebornFunSuite {
       shuffleId,
       partitionId,
       0,
+      loc0,
       Some(StatusCode.SOFT_SPLIT),
       110000L)
     val context1 = new CapturingContext

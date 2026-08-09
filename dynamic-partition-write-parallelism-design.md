@@ -1,6 +1,6 @@
 # 动态分区写并行度设计（结合 Uniffle partition split 与 CIP-20）
 
-> **状态**：Phase 1.1 已实现——热点判定已从 executor 迁移到 LifecycleManager（driver）侧，executor 只保留写路径。验证结果见 §12。本文档第二部分已按实际代码修订。
+> **状态**：Phase 1.1 已实现——热点判定已从 executor 迁移到 LifecycleManager（driver）侧，executor 只保留写路径。Commits：Phase 1 `f398d73dc`、Phase 1.1 `5342d934c`（分支 `parallel-partition-write`）。验证结果见 §12。本文档第二部分已按实际代码修订。
 
 # 第一部分：调研结论（精简）
 
@@ -36,7 +36,7 @@
 | **写分派 key** | `taskAttemptId % (serverSize-1)+1` | `mapId % size` | `mapId % K`（与二者一致） |
 | **split 时写是否阻塞** | 不阻塞（writer 本地 fast-switch） | 不阻塞（切候选 location，非紧急 revive 补充） | 不阻塞（同 CIP-20；HARD_SPLIT/失败直接重推到其他活跃 location） |
 | **executor 间一致性** | shuffle handle 序列化下发 split server 全集 | 未明确 | **revive 响应返回活跃 location 全集**，各 executor 收敛到同一 epoch 集合 |
-| **executor 改动** | writer 切换逻辑（reassign 框架内） | LocationManager(~390行)+HotTracker | **仅 LocationGroup 写路径（252 行）+ 退休上报**，无判定逻辑 |
+| **executor 改动** | writer 切换逻辑（reassign 框架内） | LocationManager(~390行)+HotTracker | **仅 LocationGroup 写路径（244 行）+ 退休上报**，无判定逻辑 |
 | **读侧改动** | 无（bitmap 去重） | 无 | 无 |
 | **server/worker 改动** | 有（检测 + 响应携带 needSplitPartitionIds） | 无 | 无 |
 | **协议改动** | reassign gRPC + handle 携带 split 状态（较大） | Revive 响应 partition 改 repeated（**wire 破坏性**） | 仅 proto3 新增 `additionalPartitions` 一个字段，**wire 兼容** |
@@ -90,10 +90,12 @@ mapper pushData(partitionId)
              ├─ HARD_SPLIT / push 失败 → retire + 预置 SUCCESS：
              │     有另一活跃 location 时重推线程立即换目标（不等 LM 响应）
              └─ 全部不可用 → 现有同步 revive 路径
-LM (ChangePartitionManager):
+LM (ChangePartitionManager → PartitionHotnessTracker):
   收到带 cause 的 revive → 退休 epoch 出活跃集合；
-    cause==SOFT_SPLIT 时 HotState 判定：fillTime = 首报时刻 - allocTime(epoch)
-    < hotPartitionWindow ? desired+1（首报去重、窗口去抖、上限截断）
+    计量条件 (cause ∈ {SOFT_SPLIT, HARD_SPLIT} 且旧 location 的 worker 仍可用) 满足时
+    HotState 判定：fillTime = 首报时刻 - allocTime(epoch)
+    < hotPartitionWindow ? desired+1（首报去重、窗口去抖、上限截断）；
+    push 失败类 cause 一律只退休不判定（见 §8.2 统一计量规则）
   补差分配 gap = desired - 活跃数（互不相同 worker、epoch 递增，可为 0）
   revive 响应一律返回【活跃 location 全集】(newLocs 放 max epoch + additionalLocs 放其余)
     → 所有 executor 收敛到同一集合
@@ -127,16 +129,16 @@ message PbChangeLocationPartitionInfo {
 ## 7. Executor client 侧实现（Phase 1.1 瘦身版）
 
 ### 7.0 内存开销：薄包装 + 懒加载
-- `reducePartitionMap` 值类型为 `LocationGroup`（252 行），初始是**薄包装**：`volatile PartitionLocation single` + `volatile ParallelState parallel = null`（只比现状多一个对象头+一个字段）；
+- `reducePartitionMap` 值类型为 `LocationGroup`（244 行，其中核心逻辑 ~100 行），初始是**薄包装**：`volatile PartitionLocation single` + `volatile ParallelState parallel = null`（只比现状多一个对象头+一个字段）；
 - `ParallelState`（active 列表 / retired 表 / maxEpoch）**只在首次 SOFT_SPLIT/HARD_SPLIT/push 失败或 revive 响应携带多 location 时 inflate**（双重检查锁）；
-- `currentFor(mapId)` 快路径：`parallel == null` 直接返回 `single`，与现状开销相同；
+- `currentFor(mapId)` 快路径：`parallel == null` 直接返回 `single`，与现状开销相同；膨胀后 `single` 不再同步，`active` 列表是唯一事实源；
 - 内存账目（5 万 partition/executor）：薄包装增量 ≈ 1MB；ParallelState 仅热点 partition 存在（个位数~几十个）。
 
 ### 7.1 LocationGroup 行为语义
-- **选择策略 `mapId % K`**（`Math.floorMod`）：同一 map task 稳定写同一 location（保住 PushState 按 host 聚合语义）；不同 map task 散到不同 worker；
-- **退休语义**：`retire(epoch, cause)` 返回是否首次退休（调用方据此保证每 (partition,epoch) 只上报一次 revive）。`currentFor` 优先选未退休 location，**soft-retired location 兜底**（SOFT 语义允许排水续写）；全部不可用返回 null；
+- **选择策略 `mapId % K`**（`Math.floorMod`）：`currentFor` 与 `anotherActiveFor` 统一委托私有方法 `pick(mapId, excludeEpoch)`——两遍扫描：先选非退休 location，**soft-retired location 兜底**（SOFT 语义允许排水续写）；全部不可用返回 null。同一 map task 稳定写同一 location（保住 PushState 按 host 聚合语义）；不同 map task 散到不同 worker；
+- **退休语义**：`retire(epoch, cause)` 返回是否首次退休（调用方据此保证每 (partition,epoch) 只上报一次 revive）；
 - **`anotherActiveFor(mapId, excludeEpoch)`**：HARD_SPLIT/push 失败时在其余活跃 location 中挑一个立即重推；
-- **全集收敛**：`mergeAll(locations)` 以 LM 下发的活跃全集为准，补入本地缺失 epoch、跳过本地已退休 epoch；单 location 响应走 `updateSingle` 保持薄包装不膨胀；
+- **全集收敛**：`mergeAll(locations)`（`synchronized`，消除并发 revive 响应下"检查重复→插入"的竞态）以 LM 下发的活跃全集为准，按 epoch 有序插入——不同 executor 收敛到**相同顺序**的 active 列表，`mapId % K` 分派一致；跳过本地已退休 epoch；单 location 响应走 `updateSingle` 保持薄包装不膨胀；
 - K 变化时 mapId 映射偏移——不影响正确性（读侧按 (mapId,attemptId,batchId) 去重）。
 
 ### 7.2 ShuffleClientImpl 接入（实现版）
@@ -164,7 +166,7 @@ message PbChangeLocationPartitionInfo {
 ## 8. LM 侧实现（热点判定集中地）
 
 ### 8.1 HotState（稀疏，per (shuffleId, partitionId)）
-`ChangePartitionManager` 维护 `partitionHotStates: shuffleId -> partitionId -> HotState`：
+热点状态全部收敛在独立组件 **`PartitionHotnessTracker.scala`**（227 行，R3 从 ChangePartitionManager 提取）：`ChangePartitionManager` 持有一个实例，把判定依赖（latestPartitionLocation 查询、worker 可用性查询）以函数注入，所有时间戳由调用方传入（可注入时钟），tracker 可脱离 LM 独立单测。内部维护 `partitionHotStates: shuffleId -> partitionId -> HotState`：
 ```
 activeEpochs   : LinkedHashSet[Integer]   // 活跃 epoch（插入序）
 allocTimeMs    : Map[Int, Long]           // 每个 epoch 的真实分配时间
@@ -181,10 +183,12 @@ lastBoostTimeMs: volatile Long = -1       // 去抖：每窗口最多升一次
 
 ### 8.2 热点判定（`onEpochRetired`，在 revive 请求到达时触发）
 ```
-onEpochRetired(shuffleId, partitionId, epoch, cause, now):
+onEpochRetired(shuffleId, partitionId, epoch, oldPartition, cause, now):
   退休 epoch 出活跃集合
-  if (cause != SOFT_SPLIT) return                    // HARD_SPLIT/失败只退休不升档
-  if (splitReported.contains(epoch)) return          // 同 epoch 重复上报去重
+  measureEligible = (cause ∈ {SOFT_SPLIT, HARD_SPLIT})
+                    && workerAvailableByLocation(oldPartition)   // 统一计量规则（R1）
+  if (!measureEligible) return                     // push 失败类 / 已知不可用 worker / null 旧 location：只退休
+  if (splitReported.contains(epoch)) return        // 同 epoch 重复上报去重
   allocTime = allocTimeMs[epoch] ?? (epoch==0 ? shuffleInitialAllocTime : null)
   if (allocTime == null || now - allocTime >= windowMs) { markSplitReported; return }  // 不升档
   if (splitReported.add(epoch)
@@ -193,7 +197,10 @@ onEpochRetired(shuffleId, partitionId, epoch, cause, now):
       desired += 1; lastBoostTimeMs = now
   }
 ```
-- **判定依据**：fillTime = 全局第一个 SOFT_SPLIT 上报到达时刻 - 该 epoch 真实分配时刻 ≈ `threshold / 该 location 聚合写入速度`。`threshold=1G`、`window=60s` ⇒ 热点线 ≈ **17MB/s 单 location 聚合速度**；
+- **统一计量规则（R1）**：SOFT_SPLIT 与 HARD_SPLIT 统一计量——两者都是"阈值触发的 split"，同样反映快速写满；HARD 模式（`celeborn.client.partitionSplit.mode=HARD`）下热点判定由此激活，不再只有 SOFT 模式受益。两个守卫条件：
+  - **worker 必须仍可用**（`workerStatusTracker.workerAvailableByLocation`）：HARD_SPLIT 若由 worker 故障/过载触发（worker 已被 exclude），反映的是 worker 问题而非 partition 热点，不计量；
+  - **push 失败类 cause 一律不计量**（PUSH_DATA_FAIL_* / CONNECTION_EXCEPTION 等）：网络/连接问题与分区热度无关，这是原则性排除。
+- **判定依据**：fillTime = 全局第一个 split 上报到达时刻 - 该 epoch 真实分配时刻 ≈ `threshold / 该 location 聚合写入速度`。`threshold=1G`、`window=60s` ⇒ 热点线 ≈ **17MB/s 单 location 聚合速度**；
 - **epoch 乱序免疫**：每个 epoch 独立对照自己的 allocTime——epoch 10 先于 epoch 5 写满互不影响（executor "间隔法"在这里会误判，这也是不用间隔法的原因）；
 - **偏差说明（如实）**：epoch 0 的 allocTime 是 registerShuffle 时刻，mapper 可能更晚才开始写 → fillTime 高估 → 首个 epoch 判定**偏保守**（方向安全）；split 首报时刻略晚于真实写满时刻（一次 push 间隔内），fillTime 略偏大 → 同样偏保守；
 - **检测延迟不变**：仍由 split 事件驱动（写满一个 threshold 才感知），这是 split 驱动方案的共同局限，根治需要速率统计（Phase 2）。
@@ -236,19 +243,21 @@ SOFT_SPLIT 语义允许排水续写，提前增量 commit 会使排水 push 命�
 
 ## 11. 实际改动清单
 
-Phase 1（commit `f398d73dc`）+ Phase 1.1（判定迁移 LM，净 +469/-390）合计：
+Phase 1（commit `f398d73dc`）+ Phase 1.1（commit `5342d934c`，判定迁移 LM + LocationGroup 简化）+ R1–R3（统一计量规则 + 热点组件提取，待提交）合计：
 
 | 文件 | 内容 | 规模 |
 |---|---|---|
 | `common/src/main/proto/TransportMessages.proto` | `additionalPartitions` 一个字段 | +2 |
 | `common/.../message/ControlMessages.scala` | additionalLocs 字段 + 双向 serde | +25 |
 | `common/.../CelebornConf.scala` + `docs/configuration/client.md` | 3 个配置 + 文档再生成 | +43 |
-| `client/.../LocationGroup.java` | 薄包装 + ParallelState（无判定逻辑） | 252 |
-| `client/.../ShuffleClientImpl.java`、`ReviveManager.java` | §7.2 接入 | ~+200 |
-| `client/.../ChangePartitionManager.scala` | HotState + 判定 + 补差分配 + 全集回复 | ~+430 |
+| `client/.../LocationGroup.java` | 薄包装 + ParallelState + 统一 pick 选择（无判定逻辑） | 244 |
+| `client/.../ShuffleClientImpl.java`、`ReviveManager.java` | §7.2 接入；R2 提取 `handleSoftSplitRetire` / `retireAndPresetIfAnotherActive` 收敛三处重复 | ~+200 |
+| `client/.../ChangePartitionManager.scala` | 补差分配 + 全集回复；热点状态全部委托给 tracker（R3 后自身 734 行） | ~+250 |
+| `client/.../PartitionHotnessTracker.scala`（R3 新增） | HotState + 统一计量判定（R1）+ 依赖注入（latestEpoch / workerAvailable / 时钟） | 227 |
 | `client/.../LifecycleManager.scala`、`RequestLocationCallContext.scala` | registerShuffle 记录 allocTime、additionalLocs 透传 | ~+60 |
 | `client/src/test/.../LocationGroupSuiteJ.java` | 5 例 | 139 |
-| `client/src/test/.../ChangePartitionManagerParallelWriteSuite.scala` | 10 例（判定逻辑 + 分配回复） | 479 |
+| `client/src/test/.../ChangePartitionManagerParallelWriteSuite.scala` | 10 例（判定逻辑 + 分配回复；HARD_SPLIT 例适配统一计量规则） | 523 |
+| `client/src/test/.../PartitionHotnessTrackerSuite.scala`（R3 新增） | 4 例：HARD+健康升档 / HARD+不可用不升档 / push 失败不升档 / HARD 与 SOFT 等价 | 91 |
 
 ## 12. 验证
 
@@ -256,10 +265,19 @@ Phase 1（commit `f398d73dc`）+ Phase 1.1（判定迁移 LM，净 +469/-390）�
 - 目标单测全绿：LocationGroupSuiteJ 5 + HotTrackerSuiteJ 8 + ChangePartitionManagerParallelWriteSuite 4；
 - client 全量回归全绿（JUnit 43 + ScalaTest 37，32 分钟）；`./dev/reformat` 通过。
 
-**Phase 1.1（LM 判定版）验证**：
+**Phase 1.1（LM 判定版，commit 5342d934c）验证**：
 - `ChangePartitionManagerParallelWriteSuite` 重写为 10 例：fillTime 升/不升档、同 epoch 首报去重、窗口去抖、上限截断、epoch 乱序（epoch 10 先于 epoch 5 互不影响）、allocTime 未知保守不升、epoch 0 用注册时间、补差分配不同 worker、分配 0 仍回全集、desired 在失败 revive 后保持；
 - `LocationGroupSuiteJ` 适配新构造器后保留 5 例；`HotTrackerSuiteJ` 删除（逻辑迁移）；
-- 定向套件、client 全量回归、`./dev/reformat`：**结果待回归完成后回填**。
+- 定向套件全绿（LocationGroupSuiteJ 5/5 + ScalaTest 43/43）；
+- LocationGroup 简化（pick 合并、synchronized mergeAll）经行为等价审查。
+
+**R1–R3（统一计量规则 + PartitionHotnessTracker 提取，待提交）验证**：
+- R1：计量条件统一为 `(cause ∈ {SOFT_SPLIT, HARD_SPLIT}) && workerAvailable(oldPartition)`，HARD 模式热点判定激活；push 失败类原则性不计量；零 worker / 零 proto 改动（曾评估 worker 侧文件长度上报方案，被否决：不改 worker）；
+- R2：ShuffleClientImpl 提取 `handleSoftSplitRetire` / `retireAndPresetIfAnotherActive`，收敛三处 SOFT_SPLIT 重复块与两处退休+预置重复块（+80/−73，纯重构无行为变化）；
+- R3：热点状态提取为 `PartitionHotnessTracker.scala`（227 行），ChangePartitionManager 863→734 行纯委托；tracker 依赖注入可独立单测；
+- 新增 `PartitionHotnessTrackerSuite` 4 例（HARD+健康 worker 升档、HARD+不可用 worker 不升档、push 失败不升档、HARD 与 SOFT 等价）；`ChangePartitionManagerParallelWriteSuite` 的 HARD_SPLIT 例改为"worker 不可用不升档"语义；
+- 定向套件 47/47 全绿；`./dev/reformat` 通过；
+- client 全量回归（覆盖 Phase 1.1 + R1–R3）：进行中，结果回填于此。
 
 **待办（上生产前必须做）**：
 - 集成测试（`tests/spark-it`）：`partitionSplit.threshold=10m`、重倾斜 Spark 作业——(a) reducer 数据与原生 shuffle 对拍一致；(b) 该 partition 最终有 >1 个 committed location 且数据无重复无丢失；(c) 写阶段无 revive 长尾（对比开关前后耗时）；
@@ -270,11 +288,12 @@ Phase 1（commit `f398d73dc`）+ Phase 1.1（判定迁移 LM，净 +469/-390）�
 1. **检测延迟**：split 事件驱动，首次判定要等"写满一个 threshold"（边界 ~60s，10G 阈值部署 ×10）；滞后期间等价于现状（单 worker 写），不会更差。根治：worker/client 速率统计（Phase 2）；
 2. **爬升延迟**：去抖限制每窗口 +1，K=4 最坏 ~3 窗口；如需更快可放宽去抖或按 fillTime 比例步进（待灰度数据决定）;
 3. **epoch 0 判定偏保守**：allocTime=registerShuffle 时刻早于实际开写，fillTime 高估（方向安全）；
-4. **worker 占用放大**：热点 partition 占 K 台 worker；上限+只升热点 partition 控制风险；
-5. **AQE skew read 交互**：`splitSkewedPartitionLocations` 多文件场景理论兼容，必须 IT 回归；
-6. **replicate 模式**：K 个 location = 2K 个 slot，需压测 reserve 开销；
-7. **StageEnd commit 列表变长**：超大 shuffle 需观察；
-8. **LM 单点复杂度**：HotState 稀疏且无滑窗，但 LM 逻辑确实变多——CIP-20 评审对 LM 复杂度的警惕值得在上游化时预案（本实现比滑窗方案轻一个量级是主要论据）。
+4. **HARD_SPLIT 统一计量的残余误判（R1 引入，已如实评估）**：worker 仍可用但 HARD_SPLIT 并非热度所致的两个子情形——(a) 该 partition 数据已被 commit（mapper 已结束后的迟到写）；(b) worker 内存紧张触发的整体 HARD_SPLIT。两者都罕见（(a) 需要迟到写恰好越过阈值；(b) 内存紧张通常先走向 exclude worker），且误判后果有上限：desired 最多 +1/窗口、封顶 maxLocations，仅多占少量 slot，冷却后不继续升。接受该残余误判换取 HARD 模式的热点检测能力；
+5. **worker 占用放大**：热点 partition 占 K 台 worker；上限+只升热点 partition 控制风险；
+6. **AQE skew read 交互**：`splitSkewedPartitionLocations` 多文件场景理论兼容，必须 IT 回归；
+7. **replicate 模式**：K 个 location = 2K 个 slot，需压测 reserve 开销；
+8. **StageEnd commit 列表变长**：超大 shuffle 需观察；
+9. **LM 单点复杂度**：HotState 稀疏且无滑窗，且已提取为独立的 PartitionHotnessTracker（可单测、依赖注入），ChangePartitionManager 本体只增 ~250 行——CIP-20 评审对 LM 复杂度的警惕值得在上游化时预案（本实现比滑窗方案轻一个量级是主要论据）。
 
 ## 14. Phase 2 展望（不在本期）
 - worker/client 侧速率统计替代 split 事件驱动（检测延迟 → 10~20s，且与 split 阈值解耦）；

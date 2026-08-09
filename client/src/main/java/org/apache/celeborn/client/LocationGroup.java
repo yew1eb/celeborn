@@ -40,10 +40,10 @@ import org.apache.celeborn.common.protocol.message.StatusCode;
 public class LocationGroup {
 
   /**
-   * The only location of this partition before inflation. Only read on the non-inflated fast
-   * path (and as {@link #latest()}'s fallback when the inflated active list is empty); it is
-   * intentionally NOT kept in sync after inflation — the inflated {@link ParallelState#active}
-   * list is the source of truth.
+   * The only location of this partition before inflation. Only read on the non-inflated fast path
+   * (and as {@link #latest()}'s fallback when the inflated active list is empty); it is
+   * intentionally NOT kept in sync after inflation — the inflated {@link ParallelState#active} list
+   * is the source of truth.
    */
   private volatile PartitionLocation single;
 
