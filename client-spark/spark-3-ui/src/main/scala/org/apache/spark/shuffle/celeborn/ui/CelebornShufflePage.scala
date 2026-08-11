@@ -133,41 +133,6 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
         </tbody>
       </table>
 
-    val throughputRows: Seq[(String, String)] = Seq(
-      (
-        "Total Shuffle Write Bytes",
-        org.apache.spark.util.Utils.bytesToString(taskInfo.shuffleWriteBytes)),
-      (
-        "Total Shuffle Write Time",
-        org.apache.spark.util.Utils.msDurationToString(taskInfo.shuffleWriteTimeMs)),
-      (
-        "Total Shuffle Read Bytes",
-        org.apache.spark.util.Utils.bytesToString(taskInfo.shuffleReadBytes)),
-      (
-        "Total Fetch Wait Time",
-        org.apache.spark.util.Utils.msDurationToString(taskInfo.shuffleFetchWaitTimeMs)),
-      (
-        "Total Task CPU Time",
-        org.apache.spark.util.Utils.msDurationToString(taskInfo.taskCpuTimeMs)))
-    val throughputRowsXml = throughputRows.map { case (label, value) =>
-      <tr>
-        <td>{label}</td>
-        <td>{value}</td>
-      </tr>
-    }
-    val throughputTable =
-      <table class="table table-bordered table-striped table-sm">
-        <thead>
-          <tr>
-            <th>Metric</th>
-            <th>Value</th>
-          </tr>
-        </thead>
-        <tbody>
-          {throughputRowsXml}
-        </tbody>
-      </table>
-
     val writeTimesFields = Seq(
       "Serialize" -> org.apache.spark.util.Utils.msDurationToString(writeTimes.serializeTimeMs),
       "Copy" -> org.apache.spark.util.Utils.msDurationToString(writeTimes.copyTimeMs),
@@ -300,8 +265,6 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
       }</script>
         <a name="properties"></a>
         {collapsible("celeborn-properties", "Celeborn Properties", propertiesTable)}
-        <a name="throughput"></a>
-        {collapsible("throughput", "Shuffle Throughput", throughputTable)}
         <a name="write-times"></a>
         {collapsible("write-times", "Shuffle Write Times", writeTimesTable)}
         <a name="read-times"></a>
