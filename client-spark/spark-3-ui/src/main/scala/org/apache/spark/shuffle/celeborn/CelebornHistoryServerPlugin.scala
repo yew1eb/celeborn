@@ -22,7 +22,6 @@ import org.apache.spark.scheduler.SparkListener
 import org.apache.spark.shuffle.celeborn.ui.CelebornUITab
 import org.apache.spark.status.{AppHistoryServerPlugin, ElementTrackingStore}
 import org.apache.spark.ui.SparkUI
-import org.apache.spark.util.kvstore.KVStore
 
 /** Registered via SPI at META-INF/services/org.apache.spark.status.AppHistoryServerPlugin. */
 class CelebornHistoryServerPlugin extends AppHistoryServerPlugin {
@@ -33,10 +32,16 @@ class CelebornHistoryServerPlugin extends AppHistoryServerPlugin {
     Seq(new CelebornListener(store, conf))
   }
 
+  // Attach the Celeborn tab only if the application actually produced Celeborn data,
+  // so non-Celeborn apps don't get an empty tab.
   override def setupUI(ui: SparkUI): Unit = {
-    val kvstore: KVStore = ui.store.store
-    val statusStore = new CelebornStatusStore(kvstore)
-    if (statusStore.hasData()) {
+    val statusStore = new CelebornStatusStore(ui.store.store)
+    val hasData =
+      statusStore.hasData() ||
+        statusStore.assignmentInfos().nonEmpty ||
+        statusStore.buildInfo().info.nonEmpty ||
+        !statusStore.fallbackStats().counts.isEmpty
+    if (hasData) {
       new CelebornUITab(statusStore, ui)
     }
   }

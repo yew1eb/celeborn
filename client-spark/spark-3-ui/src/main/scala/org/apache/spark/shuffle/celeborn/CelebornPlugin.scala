@@ -18,10 +18,14 @@
 package org.apache.spark.shuffle.celeborn
 
 import java.util
+import java.util.{LinkedHashMap => JLinkedHashMap}
 
-import org.apache.spark.SparkContext
+import scala.collection.JavaConverters._
+
+import org.apache.spark.{SparkConf, SparkContext}
 import org.apache.spark.api.plugin.{DriverPlugin, PluginContext, SparkPlugin}
 import org.apache.spark.internal.Logging
+import org.apache.spark.shuffle.celeborn.events.CelebornBuildInfoEvent
 import org.apache.spark.shuffle.celeborn.ui.CelebornUITab
 
 /**
@@ -48,18 +52,63 @@ private class CelebornDriverPlugin extends DriverPlugin with Logging {
       ctx: PluginContext): util.Map[String, String] = {
     logInfo("Initializing CelebornDriverPlugin...")
     this.sc = sc
-    val kvStore = sc.statusStore.store
-    new CelebornListener(kvStore, sc.conf).register(sc)
-    java.util.Collections.emptyMap[String, String]()
+    if (isUIEnabled(sc.conf)) {
+      // Registering the listener and posting the build-info event don't touch the Jetty
+      // server, so they are safe during plugin init. The UI tab is attached later in
+      // registerMetrics, which Spark invokes AFTER SparkContext.attachAllHandlers;
+      // attaching during init would race attachAllHandlers and throw
+      // IllegalStateException: STARTED on some Spark builds.
+      new CelebornListener(sc.statusStore.store, sc.conf).register(sc)
+    } else {
+      logInfo("Celeborn Spark UI extension is disabled, skipping.")
+    }
+    util.Collections.emptyMap[String, String]()
   }
 
   override def registerMetrics(
       appId: String,
       ctx: PluginContext): Unit = {
-    sc.ui.foreach { ui =>
-      new CelebornUITab(new CelebornStatusStore(ui.store.store), ui)
+    if (isUIEnabled(sc.conf)) {
+      // registerMetrics runs after SparkContext is fully initialized, so applicationId is
+      // available here (it's null during init).
+      sc.listenerBus.post(CelebornBuildInfoEvent(buildInfoMap(sc, appId)))
+      sc.ui.foreach { ui =>
+        new CelebornUITab(new CelebornStatusStore(ui.store.store), ui)
+      }
     }
   }
 
   override def shutdown(): Unit = {}
+
+  // The UI extension is on when both celeborn's flag and Spark's own UI flag are on.
+  private def isUIEnabled(conf: SparkConf): Boolean = {
+    conf.getBoolean("celeborn.client.spark.ui.enabled", true) &&
+    conf.getBoolean("spark.ui.enabled", true)
+  }
+
+  private def buildInfoMap(sc: SparkContext, appId: String): Map[String, String] = {
+    val info = new JLinkedHashMap[String, String]()
+    info.put("Spark Version", sc.version)
+    // Prefer the appId passed to registerMetrics (reliable); fall back to sc.applicationId.
+    info.put("Application Id", Option(appId).filter(_.nonEmpty).getOrElse(sc.applicationId))
+    info.put("Celeborn UI Enabled", "true")
+    // Derive key Celeborn runtime config from CelebornConf. Celeborn has no ProjectConstants
+    // version class, so runtime config stands in for version — it is more useful for
+    // diagnosing shuffle behavior anyway.
+    try {
+      val celebornConf = SparkUtils.fromSparkConf(sc.conf)
+      info.put("Celeborn Compression Codec", celebornConf.shuffleCompressionCodec.toString)
+      info.put("Celeborn Shuffle Writer Mode", celebornConf.shuffleWriterMode.toString)
+      info.put("Celeborn Push Replicate Enabled", celebornConf.clientPushReplicateEnabled.toString)
+      info.put("Celeborn Partition Split Mode", celebornConf.shufflePartitionSplitMode.toString)
+      info.put(
+        "Celeborn Partition Split Threshold",
+        org.apache.spark.util.Utils.bytesToString(celebornConf.shufflePartitionSplitThreshold))
+      info.put("Celeborn Fallback Policy", celebornConf.sparkShuffleFallbackPolicy.toString)
+    } catch {
+      case e: Throwable =>
+        logWarning("Failed to derive Celeborn conf for build info", e)
+    }
+    info.asScala.toMap
+  }
 }

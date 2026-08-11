@@ -20,7 +20,7 @@ package org.apache.spark.shuffle.celeborn.ui
 import org.apache.spark.shuffle.celeborn.CelebornStatusStore
 import org.apache.spark.ui.{SparkUI, SparkUITab}
 
-private[celeborn] class CelebornUITab(val store: CelebornStatusStore, sparkUI: SparkUI)
+private[celeborn] class CelebornUITab(val statusStore: CelebornStatusStore, sparkUI: SparkUI)
   extends SparkUITab(sparkUI, "celeborn") {
 
   override val name: String = "Celeborn"

@@ -17,40 +17,43 @@
 
 package org.apache.spark.shuffle.celeborn
 
-import com.fasterxml.jackson.annotation.JsonIgnore
-import org.apache.spark.util.kvstore.{KVIndex, KVStore}
+import org.apache.spark.shuffle.celeborn.ui._
+import org.apache.spark.util.kvstore.{KVStore, KVStoreView}
 
-private[celeborn] case class AggregatedTaskInfoUIData(
-    shuffleWriteBytes: Long,
-    shuffleWriteTimeMs: Long,
-    shuffleReadBytes: Long,
-    shuffleFetchWaitTimeMs: Long,
-    taskDurationMs: Long) {
-
-  @JsonIgnore
-  @KVIndex
-  def id: String = classOf[AggregatedTaskInfoUIData].getName
-}
-
-private[celeborn] class CelebornPropertiesUIData(
-    val info: Seq[(String, String)]) {
-
-  @JsonIgnore
-  @KVIndex
-  def id: String = classOf[CelebornPropertiesUIData].getName
-}
-
+/**
+ * Thin wrapper over Spark's status KVStore exposing typed read accessors for the
+ *  Celeborn UI entities written by [[CelebornListener]]. Accepts the base KVStore so it
+ *  works for both the live UI (ElementTrackingStore) and HistoryServer replay.
+ */
 private[celeborn] class CelebornStatusStore(store: KVStore) {
 
-  def aggregatedTaskInfo(): AggregatedTaskInfoUIData = {
-    val kClass = classOf[AggregatedTaskInfoUIData]
+  /** Build info summary, or an empty entity if not yet written. */
+  def buildInfo(): CelebornBuildInfoUIData = {
+    val kClass = classOf[CelebornBuildInfoUIData]
     try {
       store.read(kClass, kClass.getName)
     } catch {
-      case _: NoSuchElementException => AggregatedTaskInfoUIData(0L, 0L, 0L, 0L, 0L)
+      case _: NoSuchElementException => new CelebornBuildInfoUIData(Seq.empty)
     }
   }
 
+  /** All recorded shuffle assignments (shuffle -> worker topology), newest last. */
+  def assignmentInfos(): Seq[CelebornShuffleAssignmentUIData] = {
+    viewToSeq(store.view(classOf[CelebornShuffleAssignmentUIData]))
+  }
+
+  /** Per-policy fallback counts snapshot, or empty if no fallback recorded. */
+  def fallbackStats(): CelebornFallbackStatsUIData = {
+    val kClass = classOf[CelebornFallbackStatsUIData]
+    try {
+      store.read(kClass, kClass.getName)
+    } catch {
+      case _: NoSuchElementException =>
+        new CelebornFallbackStatsUIData(new java.util.HashMap[String, java.lang.Long]())
+    }
+  }
+
+  /** Celeborn properties (spark.celeborn.*) captured at job start, or empty if none. */
   def celebornProperties(): CelebornPropertiesUIData = {
     val kClass = classOf[CelebornPropertiesUIData]
     try {
@@ -60,8 +63,79 @@ private[celeborn] class CelebornStatusStore(store: KVStore) {
     }
   }
 
+  /** Reassign status snapshot, or all-false if no reassign recorded. */
+  def reassignStats(): CelebornReassignStatsUIData = {
+    val kClass = classOf[CelebornReassignStatsUIData]
+    try {
+      store.read(kClass, kClass.getName)
+    } catch {
+      case _: NoSuchElementException =>
+        new CelebornReassignStatsUIData(false, false, false, 0L)
+    }
+  }
+
+  /** Aggregated write-path timing breakdown, or all-zero if none recorded. */
+  def writeTimes(): CelebornWriteTimesUIData = {
+    val kClass = classOf[CelebornWriteTimesUIData]
+    try {
+      store.read(kClass, kClass.getName)
+    } catch {
+      case _: NoSuchElementException => new CelebornWriteTimesUIData(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    }
+  }
+
+  /** Per-worker push stats, newest last. */
+  def perWorkerWriteStats(): Seq[CelebornPerWorkerWriteStatsUIData] = {
+    viewToSeq(store.view(classOf[CelebornPerWorkerWriteStatsUIData]))
+  }
+
+  /** Aggregated read-path timing breakdown, or all-zero if none recorded. */
+  def readTimes(): CelebornReadTimesUIData = {
+    val kClass = classOf[CelebornReadTimesUIData]
+    try {
+      store.read(kClass, kClass.getName)
+    } catch {
+      case _: NoSuchElementException =>
+        new CelebornReadTimesUIData(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    }
+  }
+
+  /** Per-worker read stats, newest last. */
+  def perWorkerReadStats(): Seq[CelebornPerWorkerReadStatsUIData] = {
+    viewToSeq(store.view(classOf[CelebornPerWorkerReadStatsUIData]))
+  }
+
+  /** Per-shuffle write metrics snapshot, or empty if none recorded. */
+  def aggregatedWriteMetrics(): CelebornAggregatedWriteMetricsUIData = {
+    val kClass = classOf[CelebornAggregatedWriteMetricsUIData]
+    try {
+      store.read(kClass, kClass.getName)
+    } catch {
+      case _: NoSuchElementException =>
+        new CelebornAggregatedWriteMetricsUIData(new java.util.HashMap[
+          Int,
+          AggregatedShuffleWriteMetric]())
+    }
+  }
+
+  /** Global read/write totals snapshot, or zeros if none recorded. */
+  def aggregatedTaskInfo(): CelebornAggregatedTaskInfoUIData = {
+    val kClass = classOf[CelebornAggregatedTaskInfoUIData]
+    try {
+      store.read(kClass, kClass.getName)
+    } catch {
+      case _: NoSuchElementException => new CelebornAggregatedTaskInfoUIData(0L, 0L, 0L, 0L, 0L)
+    }
+  }
+
   def hasData(): Boolean = {
     val info = aggregatedTaskInfo()
     info.shuffleWriteBytes > 0 || info.shuffleReadBytes > 0
+  }
+
+  private def viewToSeq[T](view: KVStoreView[T]): Seq[T] = {
+    import scala.collection.JavaConverters._
+    org.apache.spark.util.Utils.tryWithResource(view.closeableIterator())(iter =>
+      iter.asScala.toList)
   }
 }
