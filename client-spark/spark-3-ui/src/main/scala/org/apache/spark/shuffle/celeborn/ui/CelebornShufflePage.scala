@@ -57,7 +57,6 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
   private def renderBody(request: HttpServletRequest): Seq[Node] = {
     val assignments = statusStore.assignmentInfos()
     val properties = statusStore.celebornProperties()
-    val reassign = statusStore.reassignStats()
     val taskInfo = statusStore.aggregatedTaskInfo()
     val writeTimes = statusStore.writeTimes()
     val perWorkerStats = statusStore.perWorkerWriteStats()
@@ -78,43 +77,27 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
     val summary: Seq[Node] =
       <div>
         <ul class="list-unstyled">
-          <li>Total Shuffle Write Bytes: {org.apache.spark.util.Utils.bytesToString(writeBytes)}</li>
-          <li>Total Shuffle Read Bytes: {org.apache.spark.util.Utils.bytesToString(readBytes)}</li>
-          <li>Compression Ratio:
+          <li>
+            <strong>Shuffle Write: </strong>
             {
-        if (writeBytes > 0)
-          f"${writeTimes.uncompressedBytes.toDouble / writeBytes.toDouble}%.2f"
-        else "N/A"
+        s"${org.apache.spark.util.Utils.bytesToString(writeBytes)} | Time: ${UIUtils.formatDuration(
+          writeMs)} | Speed: ${mbps(writeBytes, writeMs)} MB/s"
       }
-            (uncompressed {org.apache.spark.util.Utils.bytesToString(writeTimes.uncompressedBytes)}
-            / compressed {org.apache.spark.util.Utils.bytesToString(writeBytes)})</li>
-          <li>Client Observed Write Speed: {mbps(writeBytes, writeMs)} MB/s</li>
-          <li>Client Observed Read Speed: {mbps(readBytes, readMs)} MB/s</li>
-          <li>Shuffle Write Time / Task CPU Time: {pct(writeMs, cpuMs)}</li>
-          <li>Shuffle Read Time / Task CPU Time: {pct(readMs, cpuMs)}</li>
-          <li>Shuffle Duration (write+read) / Task CPU Time: {pct(writeMs + readMs, cpuMs)}</li>
-          <li>Shuffle Adjustments: partitionSplit={reassign.partitionSplit},
-            reviveTriggered={reassign.reviveTriggered}, stageRetry={reassign.stageRetry}</li>
-          <li>
-            <a href="#properties">Celeborn Properties</a> ({properties.info.length} entries)
           </li>
           <li>
-            <a href="#throughput">Shuffle Throughput</a>
+            <strong>Shuffle Read: </strong>
+            {
+        s"${org.apache.spark.util.Utils.bytesToString(readBytes)} | Time: ${UIUtils.formatDuration(
+          readMs)} | Speed: ${mbps(readBytes, readMs)} MB/s"
+      }
           </li>
           <li>
-            <a href="#write-times">Shuffle Write Times</a>
-          </li>
-          <li>
-            <a href="#read-times">Shuffle Read Times</a>
-          </li>
-          <li>
-            <a href="#write-servers">Shuffle Write Servers</a>
-          </li>
-          <li>
-            <a href="#read-servers">Shuffle Read Servers</a>
-          </li>
-          <li>
-            <a href="#assignments">Shuffle Assignments</a> ({assignments.length} shuffles)
+            <strong>Shuffle Duration (write+read) / Task Duration: </strong>
+            {
+        s"${pct(writeMs + readMs, cpuMs)} (Write ${pct(
+          writeMs,
+          cpuMs)}, Read ${pct(readMs, cpuMs)})"
+      }
           </li>
         </ul>
       </div>
