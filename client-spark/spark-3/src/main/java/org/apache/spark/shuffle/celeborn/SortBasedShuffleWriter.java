@@ -65,6 +65,10 @@ public class SortBasedShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
   private final int encodedAttemptId;
   private final TaskContext taskContext;
   private final ShuffleClient shuffleClient;
+  // CPU cost of copying serialized records (giant record path), flushed into PushState at close.
+  private long copyTimeNanos = 0;
+  // Total serialized (pre-compression) bytes written, flushed into PushState at close.
+  private long uncompressedBytes = 0;
   private final int numMappers;
   private final int numPartitions;
 
@@ -269,6 +273,7 @@ public class SortBasedShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
 
       final int rowSize = row.getSizeInBytes();
       final int serializedRecordSize = 4 + rowSize;
+      uncompressedBytes += serializedRecordSize;
 
       if (dataSize != null) {
         dataSize.add(serializedRecordSize);
@@ -277,22 +282,28 @@ public class SortBasedShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
       if (serializedRecordSize > pushBufferMaxSize) {
         byte[] giantBuffer = new byte[serializedRecordSize];
         Platform.putInt(giantBuffer, Platform.BYTE_ARRAY_OFFSET, Integer.reverseBytes(rowSize));
+        long _copyStart = System.nanoTime();
         Platform.copyMemory(
             row.getBaseObject(),
             row.getBaseOffset(),
             giantBuffer,
             Platform.BYTE_ARRAY_OFFSET + 4,
             rowSize);
+        copyTimeNanos += System.nanoTime() - _copyStart;
         pushGiantRecord(partitionId, giantBuffer, serializedRecordSize);
       } else {
+        long _copyStart = System.nanoTime();
         boolean success =
             pusher.insertRecord(
                 row.getBaseObject(), row.getBaseOffset(), rowSize, partitionId, true);
+        copyTimeNanos += System.nanoTime() - _copyStart;
         if (!success) {
           doPush();
+          _copyStart = System.nanoTime();
           success =
               pusher.insertRecord(
                   row.getBaseObject(), row.getBaseOffset(), rowSize, partitionId, true);
+          copyTimeNanos += System.nanoTime() - _copyStart;
           if (!success) {
             throw new CelebornIOException("Unable to push after switching pusher!");
           }
@@ -322,10 +333,12 @@ public class SortBasedShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
 
       final int serializedRecordSize = serBuffer.size();
       assert (serializedRecordSize > 0);
+      uncompressedBytes += serializedRecordSize;
 
       if (serializedRecordSize > pushBufferMaxSize) {
         pushGiantRecord(partitionId, serBuffer.getBuf(), serializedRecordSize);
       } else {
+        long _copyStart = System.nanoTime();
         boolean success =
             pusher.insertRecord(
                 serBuffer.getBuf(),
@@ -333,8 +346,10 @@ public class SortBasedShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
                 serializedRecordSize,
                 partitionId,
                 false);
+        copyTimeNanos += System.nanoTime() - _copyStart;
         if (!success) {
           doPush();
+          _copyStart = System.nanoTime();
           success =
               pusher.insertRecord(
                   serBuffer.getBuf(),
@@ -342,6 +357,7 @@ public class SortBasedShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
                   serializedRecordSize,
                   partitionId,
                   false);
+          copyTimeNanos += System.nanoTime() - _copyStart;
           if (!success) {
             throw new IOException("Unable to push after switching pusher!");
           }
@@ -379,6 +395,16 @@ public class SortBasedShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
   }
 
   private void close(boolean iteratorHasNext) throws IOException {
+    if (copyTimeNanos > 0) {
+      shuffleClient
+          .getPushState(Utils.makeMapKey(shuffleId, mapId, encodedAttemptId))
+          .addCopyTime(copyTimeNanos);
+    }
+    if (uncompressedBytes > 0) {
+      shuffleClient
+          .getPushState(Utils.makeMapKey(shuffleId, mapId, encodedAttemptId))
+          .addUncompressedBytes(uncompressedBytes);
+    }
     logger.info("Memory used {}", Utils.bytesToString(pusher.getUsed()));
     long pushStartTime = System.nanoTime();
     pusher.pushData(false);
