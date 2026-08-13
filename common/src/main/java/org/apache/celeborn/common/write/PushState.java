@@ -67,8 +67,6 @@ public class PushState {
 
   // CPU cost of compressing push data (ShuffleClientImpl.pushOrMergeData).
   private final LongAdder compressTimeNanos = new LongAdder();
-  // CPU cost of serializing records in the engine shuffle writer.
-  private final LongAdder serializeTimeNanos = new LongAdder();
   // CPU cost of copying serialized records into the push buffer (writer write0 / fastWrite0).
   private final LongAdder copyTimeNanos = new LongAdder();
   // Total serialized (pre-compression) bytes written, for the UI compression ratio.
@@ -76,10 +74,6 @@ public class PushState {
 
   public void addCompressTime(long nanos) {
     compressTimeNanos.add(nanos);
-  }
-
-  public void addSerializeTime(long nanos) {
-    serializeTimeNanos.add(nanos);
   }
 
   public void addCopyTime(long nanos) {
@@ -92,10 +86,6 @@ public class PushState {
 
   public long getCompressTimeMs() {
     return TimeUnit.NANOSECONDS.toMillis(compressTimeNanos.sum());
-  }
-
-  public long getSerializeTimeMs() {
-    return TimeUnit.NANOSECONDS.toMillis(serializeTimeNanos.sum());
   }
 
   public long getCopyTimeMs() {

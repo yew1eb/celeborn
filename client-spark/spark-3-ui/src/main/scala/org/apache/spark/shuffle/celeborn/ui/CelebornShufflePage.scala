@@ -73,6 +73,15 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
       if (ms <= 0) "N/A" else f"${bytes.toDouble / 1000.0 / 1000.0 / (ms.toDouble / 1000.0)}%.2f"
     def pct(part: Long, total: Long): String =
       if (total <= 0) "N/A" else f"${part.toDouble * 100.0 / total.toDouble}%.1f%%"
+    val compressedBytes = perWorkerStats.map(_.pushBytes).sum
+    def compressionRatioStr: String =
+      if (writeTimes.uncompressedBytes <= 0 || compressedBytes <= 0) "N/A"
+      else {
+        val ratio = writeTimes.uncompressedBytes.toDouble / compressedBytes
+        f"$ratio%.2f x (original ${org.apache.spark.util.Utils.bytesToString(
+          writeTimes.uncompressedBytes)}, compressed ${org.apache.spark.util.Utils.bytesToString(
+          compressedBytes)})"
+      }
 
     val summary: Seq[Node] =
       <div>
@@ -83,6 +92,10 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
         s"${org.apache.spark.util.Utils.bytesToString(writeBytes)} | Time: ${UIUtils.formatDuration(
           writeMs)} | Speed: ${mbps(writeBytes, writeMs)} MB/s"
       }
+          </li>
+          <li>
+            <strong>Compression Ratio: </strong>
+            {compressionRatioStr}
           </li>
           <li>
             <strong>Shuffle Read: </strong>
@@ -134,7 +147,6 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
       </table>
 
     val writeTimesFields = Seq(
-      "Serialize" -> org.apache.spark.util.Utils.msDurationToString(writeTimes.serializeTimeMs),
       "Copy" -> org.apache.spark.util.Utils.msDurationToString(writeTimes.copyTimeMs),
       "Queue Wait" -> org.apache.spark.util.Utils.msDurationToString(writeTimes.queueWaitTimeMs),
       "Background Compress" -> org.apache.spark.util.Utils.msDurationToString(

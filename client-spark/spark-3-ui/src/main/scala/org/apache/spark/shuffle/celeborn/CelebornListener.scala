@@ -53,7 +53,6 @@ private[celeborn] class CelebornListener(val kvstore: KVStore, val conf: SparkCo
   // Aggregated write-path timing breakdown (ms) from CelebornWriteMetricsEvent. Uses AtomicLong
   // so concurrent events on the status queue accumulate safely.
   private val aggCopyTimeMs = new java.util.concurrent.atomic.AtomicLong(0)
-  private val aggSerializeTimeMs = new java.util.concurrent.atomic.AtomicLong(0)
   private val aggCompressTimeMs = new java.util.concurrent.atomic.AtomicLong(0)
   private val aggQueueWaitTimeMs = new java.util.concurrent.atomic.AtomicLong(0)
   private val aggQueueStallTimeMs = new java.util.concurrent.atomic.AtomicLong(0)
@@ -206,7 +205,6 @@ private[celeborn] class CelebornListener(val kvstore: KVStore, val conf: SparkCo
       import scala.collection.JavaConverters._
       val w = e.writeMetrics
       aggCopyTimeMs.addAndGet(w.copyTimeMs)
-      aggSerializeTimeMs.addAndGet(w.serializeTimeMs)
       aggCompressTimeMs.addAndGet(w.compressTimeMs)
       aggQueueWaitTimeMs.addAndGet(w.queueWaitTimeMs)
       aggQueueStallTimeMs.addAndGet(w.queueStallTimeMs)
@@ -277,7 +275,6 @@ private[celeborn] class CelebornListener(val kvstore: KVStore, val conf: SparkCo
     // Write-path timing breakdown (ms) + per-worker push stats, from CelebornWriteMetricsEvent.
     kvstore.write(new CelebornWriteTimesUIData(
       aggCopyTimeMs.get(),
-      aggSerializeTimeMs.get(),
       aggCompressTimeMs.get(),
       aggQueueWaitTimeMs.get(),
       aggQueueStallTimeMs.get(),

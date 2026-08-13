@@ -65,8 +65,6 @@ public class SortBasedShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
   private final int encodedAttemptId;
   private final TaskContext taskContext;
   private final ShuffleClient shuffleClient;
-  // CPU cost of serializing records in write0, flushed into PushState at close.
-  private long serializeTimeNanos = 0;
   // CPU cost of copying serialized records (giant record path), flushed into PushState at close.
   private long copyTimeNanos = 0;
   // Total serialized (pre-compression) bytes written, flushed into PushState at close.
@@ -294,14 +292,18 @@ public class SortBasedShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
         copyTimeNanos += System.nanoTime() - _copyStart;
         pushGiantRecord(partitionId, giantBuffer, serializedRecordSize);
       } else {
+        long _copyStart = System.nanoTime();
         boolean success =
             pusher.insertRecord(
                 row.getBaseObject(), row.getBaseOffset(), rowSize, partitionId, true);
+        copyTimeNanos += System.nanoTime() - _copyStart;
         if (!success) {
           doPush();
+          _copyStart = System.nanoTime();
           success =
               pusher.insertRecord(
                   row.getBaseObject(), row.getBaseOffset(), rowSize, partitionId, true);
+          copyTimeNanos += System.nanoTime() - _copyStart;
           if (!success) {
             throw new CelebornIOException("Unable to push after switching pusher!");
           }
@@ -325,18 +327,18 @@ public class SortBasedShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
       final K key = record._1();
       final int partitionId = partitioner.getPartition(key);
       serBuffer.reset();
-      long serializeStartNanos = System.nanoTime();
       serOutputStream.writeKey(key, OBJECT_CLASS_TAG);
       serOutputStream.writeValue(record._2(), OBJECT_CLASS_TAG);
       serOutputStream.flush();
-      serializeTimeNanos += System.nanoTime() - serializeStartNanos;
 
       final int serializedRecordSize = serBuffer.size();
       assert (serializedRecordSize > 0);
+      uncompressedBytes += serializedRecordSize;
 
       if (serializedRecordSize > pushBufferMaxSize) {
         pushGiantRecord(partitionId, serBuffer.getBuf(), serializedRecordSize);
       } else {
+        long _copyStart = System.nanoTime();
         boolean success =
             pusher.insertRecord(
                 serBuffer.getBuf(),
@@ -344,8 +346,10 @@ public class SortBasedShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
                 serializedRecordSize,
                 partitionId,
                 false);
+        copyTimeNanos += System.nanoTime() - _copyStart;
         if (!success) {
           doPush();
+          _copyStart = System.nanoTime();
           success =
               pusher.insertRecord(
                   serBuffer.getBuf(),
@@ -353,6 +357,7 @@ public class SortBasedShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
                   serializedRecordSize,
                   partitionId,
                   false);
+          copyTimeNanos += System.nanoTime() - _copyStart;
           if (!success) {
             throw new IOException("Unable to push after switching pusher!");
           }
@@ -390,11 +395,6 @@ public class SortBasedShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
   }
 
   private void close(boolean iteratorHasNext) throws IOException {
-    if (serializeTimeNanos > 0) {
-      shuffleClient
-          .getPushState(Utils.makeMapKey(shuffleId, mapId, encodedAttemptId))
-          .addSerializeTime(serializeTimeNanos);
-    }
     if (copyTimeNanos > 0) {
       shuffleClient
           .getPushState(Utils.makeMapKey(shuffleId, mapId, encodedAttemptId))

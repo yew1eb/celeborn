@@ -113,7 +113,6 @@ private[celeborn] class CelebornAggregatedTaskInfoUIData(
  */
 private[celeborn] class CelebornWriteTimesUIData(
     val copyTimeMs: Long,
-    val serializeTimeMs: Long,
     val compressTimeMs: Long,
     val queueWaitTimeMs: Long,
     val queueStallTimeMs: Long,

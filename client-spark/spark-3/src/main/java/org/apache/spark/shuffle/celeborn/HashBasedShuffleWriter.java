@@ -71,8 +71,6 @@ public class HashBasedShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
   private final int encodedAttemptId;
   private final TaskContext taskContext;
   private final ShuffleClient shuffleClient;
-  // CPU cost of serializing records in write0, flushed into PushState at close.
-  private long serializeTimeNanos = 0;
   // CPU cost of copying serialized records into the push buffer in write0, flushed into
   // PushState at close.
   private long copyTimeNanos = 0;
@@ -268,21 +266,22 @@ public class HashBasedShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
       final K key = record._1();
       final int partitionId = partitioner.getPartition(key);
       serBuffer.reset();
-      long serializeStartNanos = System.nanoTime();
       serOutputStream.writeKey(key, OBJECT_CLASS_TAG);
       serOutputStream.writeValue(record._2(), OBJECT_CLASS_TAG);
       serOutputStream.flush();
-      serializeTimeNanos += System.nanoTime() - serializeStartNanos;
 
       final int serializedRecordSize = serBuffer.size();
       assert (serializedRecordSize > 0);
+      uncompressedBytes += serializedRecordSize;
 
       if (serializedRecordSize > PUSH_BUFFER_MAX_SIZE) {
         pushGiantRecord(partitionId, serBuffer.getBuf(), serializedRecordSize);
       } else {
         int offset = getOrUpdateOffset(partitionId, serializedRecordSize);
         byte[] buffer = getOrCreateBuffer(partitionId);
+        long _copyStart = System.nanoTime();
         System.arraycopy(serBuffer.getBuf(), 0, buffer, offset, serializedRecordSize);
+        copyTimeNanos += System.nanoTime() - _copyStart;
         sendOffsets[partitionId] = offset + serializedRecordSize;
       }
       tmpRecordsWritten++;
@@ -391,11 +390,6 @@ public class HashBasedShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
   }
 
   private void close(boolean iteratorHasNext) throws IOException, InterruptedException {
-    if (serializeTimeNanos > 0) {
-      shuffleClient
-          .getPushState(Utils.makeMapKey(shuffleId, mapId, encodedAttemptId))
-          .addSerializeTime(serializeTimeNanos);
-    }
     if (copyTimeNanos > 0) {
       shuffleClient
           .getPushState(Utils.makeMapKey(shuffleId, mapId, encodedAttemptId))

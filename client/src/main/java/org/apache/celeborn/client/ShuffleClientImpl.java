@@ -1952,7 +1952,6 @@ public class ShuffleClientImpl extends ShuffleClient {
     WriteMetrics wm =
         new WriteMetrics(
             pushState.getCopyTimeMs(),
-            pushState.getSerializeTimeMs(),
             pushState.getCompressTimeMs(),
             pushState.getQueueWaitTimeMs(),
             pushState.getQueueStallTimeMs(),
@@ -2396,7 +2395,6 @@ public class ShuffleClientImpl extends ShuffleClient {
     long inflightWaitMs = 0;
     long drainWaitMs = 0;
     long compressMs = 0;
-    long serializeMs = 0;
     long slowPushes = 0;
     long maxPushRttMs = 0;
     if (pushState != null) {
@@ -2405,7 +2403,6 @@ public class ShuffleClientImpl extends ShuffleClient {
       inflightWaitMs = pushState.getInflightWaitTimeMs();
       drainWaitMs = pushState.getDrainWaitTimeMs();
       compressMs = pushState.getCompressTimeMs();
-      serializeMs = pushState.getSerializeTimeMs();
       slowPushes = pushState.getSlowPushCount();
       maxPushRttMs = pushState.getMaxPushRttMs();
     }
@@ -2467,7 +2464,7 @@ public class ShuffleClientImpl extends ShuffleClient {
     logger.info(
         "Write stats summary for shuffle {} map {} attempt {}: queueWait={}ms, "
             + "queueStall={}ms, inflightWait={}ms, drainWait={}ms, compress={}ms, "
-            + "serialize={}ms, slowPush(>{}ms)={}, maxPushRtt={}ms, workers=[{}]",
+            + "slowPush(>{}ms)={}, maxPushRtt={}ms, workers=[{}]",
         shuffleId,
         mapId,
         attemptId,
@@ -2476,7 +2473,6 @@ public class ShuffleClientImpl extends ShuffleClient {
         inflightWaitMs,
         drainWaitMs,
         compressMs,
-        serializeMs,
         conf.clientPushSlowPushThresholdMs(),
         slowPushes,
         maxPushRttMs,

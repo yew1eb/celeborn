@@ -382,7 +382,6 @@ message PbMapperEnd {
   // Write-path timing breakdown (ms) for the UI. Optional — populated only when
   // celeborn.client.spark.ui.enabled. Field numbers 10-19 reserved for write times.
   int64 copyTimeMs = 10;
-  int64 serializeTimeMs = 11;
   int64 compressTimeMs = 12;
   int64 queueWaitTimeMs = 13;
   int64 queueStallTimeMs = 14;

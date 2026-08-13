@@ -56,7 +56,6 @@ sealed trait ClientMessage extends Message
 // when celeborn.client.spark.ui.enabled.
 case class WriteMetrics(
     copyTimeMs: Long,
-    serializeTimeMs: Long,
     compressTimeMs: Long,
     queueWaitTimeMs: Long,
     queueStallTimeMs: Long,
@@ -818,7 +817,6 @@ object ControlMessages extends Logging {
           java.lang.Long.valueOf).toSeq.asJava)
       writeMetrics.foreach { w =>
         builder.setCopyTimeMs(w.copyTimeMs)
-          .setSerializeTimeMs(w.serializeTimeMs)
           .setCompressTimeMs(w.compressTimeMs)
           .setQueueWaitTimeMs(w.queueWaitTimeMs)
           .setQueueStallTimeMs(w.queueStallTimeMs)
@@ -1382,7 +1380,6 @@ object ControlMessages extends Logging {
           {
             val w = WriteMetrics(
               pbMapperEnd.getCopyTimeMs,
-              pbMapperEnd.getSerializeTimeMs,
               pbMapperEnd.getCompressTimeMs,
               pbMapperEnd.getQueueWaitTimeMs,
               pbMapperEnd.getQueueStallTimeMs,
@@ -1391,7 +1388,7 @@ object ControlMessages extends Logging {
               pbMapperEnd.getSlowPushCount,
               pbMapperEnd.getMaxPushRttMs,
               pbMapperEnd.getUncompressedBytes)
-            if (w.copyTimeMs == 0 && w.serializeTimeMs == 0 && w.compressTimeMs == 0 &&
+            if (w.copyTimeMs == 0 && w.compressTimeMs == 0 &&
               w.queueWaitTimeMs == 0 && w.drainWaitTimeMs == 0 && w.slowPushCount == 0) {
               None
             } else {
