@@ -21,6 +21,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -55,6 +56,9 @@ import org.apache.celeborn.service.deploy.master.clustermeta.ResourceProtos.Type
 public class HeartbeatAggregator {
   private static final Logger LOG = LoggerFactory.getLogger(HeartbeatAggregator.class);
 
+  /** Minimum flush interval, guards against a misconfigured 0/negative value busy-looping. */
+  private static final long MIN_BATCH_INTERVAL_MS = 100L;
+
   private final HARaftServer ratisServer;
   private final int batchSize;
 
@@ -63,6 +67,13 @@ public class HeartbeatAggregator {
       new LinkedHashMap<>();
   private LinkedHashMap<String, ResourceProtos.AppHeartbeatRequest> appHeartbeats =
       new LinkedHashMap<>();
+
+  /**
+   * Guards the early-flush path so a burst that crosses the size threshold does not queue a flush
+   * task per offer. CAS-set when scheduling, cleared at the start of {@link #flush()}; this caps
+   * pending early-flush tasks at one while still allowing the next burst to re-arm promptly.
+   */
+  private final AtomicBoolean flushScheduled = new AtomicBoolean(false);
 
   private final ScheduledExecutorService flushExecutor;
   private final AtomicLong flushCount = new AtomicLong(0);
@@ -73,6 +84,14 @@ public class HeartbeatAggregator {
     this.ratisServer = ratisServer;
     this.batchSize = conf.masterHaHeartbeatBatchSize();
     long batchIntervalMs = conf.masterHaHeartbeatBatchIntervalMs();
+    if (batchIntervalMs < MIN_BATCH_INTERVAL_MS) {
+      LOG.warn(
+          "celeborn.master.ha.heartbeat.batch.interval {} ms is below the minimum {} ms; "
+              + "clamping to the minimum to avoid busy-looping the flush thread.",
+          batchIntervalMs,
+          MIN_BATCH_INTERVAL_MS);
+      batchIntervalMs = MIN_BATCH_INTERVAL_MS;
+    }
     this.flushExecutor =
         ThreadUtils.newDaemonSingleThreadScheduledExecutor("master-heartbeat-aggregator");
     this.flushExecutor.scheduleWithFixedDelay(
@@ -130,8 +149,10 @@ public class HeartbeatAggregator {
 
   private void flushEarlyIfNecessary() {
     // Must hold lock. The size threshold only seals a batch early; flushing still happens on the
-    // single flush thread to keep submission serialized.
-    if (workerHeartbeats.size() + appHeartbeats.size() >= batchSize) {
+    // single flush thread to keep submission serialized. The CAS guard caps pending early-flush
+    // tasks at one: without it a burst crossing the threshold would queue a task per offer.
+    if (workerHeartbeats.size() + appHeartbeats.size() >= batchSize
+        && flushScheduled.compareAndSet(false, true)) {
       flushExecutor.execute(this::flushSafely);
     }
   }
@@ -150,6 +171,9 @@ public class HeartbeatAggregator {
     Map<String, ResourceProtos.AppHeartbeatRequest> drainedApps;
     lock.lock();
     try {
+      // Clear the early-flush re-arm guard first so the next burst that crosses the threshold can
+      // schedule again, even when this invocation turns out to be a no-op (empty window).
+      flushScheduled.set(false);
       if (workerHeartbeats.isEmpty() && appHeartbeats.isEmpty()) {
         return;
       }
@@ -159,6 +183,14 @@ public class HeartbeatAggregator {
       appHeartbeats = new LinkedHashMap<>();
     } finally {
       lock.unlock();
+    }
+
+    // Standby (non-leader) masters also run a flush thread. Pending heartbeats drained here are
+    // not committable (this master is not the leader) and are renewable (re-sent next interval),
+    // so discard them instead of submitting a request that would fail with NotLeader. This keeps
+    // the pending gauge from growing on standbys and avoids NotLeader exception log noise.
+    if (!ratisServer.isLeader()) {
+      return;
     }
 
     ResourceRequest batchRequest =
