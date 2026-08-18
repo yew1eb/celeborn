@@ -93,7 +93,7 @@ public class HeartbeatAggregatorSuiteJ {
     Assert.assertEquals(1, metaSystem.workersMap.size());
     long appliedIndexAfterRegister = lastAppliedIndex();
 
-    // 4 heartbeat offers: 3 for the same worker (dedupe to 1), 1 for an app.
+    // 4 heartbeat offers: 3 for the same worker (no dedup, all buffered), 1 for an app.
     long time1 = System.currentTimeMillis();
     long time2 = time1 + 10;
     metaSystem.handleWorkerHeartbeat(
@@ -153,7 +153,7 @@ public class HeartbeatAggregatorSuiteJ {
         "Expected heartbeats to be merged into few raft log entries, but got " + newEntries,
         newEntries >= 1 && newEntries <= 2);
 
-    // Last-write-wins within one window: the worker keeps the newest heartbeat time.
+    // Apply order follows insertion order, so the newest time wins for the worker.
     WorkerInfo workerInfo = metaSystem.workersMap.values().iterator().next();
     Assert.assertEquals("host1", workerInfo.host());
     Assert.assertEquals(time2, workerInfo.lastHeartbeat());

@@ -17,8 +17,8 @@
 
 package org.apache.celeborn.service.deploy.master.clustermeta.ha;
 
-import java.util.LinkedHashMap;
-import java.util.Map;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -41,17 +41,21 @@ import org.apache.celeborn.service.deploy.master.clustermeta.ResourceProtos.Type
  * and one apply instead of N.
  *
  * <p>Concurrency model (borrowing Kafka KRaft's BatchAccumulator): multiple producer threads offer
- * heartbeats under a short lock; a single flush thread swaps out the pending maps under the same
+ * heartbeats under a short lock; a single flush thread swaps out the pending buffers under the same
  * lock and submits the batch to raft outside the lock.
  *
  * <p>Flush semantics (borrowing TiKV's cmd-batch): at each flush tick, whatever is pending is
  * drained as-is; the size threshold only seals a batch early, the aggregator never waits to fill a
  * batch.
  *
- * <p>Heartbeats are keyed by worker/app id with last-write-wins inside one window, which both
- * deduplicates retries and naturally bounds the pending maps by the number of workers plus the
- * number of running applications. A batch that fails to submit (e.g. leadership change) is dropped
- * and logged; heartbeats are self-healing on the next interval.
+ * <p>Heartbeats are buffered as-is (not deduplicated). Per-key dedup would be dormant in steady
+ * state because the heartbeat intervals (worker 30s, app 10s) are much larger than the default 1s
+ * flush window, and even when retries make a key repeat within a window the final meta state is
+ * unchanged (last apply wins). The pending count is bounded in practice by the heartbeat arrival
+ * rate times the flush interval and is monitored by {@code HeartbeatBatchPendingCount}; a stalled
+ * flush is surfaced via that gauge rather than backpressure, since the reply path never waits for
+ * raft. A batch that fails to submit (e.g. leadership change) is dropped and logged; heartbeats are
+ * self-healing on the next interval.
  */
 public class HeartbeatAggregator {
   private static final Logger LOG = LoggerFactory.getLogger(HeartbeatAggregator.class);
@@ -63,10 +67,8 @@ public class HeartbeatAggregator {
   private final int batchSize;
 
   private final ReentrantLock lock = new ReentrantLock();
-  private LinkedHashMap<String, ResourceProtos.WorkerHeartbeatRequest> workerHeartbeats =
-      new LinkedHashMap<>();
-  private LinkedHashMap<String, ResourceProtos.AppHeartbeatRequest> appHeartbeats =
-      new LinkedHashMap<>();
+  private ArrayList<ResourceProtos.WorkerHeartbeatRequest> workerHeartbeats = new ArrayList<>();
+  private ArrayList<ResourceProtos.AppHeartbeatRequest> appHeartbeats = new ArrayList<>();
 
   /**
    * Guards the early-flush path so a burst that crosses the size threshold does not queue a flush
@@ -105,7 +107,7 @@ public class HeartbeatAggregator {
   public void offerWorkerHeartbeat(ResourceProtos.WorkerHeartbeatRequest heartbeat) {
     lock.lock();
     try {
-      workerHeartbeats.put(workerKey(heartbeat), heartbeat);
+      workerHeartbeats.add(heartbeat);
       flushEarlyIfNecessary();
     } finally {
       lock.unlock();
@@ -115,7 +117,7 @@ public class HeartbeatAggregator {
   public void offerAppHeartbeat(ResourceProtos.AppHeartbeatRequest heartbeat) {
     lock.lock();
     try {
-      appHeartbeats.put(heartbeat.getAppId(), heartbeat);
+      appHeartbeats.add(heartbeat);
       flushEarlyIfNecessary();
     } finally {
       lock.unlock();
@@ -167,8 +169,8 @@ public class HeartbeatAggregator {
   }
 
   private void flush() {
-    Map<String, ResourceProtos.WorkerHeartbeatRequest> drainedWorkers;
-    Map<String, ResourceProtos.AppHeartbeatRequest> drainedApps;
+    List<ResourceProtos.WorkerHeartbeatRequest> drainedWorkers;
+    List<ResourceProtos.AppHeartbeatRequest> drainedApps;
     lock.lock();
     try {
       // Clear the early-flush re-arm guard first so the next burst that crosses the threshold can
@@ -178,9 +180,9 @@ public class HeartbeatAggregator {
         return;
       }
       drainedWorkers = workerHeartbeats;
-      workerHeartbeats = new LinkedHashMap<>();
+      workerHeartbeats = new ArrayList<>();
       drainedApps = appHeartbeats;
-      appHeartbeats = new LinkedHashMap<>();
+      appHeartbeats = new ArrayList<>();
     } finally {
       lock.unlock();
     }
@@ -199,8 +201,8 @@ public class HeartbeatAggregator {
             .setRequestId(MasterClient.genRequestId())
             .setBatchHeartbeatRequest(
                 ResourceProtos.BatchHeartbeatRequest.newBuilder()
-                    .addAllWorkerHeartbeats(drainedWorkers.values())
-                    .addAllAppHeartbeats(drainedApps.values())
+                    .addAllWorkerHeartbeats(drainedWorkers)
+                    .addAllAppHeartbeats(drainedApps)
                     .build())
             .build();
     lastBatchSize = drainedWorkers.size() + drainedApps.size();
@@ -216,17 +218,5 @@ public class HeartbeatAggregator {
           drainedWorkers.size(),
           drainedApps.size());
     }
-  }
-
-  private static String workerKey(ResourceProtos.WorkerHeartbeatRequest heartbeat) {
-    return heartbeat.getHost()
-        + ":"
-        + heartbeat.getRpcPort()
-        + ":"
-        + heartbeat.getPushPort()
-        + ":"
-        + heartbeat.getFetchPort()
-        + ":"
-        + heartbeat.getReplicatePort();
   }
 }
