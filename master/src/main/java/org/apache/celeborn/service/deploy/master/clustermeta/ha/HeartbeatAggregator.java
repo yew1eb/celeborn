@@ -22,6 +22,7 @@ import java.util.List;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -71,6 +72,14 @@ public class HeartbeatAggregator {
   // Incremented before enqueue so a flush always sees pending >= actual queue size (never
   // negative); also backs HeartbeatBatchPendingCount and the early-flush threshold.
   private final AtomicInteger pending = new AtomicInteger(0);
+
+  /**
+   * Guards the early-flush path so that while pending stays at or above the size threshold (e.g.
+   * during a raft stall that blocks {@code submitRequest}), at most one extra flush task is queued
+   * instead of one task per offer into the executor's unbounded queue. CAS-set when scheduling,
+   * cleared at the start of {@link #flush()} so the next burst can re-arm promptly.
+   */
+  private final AtomicBoolean flushScheduled = new AtomicBoolean(false);
 
   private final ScheduledExecutorService flushExecutor;
   private final AtomicLong flushCount = new AtomicLong(0);
@@ -124,11 +133,11 @@ public class HeartbeatAggregator {
   }
 
   private void maybeFlushEarly() {
-    // No CAS guard: under a burst each offer that crosses the threshold queues a flush task, but
-    // the single flush thread runs them serially and the first drains the queue, so the rest are
-    // no-op (drained == 0) returns. The redundant tasks are negligible at production heartbeat
-    // rates.
-    if (pending.get() >= batchSize) {
+    // The size threshold only seals a batch early; flushing still happens on the single flush
+    // thread to keep submission serialized. The CAS guard caps queued early-flush tasks at one:
+    // without it, every offer while pending stays above the threshold would enqueue another
+    // (redundant but harmless) task into the executor's unbounded DelayedWorkQueue.
+    if (pending.get() >= batchSize && flushScheduled.compareAndSet(false, true)) {
       flushExecutor.execute(this::flushSafely);
     }
   }
@@ -143,6 +152,10 @@ public class HeartbeatAggregator {
   }
 
   private void flush() {
+    // Clear the early-flush re-arm guard before draining (not after), so offers that arrive while
+    // this flush is in progress can schedule the next early flush; their items are either drained
+    // by this flush below or picked up by the one they scheduled.
+    flushScheduled.set(false);
     List<ResourceProtos.WorkerHeartbeatRequest> drainedWorkers = new ArrayList<>();
     workerQueue.drainTo(drainedWorkers);
     List<ResourceProtos.AppHeartbeatRequest> drainedApps = new ArrayList<>();
