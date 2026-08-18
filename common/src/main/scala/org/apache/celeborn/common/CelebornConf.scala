@@ -3096,10 +3096,7 @@ object CelebornConf extends Logging {
       .doc(
         "Whether to aggregate worker/app heartbeats on the raft leader and flush them " +
           "periodically as a single BatchHeartbeat raft log entry, reducing raft log entries, " +
-          "fsyncs and state machine applies by roughly the number of heartbeats per flush window. " +
-          "Only enable this after all masters are upgraded to a version that supports the " +
-          "BatchHeartbeat meta request type, otherwise masters running older versions will fail " +
-          "to apply the batched log entries.")
+          "fsyncs and state machine applies by roughly the number of heartbeats per flush window.")
       .booleanConf
       .createWithDefault(false)
 
