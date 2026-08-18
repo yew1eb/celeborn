@@ -817,7 +817,6 @@ class CelebornConf(loadDefaults: Boolean) extends Cloneable with Logging with Se
   def haMasterRatisSnapshotRetentionFileNum: Int = get(HA_MASTER_RATIS_SNAPSHOT_RETENTION_FILE_NUM)
   def masterHaHeartbeatBatchEnabled: Boolean = get(MASTER_HA_HEARTBEAT_BATCH_ENABLED)
   def masterHaHeartbeatBatchIntervalMs: Long = get(MASTER_HA_HEARTBEAT_BATCH_INTERVAL)
-  def masterHaHeartbeatBatchSize: Int = get(MASTER_HA_HEARTBEAT_BATCH_SIZE)
 
   def masterPersistWorkerNetworkLocation: Boolean = get(MASTER_PERSIST_WORKER_NETWORK_LOCATION)
   def haRatisCustomConfigs: JMap[String, String] = {
@@ -3112,17 +3111,6 @@ object CelebornConf extends Logging {
           "timeouts (120s/300s by default).")
       .timeConf(TimeUnit.MILLISECONDS)
       .createWithDefaultString("1s")
-
-  val MASTER_HA_HEARTBEAT_BATCH_SIZE: ConfigEntry[Int] =
-    buildConf("celeborn.master.ha.heartbeat.batch.size")
-      .categories("ha")
-      .version("0.7.0")
-      .doc(
-        "Flush aggregated heartbeats early once the pending count reaches this threshold. Note " +
-          "that the apply cost of a single batched log entry grows linearly with the batch size, " +
-          "do not increase this blindly.")
-      .intConf
-      .createWithDefault(500)
 
   val MASTER_PERSIST_WORKER_NETWORK_LOCATION: ConfigEntry[Boolean] =
     buildConf("celeborn.master.persist.workerNetworkLocation")

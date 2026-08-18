@@ -40,7 +40,6 @@ public class HeartbeatAggregatorSuiteJ {
     CelebornConf conf = new CelebornConf();
     conf.set(CelebornConf.MASTER_HA_HEARTBEAT_BATCH_ENABLED().key(), "true");
     conf.set(CelebornConf.MASTER_HA_HEARTBEAT_BATCH_INTERVAL().key(), "100ms");
-    conf.set(CelebornConf.MASTER_HA_HEARTBEAT_BATCH_SIZE().key(), "500");
     metaSystem = new HAMasterMetaManager(null, conf);
     MetaHandler handler = new MetaHandler(metaSystem);
     File tmpDir = File.createTempFile("celeborn-ratis-tmp", "for-test-only");
