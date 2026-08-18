@@ -60,9 +60,6 @@ import org.apache.celeborn.service.deploy.master.clustermeta.ResourceProtos.Type
 public class HeartbeatAggregator {
   private static final Logger LOG = LoggerFactory.getLogger(HeartbeatAggregator.class);
 
-  /** Minimum flush interval, guards against a misconfigured 0/negative value busy-looping. */
-  private static final long MIN_BATCH_INTERVAL_MS = 100L;
-
   private final HARaftServer ratisServer;
   private final int batchSize;
 
@@ -86,14 +83,6 @@ public class HeartbeatAggregator {
     this.ratisServer = ratisServer;
     this.batchSize = conf.masterHaHeartbeatBatchSize();
     long batchIntervalMs = conf.masterHaHeartbeatBatchIntervalMs();
-    if (batchIntervalMs < MIN_BATCH_INTERVAL_MS) {
-      LOG.warn(
-          "celeborn.master.ha.heartbeat.batch.interval {} ms is below the minimum {} ms; "
-              + "clamping to the minimum to avoid busy-looping the flush thread.",
-          batchIntervalMs,
-          MIN_BATCH_INTERVAL_MS);
-      batchIntervalMs = MIN_BATCH_INTERVAL_MS;
-    }
     this.flushExecutor =
         ThreadUtils.newDaemonSingleThreadScheduledExecutor("master-heartbeat-aggregator");
     this.flushExecutor.scheduleWithFixedDelay(
