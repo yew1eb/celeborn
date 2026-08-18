@@ -35,17 +35,10 @@ import org.apache.celeborn.service.deploy.master.clustermeta.ResourceProtos.Type
 
 /**
  * Aggregates worker/app heartbeats on the raft leader and flushes them as a single
- * {@link Type#BatchHeartbeat} raft log entry per {@code batch.interval} (N heartbeats cost one
- * replication/fsync/apply instead of N). Following the repository's ReviveManager pattern:
- * producers offer to {@link LinkedBlockingQueue}s, a single flush thread drains via
+ * {@link Type#BatchHeartbeat} raft log entry per {@code batch.interval}, so N heartbeats cost one
+ * replication/fsync/apply instead of N. Following the repository's ReviveManager pattern: producers
+ * offer to {@link LinkedBlockingQueue}s, a single flush thread drains via
  * {@link LinkedBlockingQueue#drainTo} and submits outside any lock.
- *
- * <p>Flush is purely time-driven (no size-based early flush): heartbeats are periodic, tolerate
- * the interval latency, and a size threshold would be dormant at typical scale or multiply raft
- * writes at large scale. Queue depth is bounded by arrival rate times the interval and surfaced by
- * the pre-existing {@code RatisApplyCompletedIndex} going flat, not by backpressure (the reply
- * path never waits for raft). A failed submit (e.g. leadership change) drops the batch; heartbeats
- * self-heal next interval.
  */
 public class HeartbeatAggregator {
   private static final Logger LOG = LoggerFactory.getLogger(HeartbeatAggregator.class);
