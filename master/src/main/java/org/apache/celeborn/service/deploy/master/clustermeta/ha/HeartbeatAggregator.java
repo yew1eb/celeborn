@@ -19,11 +19,11 @@ package org.apache.celeborn.service.deploy.master.clustermeta.ha;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.locks.ReentrantLock;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -40,9 +40,10 @@ import org.apache.celeborn.service.deploy.master.clustermeta.ResourceProtos.Type
  * {@link Type#BatchHeartbeat} raft log entry, so that N heartbeats cost one replication, one fsync
  * and one apply instead of N.
  *
- * <p>Concurrency model (borrowing Kafka KRaft's BatchAccumulator): multiple producer threads offer
- * heartbeats under a short lock; a single flush thread swaps out the pending buffers under the same
- * lock and submits the batch to raft outside the lock.
+ * <p>Concurrency model (following the repository's ReviveManager pattern): multiple producer
+ * threads offer heartbeats to {@link LinkedBlockingQueue}s; a single flush thread drains them via
+ * {@link LinkedBlockingQueue#drainTo} and submits the batch to raft outside any celeborn-level
+ * lock. Producers never block on the aggregator.
  *
  * <p>Flush semantics (borrowing TiKV's cmd-batch): at each flush tick, whatever is pending is
  * drained as-is; the size threshold only seals a batch early, the aggregator never waits to fill a
@@ -63,16 +64,13 @@ public class HeartbeatAggregator {
   private final HARaftServer ratisServer;
   private final int batchSize;
 
-  private final ReentrantLock lock = new ReentrantLock();
-  private ArrayList<ResourceProtos.WorkerHeartbeatRequest> workerHeartbeats = new ArrayList<>();
-  private ArrayList<ResourceProtos.AppHeartbeatRequest> appHeartbeats = new ArrayList<>();
-
-  /**
-   * Guards the early-flush path so a burst that crosses the size threshold does not queue a flush
-   * task per offer. CAS-set when scheduling, cleared at the start of {@link #flush()}; this caps
-   * pending early-flush tasks at one while still allowing the next burst to re-arm promptly.
-   */
-  private final AtomicBoolean flushScheduled = new AtomicBoolean(false);
+  private final LinkedBlockingQueue<ResourceProtos.WorkerHeartbeatRequest> workerQueue =
+      new LinkedBlockingQueue<>();
+  private final LinkedBlockingQueue<ResourceProtos.AppHeartbeatRequest> appQueue =
+      new LinkedBlockingQueue<>();
+  // Incremented before enqueue so a flush always sees pending >= actual queue size (never
+  // negative); also backs HeartbeatBatchPendingCount and the early-flush threshold.
+  private final AtomicInteger pending = new AtomicInteger(0);
 
   private final ScheduledExecutorService flushExecutor;
   private final AtomicLong flushCount = new AtomicLong(0);
@@ -94,32 +92,19 @@ public class HeartbeatAggregator {
   }
 
   public void offerWorkerHeartbeat(ResourceProtos.WorkerHeartbeatRequest heartbeat) {
-    lock.lock();
-    try {
-      workerHeartbeats.add(heartbeat);
-      flushEarlyIfNecessary();
-    } finally {
-      lock.unlock();
-    }
+    pending.incrementAndGet();
+    workerQueue.offer(heartbeat);
+    maybeFlushEarly();
   }
 
   public void offerAppHeartbeat(ResourceProtos.AppHeartbeatRequest heartbeat) {
-    lock.lock();
-    try {
-      appHeartbeats.add(heartbeat);
-      flushEarlyIfNecessary();
-    } finally {
-      lock.unlock();
-    }
+    pending.incrementAndGet();
+    appQueue.offer(heartbeat);
+    maybeFlushEarly();
   }
 
   public int pendingCount() {
-    lock.lock();
-    try {
-      return workerHeartbeats.size() + appHeartbeats.size();
-    } finally {
-      lock.unlock();
-    }
+    return pending.get();
   }
 
   public long flushCount() {
@@ -138,12 +123,12 @@ public class HeartbeatAggregator {
     flushExecutor.shutdownNow();
   }
 
-  private void flushEarlyIfNecessary() {
-    // Must hold lock. The size threshold only seals a batch early; flushing still happens on the
-    // single flush thread to keep submission serialized. The CAS guard caps pending early-flush
-    // tasks at one: without it a burst crossing the threshold would queue a task per offer.
-    if (workerHeartbeats.size() + appHeartbeats.size() >= batchSize
-        && flushScheduled.compareAndSet(false, true)) {
+  private void maybeFlushEarly() {
+    // No CAS guard: under a burst each offer that crosses the threshold queues a flush task, but
+    // the
+    // single flush thread runs them serially and the first drains the queue, so the rest are no-op
+    // (drained == 0) returns. The redundant tasks are negligible at production heartbeat rates.
+    if (pending.get() >= batchSize) {
       flushExecutor.execute(this::flushSafely);
     }
   }
@@ -158,23 +143,17 @@ public class HeartbeatAggregator {
   }
 
   private void flush() {
-    List<ResourceProtos.WorkerHeartbeatRequest> drainedWorkers;
-    List<ResourceProtos.AppHeartbeatRequest> drainedApps;
-    lock.lock();
-    try {
-      // Clear the early-flush re-arm guard first so the next burst that crosses the threshold can
-      // schedule again, even when this invocation turns out to be a no-op (empty window).
-      flushScheduled.set(false);
-      if (workerHeartbeats.isEmpty() && appHeartbeats.isEmpty()) {
-        return;
-      }
-      drainedWorkers = workerHeartbeats;
-      workerHeartbeats = new ArrayList<>();
-      drainedApps = appHeartbeats;
-      appHeartbeats = new ArrayList<>();
-    } finally {
-      lock.unlock();
+    List<ResourceProtos.WorkerHeartbeatRequest> drainedWorkers = new ArrayList<>();
+    workerQueue.drainTo(drainedWorkers);
+    List<ResourceProtos.AppHeartbeatRequest> drainedApps = new ArrayList<>();
+    appQueue.drainTo(drainedApps);
+    int drained = drainedWorkers.size() + drainedApps.size();
+    if (drained == 0) {
+      // Empty window: no batch to submit. pending may still over-count items counted but not yet
+      // enqueued (offer increments before enqueue); it self-corrects on the next flush.
+      return;
     }
+    pending.addAndGet(-drained);
 
     // Standby (non-leader) masters also run a flush thread. Pending heartbeats drained here are
     // not committable (this master is not the leader) and are renewable (re-sent next interval),
