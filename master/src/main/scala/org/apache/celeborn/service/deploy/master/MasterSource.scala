@@ -79,6 +79,10 @@ object MasterSource {
 
   val RATIS_APPLY_COMPLETED_INDEX = "RatisApplyCompletedIndex"
 
+  val HEARTBEAT_BATCH_PENDING_COUNT = "HeartbeatBatchPendingCount"
+
+  val HEARTBEAT_BATCH_LAST_FLUSH_DURATION_MS = "HeartbeatBatchLastFlushDurationMs"
+
   // Capacity
   val DEVICE_CELEBORN_FREE_CAPACITY = "DeviceCelebornFreeBytes"
   val DEVICE_CELEBORN_TOTAL_CAPACITY = "DeviceCelebornTotalBytes"

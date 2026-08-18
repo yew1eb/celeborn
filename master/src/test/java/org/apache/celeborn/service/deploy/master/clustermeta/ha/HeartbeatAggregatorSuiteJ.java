@@ -1,0 +1,174 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.celeborn.service.deploy.master.clustermeta.ha;
+
+import java.io.File;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.UUID;
+
+import org.junit.After;
+import org.junit.Assert;
+import org.junit.Before;
+import org.junit.Test;
+
+import org.apache.celeborn.common.CelebornConf;
+import org.apache.celeborn.common.meta.WorkerInfo;
+import org.apache.celeborn.common.meta.WorkerStatus;
+
+public class HeartbeatAggregatorSuiteJ {
+  private HARaftServer ratisServer;
+  private HAMasterMetaManager metaSystem;
+
+  @Before
+  public void init() throws Exception {
+    CelebornConf conf = new CelebornConf();
+    conf.set(CelebornConf.MASTER_HA_HEARTBEAT_BATCH_ENABLED().key(), "true");
+    conf.set(CelebornConf.MASTER_HA_HEARTBEAT_BATCH_INTERVAL().key(), "100ms");
+    conf.set(CelebornConf.MASTER_HA_HEARTBEAT_BATCH_SIZE().key(), "500");
+    metaSystem = new HAMasterMetaManager(null, conf);
+    MetaHandler handler = new MetaHandler(metaSystem);
+    File tmpDir = File.createTempFile("celeborn-ratis-tmp", "for-test-only");
+    tmpDir.delete();
+    tmpDir.mkdirs();
+    conf.set(CelebornConf.HA_MASTER_RATIS_STORAGE_DIR().key(), tmpDir.getAbsolutePath());
+    String id = UUID.randomUUID().toString();
+    MasterNode masterNode =
+        new MasterNode.Builder().setNodeId(id).setHost("localhost").setRatisPort(9998).build();
+    ratisServer =
+        HARaftServer.newMasterRatisServer(handler, conf, masterNode, Collections.emptyList());
+    metaSystem.setRatisServer(ratisServer);
+    ratisServer.start();
+    waitForLeader();
+  }
+
+  private void waitForLeader() throws InterruptedException {
+    for (int i = 0; i < 100 && !ratisServer.isLeader(); i++) {
+      Thread.sleep(200);
+    }
+    Assert.assertTrue("Raft server did not become leader in time.", ratisServer.isLeader());
+  }
+
+  @After
+  public void shutdown() {
+    if (metaSystem.getHeartbeatAggregator() != null) {
+      metaSystem.getHeartbeatAggregator().stop();
+    }
+    if (ratisServer != null) {
+      ratisServer.stop();
+    }
+  }
+
+  @Test
+  public void testBatchHeartbeatAggregation() throws Exception {
+    Assert.assertNotNull(metaSystem.getHeartbeatAggregator());
+
+    metaSystem.handleRegisterWorker(
+        "host1",
+        1,
+        2,
+        3,
+        4,
+        5,
+        "networkLocation1",
+        new HashMap<>(),
+        new HashMap<>(),
+        UUID.randomUUID().toString() + "#1");
+    Thread.sleep(2000);
+    Assert.assertEquals(1, metaSystem.workersMap.size());
+    long appliedIndexAfterRegister = lastAppliedIndex();
+
+    // 4 heartbeat offers: 3 for the same worker (dedupe to 1), 1 for an app.
+    long time1 = System.currentTimeMillis();
+    long time2 = time1 + 10;
+    metaSystem.handleWorkerHeartbeat(
+        "host1",
+        1,
+        2,
+        3,
+        4,
+        new HashMap<>(),
+        new HashMap<>(),
+        time1,
+        false,
+        WorkerStatus.normalWorkerStatus(),
+        UUID.randomUUID().toString() + "#2");
+    metaSystem.handleWorkerHeartbeat(
+        "host1",
+        1,
+        2,
+        3,
+        4,
+        new HashMap<>(),
+        new HashMap<>(),
+        time1,
+        false,
+        WorkerStatus.normalWorkerStatus(),
+        UUID.randomUUID().toString() + "#3");
+    metaSystem.handleAppHeartbeat(
+        "app-1",
+        100,
+        10,
+        1,
+        1,
+        new HashMap<>(),
+        new HashMap<>(),
+        time2,
+        UUID.randomUUID().toString() + "#4");
+    metaSystem.handleWorkerHeartbeat(
+        "host1",
+        1,
+        2,
+        3,
+        4,
+        new HashMap<>(),
+        new HashMap<>(),
+        time2,
+        false,
+        WorkerStatus.normalWorkerStatus(),
+        UUID.randomUUID().toString() + "#5");
+
+    Thread.sleep(2000);
+
+    HeartbeatAggregator aggregator = metaSystem.getHeartbeatAggregator();
+    // All 4 offers must have been flushed as (far) fewer raft log entries.
+    Assert.assertTrue(aggregator.flushCount() >= 1);
+    long newEntries = lastAppliedIndex() - appliedIndexAfterRegister;
+    Assert.assertTrue(
+        "Expected heartbeats to be merged into few raft log entries, but got " + newEntries,
+        newEntries >= 1 && newEntries <= 2);
+
+    // Last-write-wins within one window: the worker keeps the newest heartbeat time.
+    WorkerInfo workerInfo = metaSystem.workersMap.values().iterator().next();
+    Assert.assertEquals("host1", workerInfo.host());
+    Assert.assertEquals(time2, workerInfo.lastHeartbeat());
+    Assert.assertEquals(Long.valueOf(time2), metaSystem.appHeartbeatTime.get("app-1"));
+  }
+
+  @Test
+  public void testEmptyWindowProducesNoRaftLog() throws Exception {
+    Thread.sleep(2000);
+    long flushCount = metaSystem.getHeartbeatAggregator().flushCount();
+    Thread.sleep(500);
+    Assert.assertEquals(flushCount, metaSystem.getHeartbeatAggregator().flushCount());
+  }
+
+  private long lastAppliedIndex() {
+    return ratisServer.getMasterStateMachine().getLastAppliedTermIndex().getIndex();
+  }
+}
