@@ -125,9 +125,9 @@ public class HeartbeatAggregator {
 
   private void maybeFlushEarly() {
     // No CAS guard: under a burst each offer that crosses the threshold queues a flush task, but
-    // the
-    // single flush thread runs them serially and the first drains the queue, so the rest are no-op
-    // (drained == 0) returns. The redundant tasks are negligible at production heartbeat rates.
+    // the single flush thread runs them serially and the first drains the queue, so the rest are
+    // no-op (drained == 0) returns. The redundant tasks are negligible at production heartbeat
+    // rates.
     if (pending.get() >= batchSize) {
       flushExecutor.execute(this::flushSafely);
     }
@@ -173,7 +173,7 @@ public class HeartbeatAggregator {
                     .addAllAppHeartbeats(drainedApps)
                     .build())
             .build();
-    lastBatchSize = drainedWorkers.size() + drainedApps.size();
+    lastBatchSize = drained;
     long startNs = System.nanoTime();
     ratisServer.submitRequest(batchRequest);
     // Includes raft replication, majority fsync and the local apply, i.e. the full latency
