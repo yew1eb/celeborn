@@ -312,18 +312,6 @@ private[celeborn] class Master(
     masterSource.addGauge(MasterSource.RATIS_APPLY_COMPLETED_INDEX) { () =>
       getRatisApplyCompletedIndex
     }
-    if (conf.masterHaHeartbeatBatchEnabled) {
-      masterSource.addGauge(MasterSource.HEARTBEAT_BATCH_PENDING_COUNT) { () =>
-        Option(statusSystem.asInstanceOf[HAMasterMetaManager].getHeartbeatAggregator)
-          .map(_.pendingCount())
-          .getOrElse(0)
-      }
-      masterSource.addGauge(MasterSource.HEARTBEAT_BATCH_LAST_FLUSH_DURATION_MS) { () =>
-        Option(statusSystem.asInstanceOf[HAMasterMetaManager].getHeartbeatAggregator)
-          .map(_.lastFlushDurationMs())
-          .getOrElse(0L)
-      }
-    }
   }
 
   private val threadsStarted: AtomicBoolean = new AtomicBoolean(false)

@@ -24,7 +24,6 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -54,10 +53,10 @@ import org.apache.celeborn.service.deploy.master.clustermeta.ResourceProtos.Type
  * state because the heartbeat intervals (worker 30s, app 10s) are much larger than the default 1s
  * flush window, and even when retries make a key repeat within a window the final meta state is
  * unchanged (last apply wins). The pending count is bounded in practice by the heartbeat arrival
- * rate times the flush interval and is monitored by {@code HeartbeatBatchPendingCount}; a stalled
- * flush is surfaced via that gauge rather than backpressure, since the reply path never waits for
- * raft. A batch that fails to submit (e.g. leadership change) is dropped and logged; heartbeats are
- * self-healing on the next interval.
+ * rate times the flush interval. A stalled flush surfaces as the pre-existing
+ * {@code RatisApplyCompletedIndex} going flat (the aggregator adds no metric of its own) rather
+ * than backpressure, since the reply path never waits for raft. A batch that fails to submit
+ * (e.g. leadership change) is dropped and logged; heartbeats are self-healing on the next interval.
  */
 public class HeartbeatAggregator {
   private static final Logger LOG = LoggerFactory.getLogger(HeartbeatAggregator.class);
@@ -70,7 +69,7 @@ public class HeartbeatAggregator {
   private final LinkedBlockingQueue<ResourceProtos.AppHeartbeatRequest> appQueue =
       new LinkedBlockingQueue<>();
   // Incremented before enqueue so a flush always sees pending >= actual queue size (never
-  // negative); also backs HeartbeatBatchPendingCount and the early-flush threshold.
+  // negative); backs the early-flush threshold (pending >= batchSize triggers an early flush).
   private final AtomicInteger pending = new AtomicInteger(0);
 
   /**
@@ -82,9 +81,6 @@ public class HeartbeatAggregator {
   private final AtomicBoolean flushScheduled = new AtomicBoolean(false);
 
   private final ScheduledExecutorService flushExecutor;
-  private final AtomicLong flushCount = new AtomicLong(0);
-  private volatile int lastBatchSize = 0;
-  private volatile long lastFlushDurationMs = 0;
 
   public HeartbeatAggregator(HARaftServer ratisServer, CelebornConf conf) {
     this.ratisServer = ratisServer;
@@ -110,22 +106,6 @@ public class HeartbeatAggregator {
     pending.incrementAndGet();
     appQueue.offer(heartbeat);
     maybeFlushEarly();
-  }
-
-  public int pendingCount() {
-    return pending.get();
-  }
-
-  public long flushCount() {
-    return flushCount.get();
-  }
-
-  public int lastBatchSize() {
-    return lastBatchSize;
-  }
-
-  public long lastFlushDurationMs() {
-    return lastFlushDurationMs;
   }
 
   public void stop() {
@@ -171,7 +151,7 @@ public class HeartbeatAggregator {
     // Standby (non-leader) masters also run a flush thread. Pending heartbeats drained here are
     // not committable (this master is not the leader) and are renewable (re-sent next interval),
     // so discard them instead of submitting a request that would fail with NotLeader. This keeps
-    // the pending gauge from growing on standbys and avoids NotLeader exception log noise.
+    // pending from accumulating on standbys and avoids NotLeader exception log noise.
     if (!ratisServer.isLeader()) {
       return;
     }
@@ -186,13 +166,7 @@ public class HeartbeatAggregator {
                     .addAllAppHeartbeats(drainedApps)
                     .build())
             .build();
-    lastBatchSize = drained;
-    long startNs = System.nanoTime();
     ratisServer.submitRequest(batchRequest);
-    // Includes raft replication, majority fsync and the local apply, i.e. the full latency
-    // of one batched raft write.
-    lastFlushDurationMs = (System.nanoTime() - startNs) / 1000000;
-    flushCount.incrementAndGet();
     if (LOG.isDebugEnabled()) {
       LOG.debug(
           "Flushed aggregated heartbeats, {} worker heartbeats, {} app heartbeats.",

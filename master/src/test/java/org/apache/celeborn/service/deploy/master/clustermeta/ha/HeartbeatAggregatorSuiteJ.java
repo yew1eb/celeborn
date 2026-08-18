@@ -145,9 +145,7 @@ public class HeartbeatAggregatorSuiteJ {
 
     Thread.sleep(2000);
 
-    HeartbeatAggregator aggregator = metaSystem.getHeartbeatAggregator();
     // All 4 offers must have been flushed as (far) fewer raft log entries.
-    Assert.assertTrue(aggregator.flushCount() >= 1);
     long newEntries = lastAppliedIndex() - appliedIndexAfterRegister;
     Assert.assertTrue(
         "Expected heartbeats to be merged into few raft log entries, but got " + newEntries,
@@ -163,9 +161,9 @@ public class HeartbeatAggregatorSuiteJ {
   @Test
   public void testEmptyWindowProducesNoRaftLog() throws Exception {
     Thread.sleep(2000);
-    long flushCount = metaSystem.getHeartbeatAggregator().flushCount();
+    long appliedIndex = lastAppliedIndex();
     Thread.sleep(500);
-    Assert.assertEquals(flushCount, metaSystem.getHeartbeatAggregator().flushCount());
+    Assert.assertEquals(appliedIndex, lastAppliedIndex());
   }
 
   private long lastAppliedIndex() {
