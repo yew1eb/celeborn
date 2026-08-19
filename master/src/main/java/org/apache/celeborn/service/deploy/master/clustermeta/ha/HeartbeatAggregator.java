@@ -17,11 +17,11 @@
 
 package org.apache.celeborn.service.deploy.master.clustermeta.ha;
 
-import java.util.ArrayList;
-import java.util.List;
-import java.util.concurrent.LinkedBlockingQueue;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -33,20 +33,14 @@ import org.apache.celeborn.service.deploy.master.clustermeta.ResourceProtos;
 import org.apache.celeborn.service.deploy.master.clustermeta.ResourceProtos.ResourceRequest;
 import org.apache.celeborn.service.deploy.master.clustermeta.ResourceProtos.Type;
 
-/**
- * Aggregates worker/app heartbeats on the raft leader and flushes them as a single
- * {@link Type#BatchHeartbeat} raft log entry per {@code batch.interval}, so N heartbeats cost one
- * replication/fsync/apply instead of N.
- */
 public class HeartbeatAggregator {
   private static final Logger LOG = LoggerFactory.getLogger(HeartbeatAggregator.class);
 
   private final HARaftServer ratisServer;
 
-  private final LinkedBlockingQueue<ResourceProtos.WorkerHeartbeatRequest> workerQueue =
-      new LinkedBlockingQueue<>();
-  private final LinkedBlockingQueue<ResourceProtos.AppHeartbeatRequest> appQueue =
-      new LinkedBlockingQueue<>();
+  private final ReentrantLock pendingLock = new ReentrantLock();
+  private Map<String, ResourceProtos.WorkerHeartbeatRequest> workerHeartbeats = new HashMap<>();
+  private Map<String, ResourceProtos.AppHeartbeatRequest> appHeartbeats = new HashMap<>();
 
   private final ScheduledExecutorService flushExecutor;
 
@@ -61,11 +55,33 @@ public class HeartbeatAggregator {
   }
 
   public void offerWorkerHeartbeat(ResourceProtos.WorkerHeartbeatRequest heartbeat) {
-    workerQueue.offer(heartbeat);
+    pendingLock.lock();
+    try {
+      workerHeartbeats.put(workerKey(heartbeat), heartbeat);
+    } finally {
+      pendingLock.unlock();
+    }
   }
 
   public void offerAppHeartbeat(ResourceProtos.AppHeartbeatRequest heartbeat) {
-    appQueue.offer(heartbeat);
+    pendingLock.lock();
+    try {
+      appHeartbeats.put(heartbeat.getAppId(), heartbeat);
+    } finally {
+      pendingLock.unlock();
+    }
+  }
+
+  private static String workerKey(ResourceProtos.WorkerHeartbeatRequest heartbeat) {
+    return heartbeat.getHost()
+        + ":"
+        + heartbeat.getRpcPort()
+        + ":"
+        + heartbeat.getPushPort()
+        + ":"
+        + heartbeat.getFetchPort()
+        + ":"
+        + heartbeat.getReplicatePort();
   }
 
   public void stop() {
@@ -82,18 +98,22 @@ public class HeartbeatAggregator {
   }
 
   private void flush() {
-    List<ResourceProtos.WorkerHeartbeatRequest> drainedWorkers = new ArrayList<>();
-    workerQueue.drainTo(drainedWorkers);
-    List<ResourceProtos.AppHeartbeatRequest> drainedApps = new ArrayList<>();
-    appQueue.drainTo(drainedApps);
-    if (drainedWorkers.isEmpty() && drainedApps.isEmpty()) {
-      // Empty window: no batch to submit.
-      return;
+    Map<String, ResourceProtos.WorkerHeartbeatRequest> drainedWorkers;
+    Map<String, ResourceProtos.AppHeartbeatRequest> drainedApps;
+    pendingLock.lock();
+    try {
+      if (workerHeartbeats.isEmpty() && appHeartbeats.isEmpty()) {
+        return;
+      }
+      drainedWorkers = workerHeartbeats;
+      workerHeartbeats = new HashMap<>();
+      drainedApps = appHeartbeats;
+      appHeartbeats = new HashMap<>();
+    } finally {
+      pendingLock.unlock();
     }
 
     if (!ratisServer.isLeader()) {
-      // Standby: drained heartbeats are not committable and are renewable, so discard rather than
-      // submit a request that would fail with NotLeader.
       return;
     }
 
@@ -103,8 +123,8 @@ public class HeartbeatAggregator {
             .setRequestId(MasterClient.genRequestId())
             .setBatchHeartbeatRequest(
                 ResourceProtos.BatchHeartbeatRequest.newBuilder()
-                    .addAllWorkerHeartbeats(drainedWorkers)
-                    .addAllAppHeartbeats(drainedApps)
+                    .addAllWorkerHeartbeats(drainedWorkers.values())
+                    .addAllAppHeartbeats(drainedApps.values())
                     .build())
             .build();
     ratisServer.submitRequest(batchRequest);

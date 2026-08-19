@@ -92,7 +92,7 @@ public class HeartbeatAggregatorSuiteJ {
     Assert.assertEquals(1, metaSystem.workersMap.size());
     long appliedIndexAfterRegister = lastAppliedIndex();
 
-    // 4 heartbeat offers: 3 for the same worker (no dedup, all buffered), 1 for an app.
+    // 4 heartbeat offers: 3 for the same worker (collapsed to the newest), 1 for an app.
     long time1 = System.currentTimeMillis();
     long time2 = time1 + 10;
     metaSystem.handleWorkerHeartbeat(
@@ -144,13 +144,13 @@ public class HeartbeatAggregatorSuiteJ {
 
     Thread.sleep(2000);
 
-    // All 4 offers must have been flushed as (far) fewer raft log entries.
+    // The 4 offers must have been flushed as (far) fewer raft log entries.
     long newEntries = lastAppliedIndex() - appliedIndexAfterRegister;
     Assert.assertTrue(
         "Expected heartbeats to be merged into few raft log entries, but got " + newEntries,
         newEntries >= 1 && newEntries <= 2);
 
-    // Apply order follows insertion order, so the newest time wins for the worker.
+    // The newest heartbeat wins.
     WorkerInfo workerInfo = metaSystem.workersMap.values().iterator().next();
     Assert.assertEquals("host1", workerInfo.host());
     Assert.assertEquals(time2, workerInfo.lastHeartbeat());
@@ -163,6 +163,46 @@ public class HeartbeatAggregatorSuiteJ {
     long appliedIndex = lastAppliedIndex();
     Thread.sleep(500);
     Assert.assertEquals(appliedIndex, lastAppliedIndex());
+  }
+
+  @Test
+  public void testDuplicateAppHeartbeatKeepsNewest() throws Exception {
+    // Duplicate heartbeats of the same app within one window are collapsed to the newest one.
+    java.util.Map<String, Long> fallback1 = new HashMap<>();
+    fallback1.put("shuffle-1", 1L);
+    java.util.Map<String, Long> fallback2 = new HashMap<>();
+    fallback2.put("shuffle-1", 2L);
+    long time1 = System.currentTimeMillis();
+    long time2 = time1 + 10;
+    metaSystem.handleAppHeartbeat(
+        "app-merge",
+        100,
+        10,
+        1,
+        1,
+        fallback1,
+        new HashMap<>(),
+        time1,
+        UUID.randomUUID().toString() + "#1");
+    metaSystem.handleAppHeartbeat(
+        "app-merge",
+        200,
+        20,
+        2,
+        3,
+        fallback2,
+        new HashMap<>(),
+        time2,
+        UUID.randomUUID().toString() + "#2");
+
+    Thread.sleep(2000);
+
+    Assert.assertEquals(200, metaSystem.partitionTotalWritten.sum());
+    Assert.assertEquals(20, metaSystem.partitionTotalFileCount.sum());
+    Assert.assertEquals(2, metaSystem.shuffleTotalCount.sum());
+    Assert.assertEquals(3, metaSystem.applicationTotalCount.sum());
+    Assert.assertEquals(Long.valueOf(2), metaSystem.shuffleFallbackCounts.get("shuffle-1"));
+    Assert.assertEquals(Long.valueOf(time2), metaSystem.appHeartbeatTime.get("app-merge"));
   }
 
   private long lastAppliedIndex() {
