@@ -26,7 +26,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.celeborn.common.CelebornConf;
-import org.apache.celeborn.common.protocol.PartitionLocation;
 import org.apache.celeborn.common.protocol.ReviveRequest;
 import org.apache.celeborn.common.protocol.message.StatusCode;
 import org.apache.celeborn.common.util.ThreadUtils;
@@ -65,7 +64,7 @@ class ReviveManager {
               ArrayList<ReviveRequest> filteredRequests = new ArrayList<>();
               Map<Integer, ReviveRequest> requestsToSend = new HashMap<>();
 
-              Map<Integer, PartitionLocation> partitionMap =
+              Map<Integer, PartitionLocationGroup> partitionMap =
                   shuffleClient.reducePartitionMap.get(shuffleId);
               // Insert request that is not MapperEnded and with the max epoch
               // into requestsToSend
