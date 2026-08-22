@@ -1266,7 +1266,7 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
       return
     }
 
-    changePartitionManager.logReviveSummary(shuffleId)
+    changePartitionManager.logReviveSummary(shuffleId, topPartitionBytesSummary(shuffleId, 20))
     if (commitManager.tryFinalCommit(shuffleId)) {
       // Here we only clear PartitionLocation info in shuffleAllocatedWorkers.
       // Since rerun or speculation task may running after we handle StageEnd.
@@ -1274,6 +1274,21 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
         partitionLocationInfo.removeAllPrimaryPartitions()
         partitionLocationInfo.removeAllReplicaPartitions()
       }
+    }
+  }
+
+  private def topPartitionBytesSummary(shuffleId: Int, topN: Int): String = {
+    val partitionBytes = commitManager.getShufflePartitionBytes(shuffleId)
+    if (partitionBytes == null || partitionBytes.isEmpty) {
+      "NONE"
+    } else {
+      partitionBytes.zipWithIndex
+        .sortBy(-_._1)
+        .take(topN)
+        .map { case (bytes, partitionId) =>
+          s"(partition $partitionId, bytes ${Utils.bytesToString(bytes)})"
+        }
+        .mkString("[", ", ", "]")
     }
   }
 

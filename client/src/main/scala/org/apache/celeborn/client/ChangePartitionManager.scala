@@ -718,7 +718,7 @@ class ChangePartitionManager(
     slots
   }
 
-  def logReviveSummary(shuffleId: Int): Unit = {
+  def logReviveSummary(shuffleId: Int, topPartitionBytes: String = "NONE"): Unit = {
     val reviveCounts = partitionReviveCounts.get(shuffleId)
     if (reviveCounts == null || reviveCounts.isEmpty) {
       return
@@ -740,7 +740,8 @@ class ChangePartitionManager(
       .mkString("[", ", ", "]")
     logInfo(s"Shuffle $shuffleId partition revive summary: total revive times " +
       s"$totalReviveTimes, revived partition num ${reviveCounts.size()}, " +
-      s"causes: [$causes], top revived partitions: $topRevivedPartitions.")
+      s"causes: [$causes], top revived partitions: $topRevivedPartitions, " +
+      s"top partition bytes: $topPartitionBytes.")
   }
 
   def removeExpiredShuffle(shuffleId: Int): Unit = {
