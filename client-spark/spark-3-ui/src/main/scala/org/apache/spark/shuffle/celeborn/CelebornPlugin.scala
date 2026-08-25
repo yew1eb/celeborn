@@ -15,14 +15,14 @@
  * limitations under the License.
  */
 
-package org.apache.spark.shuffle.celeborn.ui
+package org.apache.spark.shuffle.celeborn
 
 import org.apache.spark.api.plugin.{DriverPlugin, ExecutorPlugin, SparkPlugin}
 
 /**
  * Spark plugin entry point. Enables the Celeborn WebUI tab on the driver only.
  *
- * Usage: set `spark.plugins=org.apache.spark.shuffle.celeborn.ui.CelebornPlugin`.
+ * Usage: set `spark.plugins=org.apache.spark.shuffle.celeborn.CelebornPlugin`.
  */
 class CelebornPlugin extends SparkPlugin {
   override def driverPlugin(): DriverPlugin = new CelebornDriverPlugin()

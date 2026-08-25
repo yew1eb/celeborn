@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-package org.apache.spark.shuffle.celeborn.ui
+package org.apache.spark.shuffle.celeborn
 
 import java.util.{Collections, LinkedHashMap => JLinkedHashMap}
 
@@ -25,6 +25,7 @@ import org.apache.spark.SparkContext
 import org.apache.spark.api.plugin.{DriverPlugin, PluginContext}
 import org.apache.spark.internal.Logging
 import org.apache.spark.shuffle.celeborn.events.CelebornBuildInfoEvent
+import org.apache.spark.shuffle.celeborn.ui.CelebornUIUtils
 
 /**
  * Driver-side plugin. [[init]] registers the Celeborn listener to the status queue and posts a

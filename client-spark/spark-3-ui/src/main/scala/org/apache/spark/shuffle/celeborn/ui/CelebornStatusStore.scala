@@ -21,7 +21,8 @@ import org.apache.spark.util.kvstore.{KVStore, KVStoreView}
 
 /**
  * Thin wrapper over Spark's status KVStore exposing typed read accessors for the
- *  Celeborn UI entities written by [[CelebornListener]]. Accepts the base KVStore so it
+ *  Celeborn UI entities written by [[org.apache.spark.shuffle.celeborn.CelebornListener]].
+ *  Accepts the base KVStore so it
  *  works for both the live UI (ElementTrackingStore) and HistoryServer replay.
  */
 private[celeborn] class CelebornStatusStore(val store: KVStore) {

@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-package org.apache.spark.shuffle.celeborn.ui
+package org.apache.spark.shuffle.celeborn
 
 import java.util.concurrent.TimeUnit
 
@@ -23,6 +23,7 @@ import org.apache.spark.{SparkConf, SparkContext}
 import org.apache.spark.internal.Logging
 import org.apache.spark.scheduler._
 import org.apache.spark.shuffle.celeborn.events.{CelebornBuildInfoEvent, CelebornFallbackEvent, CelebornReadMetricsEvent, CelebornReassignEvent, CelebornShuffleAssignmentEvent, CelebornWriteMetricsEvent}
+import org.apache.spark.shuffle.celeborn.ui.{AggregatedShuffleWriteMetric, CelebornAggregatedTaskInfoUIData, CelebornAggregatedWriteMetricsUIData, CelebornBuildInfoUIData, CelebornFallbackStatsUIData, CelebornPerWorkerReadStatsUIData, CelebornPerWorkerWriteStatsUIData, CelebornPropertiesUIData, CelebornReadTimesUIData, CelebornReassignStatsUIData, CelebornShuffleAssignmentUIData, CelebornWriteTimesUIData}
 import org.apache.spark.status.ElementTrackingStore
 
 /**
@@ -303,15 +304,15 @@ class CelebornListener(conf: SparkConf, kvstore: ElementTrackingStore)
   }
 }
 
-private[ui] class PerWorkerWriteAccumulator {
-  private[ui] val pushCount = new java.util.concurrent.atomic.AtomicLong(0)
-  private[ui] val pushBytes = new java.util.concurrent.atomic.AtomicLong(0)
-  private[ui] val totalPushRttNanos = new java.util.concurrent.atomic.AtomicLong(0)
-  private[ui] val softSplitCount = new java.util.concurrent.atomic.AtomicLong(0)
-  private[ui] val hardSplitCount = new java.util.concurrent.atomic.AtomicLong(0)
-  private[ui] val primaryCongestedCount = new java.util.concurrent.atomic.AtomicLong(0)
-  private[ui] val replicaCongestedCount = new java.util.concurrent.atomic.AtomicLong(0)
-  @volatile private[ui] var lastPushFailureReason: String = ""
+private[celeborn] class PerWorkerWriteAccumulator {
+  private[celeborn] val pushCount = new java.util.concurrent.atomic.AtomicLong(0)
+  private[celeborn] val pushBytes = new java.util.concurrent.atomic.AtomicLong(0)
+  private[celeborn] val totalPushRttNanos = new java.util.concurrent.atomic.AtomicLong(0)
+  private[celeborn] val softSplitCount = new java.util.concurrent.atomic.AtomicLong(0)
+  private[celeborn] val hardSplitCount = new java.util.concurrent.atomic.AtomicLong(0)
+  private[celeborn] val primaryCongestedCount = new java.util.concurrent.atomic.AtomicLong(0)
+  private[celeborn] val replicaCongestedCount = new java.util.concurrent.atomic.AtomicLong(0)
+  @volatile private[celeborn] var lastPushFailureReason: String = ""
 
   def merge(s: org.apache.celeborn.common.protocol.message.PushWorkerStats): Unit = {
     pushCount.addAndGet(s.pushCount)
@@ -336,11 +337,11 @@ object CelebornListener extends Logging {
   }
 }
 
-private[ui] class PerWorkerReadAccumulator {
-  private[ui] val chunkCount = new java.util.concurrent.atomic.AtomicLong(0)
-  private[ui] val bytes = new java.util.concurrent.atomic.AtomicLong(0)
-  private[ui] val totalRttNanos = new java.util.concurrent.atomic.AtomicLong(0)
-  private[ui] val maxRttNanos = new java.util.concurrent.atomic.AtomicLong(0)
+private[celeborn] class PerWorkerReadAccumulator {
+  private[celeborn] val chunkCount = new java.util.concurrent.atomic.AtomicLong(0)
+  private[celeborn] val bytes = new java.util.concurrent.atomic.AtomicLong(0)
+  private[celeborn] val totalRttNanos = new java.util.concurrent.atomic.AtomicLong(0)
+  private[celeborn] val maxRttNanos = new java.util.concurrent.atomic.AtomicLong(0)
 
   def merge(w: org.apache.celeborn.common.protocol.message.WorkerReadCost): Unit = {
     chunkCount.addAndGet(w.chunkCount)

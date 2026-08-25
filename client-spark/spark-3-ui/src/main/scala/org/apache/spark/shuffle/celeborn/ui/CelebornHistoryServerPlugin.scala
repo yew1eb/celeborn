@@ -19,6 +19,7 @@ package org.apache.spark.shuffle.celeborn.ui
 
 import org.apache.spark.SparkConf
 import org.apache.spark.scheduler.SparkListener
+import org.apache.spark.shuffle.celeborn.CelebornListener
 import org.apache.spark.status.{AppHistoryServerPlugin, ElementTrackingStore}
 import org.apache.spark.ui.SparkUI
 
