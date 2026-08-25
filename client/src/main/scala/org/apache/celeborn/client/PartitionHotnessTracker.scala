@@ -124,7 +124,7 @@ private[client] class PartitionHotnessTracker(
       (cause.contains(StatusCode.SOFT_SPLIT) || cause.contains(StatusCode.HARD_SPLIT)) &&
         workerAvailableByLocation(oldPartition)
     if (!measureEligible) {
-      logDebug(s"Partition $shuffleId-$partitionId epoch $epoch retired, not measured " +
+      logInfo(s"Partition $shuffleId-$partitionId epoch $epoch retired, not measured " +
         s"(cause ${cause.getOrElse("unknown")} not split-related or worker unavailable).")
       return
     }
@@ -143,7 +143,7 @@ private[client] class PartitionHotnessTracker(
     }
     if (allocTime == null || nowMs - allocTime >= adaptivePartitionWriteParallelismHotWindowMs) {
       markSplitReported(hotState, epoch)
-      logDebug(s"Partition $shuffleId-$partitionId epoch $epoch retired " +
+      logInfo(s"Partition $shuffleId-$partitionId epoch $epoch retired " +
         s"(cause ${cause.get}), not hot: " +
         (if (allocTime == null) "alloc time unknown."
          else s"fill time ${nowMs - allocTime}ms >= window " +
