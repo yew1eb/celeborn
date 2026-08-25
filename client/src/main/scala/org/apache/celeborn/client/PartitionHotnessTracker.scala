@@ -160,9 +160,16 @@ private[client] class PartitionHotnessTracker(
         state.judgedSplits += 1
         if (newDesired > state.desired) {
           state.desired = newDesired
-          logInfo(s"Partition $shuffleId-$partitionId filled a location in " +
-            s"${fillTimeMs}ms (< ${adaptivePartitionWriteParallelismHotWindowMs}ms), " +
+          logInfo(s"Partition $shuffleId-$partitionId epoch $epoch filled a location in " +
+            s"${fillTimeMs}ms (< window ${adaptivePartitionWriteParallelismHotWindowMs}ms), " +
             s"boost desired location count to ${state.desired}.")
+        } else {
+          // Log every measured fill time (not only boosts) so the hot window can be tuned
+          // from observed fill times.
+          logInfo(s"Partition $shuffleId-$partitionId epoch $epoch filled a location in " +
+            s"${fillTimeMs}ms (< window ${adaptivePartitionWriteParallelismHotWindowMs}ms), " +
+            s"computed target $newDesired location(s) does not exceed current desired " +
+            s"${state.desired}, no boost.")
         }
       }
     }
