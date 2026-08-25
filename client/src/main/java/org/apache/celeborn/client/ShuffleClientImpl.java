@@ -167,7 +167,9 @@ public class ShuffleClientImpl extends ShuffleClient {
 
   private final boolean dataPushFailureTrackingEnabled;
 
-  private final boolean adaptivePartitionWriteParallelismEnabled;
+  // Package-private: ReviveManager reads it to decide whether satisfied retire reports
+  // still have to be forwarded to the LifecycleManager.
+  final boolean adaptivePartitionWriteParallelismEnabled;
 
   public static class ReduceFileGroups {
     public Map<Integer, Set<PartitionLocation>> partitionGroups;
@@ -526,11 +528,11 @@ public class ShuffleClientImpl extends ShuffleClient {
   }
 
   /**
-   * Handle a SOFT_SPLIT of the given location: mark the epoch soft-split in the location group
-   * (it stays writable and keeps receiving its share of writes until it hard-splits) and, on the
-   * first retire of the epoch, report it to the LifecycleManager for hotness judgment (boosting
-   * the location count when the partition is hot). Data already landed on the worker, so writes
-   * are never blocked.
+   * Handle a SOFT_SPLIT of the given location: mark the epoch soft-split in the location group (it
+   * stays writable and keeps receiving its share of writes until it hard-splits) and, on the first
+   * retire of the epoch, report it to the LifecycleManager for hotness judgment (boosting the
+   * location count when the partition is hot). Data already landed on the worker, so writes are
+   * never blocked.
    */
   private void handleSoftSplitRetire(
       int shuffleId, int mapId, int attemptId, int partitionId, PartitionLocation latest) {

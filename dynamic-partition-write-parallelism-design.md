@@ -156,6 +156,7 @@ message PbChangeLocationPartitionInfo {
 - `ReviveRequest`：**无新增字段**（Phase 1.1 已删除 desiredLocationCount/urgent）——executor 上报与上游原生完全一致。
 - `ChangeLocationResponse` 增加第 4 个 case class 字段 `additionalLocs: util.Map[Integer, util.List[PartitionLocation]]`（带默认值，兼容既有构造点）；toPb 写入 `additionalPartitions`，fromPb 读回。
 - `RequestLocationCallContext.reply` 增加带默认值的可选参数 `additionalLocations`。
+- **Revive 消息允许同 partition 多 epoch 条目（Phase 1.6）**：executor 会把同一 partition 已退休的每个 epoch 的上报都放进一条 Revive（并行列表天然支持重复 partitionId）；`handleRevive` 按 **distinct partition 数**构造 `ChangeLocationsCallContext`，同 partition 的重复回复**首条生效、后续忽略**（原来会 logError 并覆盖，且按条目数计数会导致响应永远凑不齐而超时）。
 - 兼容性说明：Revive/ChangeLocationResponse 是 **executor client ↔ LM（driver）的应用内消息**，executor 与 driver 必然使用同一 celeborn client jar；proto serde 路径另有 6.1 的 wire 兼容兜底。cpp client 的 `PbPartitionSplit` 路径不动；Flink client 直接消费 `PbChangeLocationResponse` proto，新增字段对其无感。
 
 ## 7. Executor client 侧实现
@@ -186,7 +187,9 @@ message PbChangeLocationPartitionInfo {
 | mergeData 路径、`PushState` | 零改动 |
 
 ### 7.3 executor 的唯一义务：退休上报
-并行写下 executor 即使已切到其他活跃 location、不需要新 location，**也必须在首次退休某 epoch 时上报 revive**——这是 LM 感知 split/失败、维护活跃集合与做热点判定的唯一通道。该上报就是上游原生 SOFT_SPLIT revive 行为本身，不算新增负担。
+并行写下 executor 即使已切到其他活跃 location、不需要新 location，**也必须在首次退休某 epoch 时上报 revive**——这是 LM 感知 split/失败、维护活跃集合与做热点判定的唯一通道。
+
+**该通道是承重墙（Phase 1.6 修复）**：ReviveManager 批量发送时的两个过滤曾经会把"本地已满足"（已有更新 location / mapper 已结束）的上报整条丢弃、并把同 partition 多 epoch 折叠为 max epoch 一条——上游单 location 语义下无害，但本方案中 LM 的活跃集记账依赖**每个 (partition, epoch) 的退休 cause 都到达**（soft 保留的 epoch 只有等到同 epoch 的硬性上报才会被移除）。丢弃会导致 LM 活跃集被死 epoch 撑大、gap 分配归零、executor 全集收敛后仍无可写 location（线上实锤：`Partition location ... is NULL!`，见 §12 Phase 1.6）。修复：开关开启时所有退休上报（含已满足的）按 (partition, epoch) 去重（保留最硬 cause）后一律转发；一条 Revive 消息可携带同 partition 的多个 epoch 条目，LM 侧按 distinct partition 计数完成响应、同 partition 首条回复生效（§6.2）。
 
 ### 7.4 正确性论证
 - **去重**：batchId per-mapTask 全局单调，读侧 (mapId, attemptId, batchId) 去重不依赖 batch 在文件内的顺序/连续性 → 并行写安全；
@@ -215,10 +218,11 @@ message PbChangeLocationPartitionInfo {
 ### 8.1 HotState（稀疏，per (shuffleId, partitionId)）
 热点状态全部收敛在独立组件 **`PartitionHotnessTracker.scala`**（233 行，从 ChangePartitionManager 提取）：`ChangePartitionManager` 持有一个实例，把判定依赖（latestPartitionLocation 查询、worker 可用性查询）以函数注入，所有时间戳由调用方传入（可注入时钟），tracker 可脱离 LM 独立单测。内部维护 `partitionHotStates: shuffleId -> partitionId -> HotState`：
 ```
-activeEpochs   : LinkedHashSet[Integer]   // 可写 epoch（插入序）：soft 保留，hard/失败移除
-allocTimeMs    : Map[Int, Long]           // 每个 epoch 的真实分配时间
-splitReported  : Set[Integer]             // 已判定过的 epoch（首报去重）
-desired        : volatile Int = 1         // 期望活跃 location 总数（单调递增，封顶 max）
+activeEpochs      : LinkedHashSet[Integer]   // 可写 epoch（插入序）：soft 保留，hard/失败移除
+hardRetiredEpochs : Set[Integer]             // 被硬性移除过的 epoch：迟到的 SOFT 上报不得复活（Phase 1.6）
+allocTimeMs       : Map[Int, Long]           // 每个 epoch 的真实分配时间
+splitReported     : Set[Integer]             // 已判定过的 epoch（首报去重）
+desired           : volatile Int = 1         // 期望活跃 location 总数（单调递增，封顶 max）
 ```
 - **稀疏**：普通 partition 无条目，活跃集合推导为 `{ latestPartitionLocation.epoch }`；任何并行模式下 oldEpoch >= 0 的 revive 都会建条目（onEpochRetired 维护可写集，且新 epoch 的 allocTime 必须记录，供后续判定）；
 - **allocTime 来源**（比 executor 版更准的关键）：
@@ -230,9 +234,10 @@ desired        : volatile Int = 1         // 期望活跃 location 总数（单�
 ### 8.2 热点判定（`onEpochRetired`，在 revive 请求到达时触发）
 ```
 onEpochRetired(shuffleId, partitionId, epoch, oldPartition, cause, now):
-  // 活跃集维护：soft 保留可写，其余移除
-  if (cause == SOFT_SPLIT && workerAvailableByLocation(oldPartition)) activeEpochs += epoch
-  else activeEpochs -= epoch
+  // 活跃集维护：soft 保留可写，其余移除；移除是终态——迟到的 SOFT 上报不复活已硬性移除的 epoch
+  if (cause == SOFT_SPLIT && workerAvailableByLocation(oldPartition)
+      && epoch ∉ hardRetiredEpochs) activeEpochs += epoch
+  else { activeEpochs -= epoch; hardRetiredEpochs += epoch }
   measureEligible = (cause ∈ {SOFT_SPLIT, HARD_SPLIT})
                     && workerAvailableByLocation(oldPartition)   // 统一计量规则
   if (!measureEligible) return                     // push 失败类 / 已知不可用 worker / null 旧 location：只退休
@@ -369,6 +374,12 @@ Phase 1（commit `f398d73dc`）→ Phase 1.1（commit `5342d934c`，判定迁移
 - **修复**：SOFT_SPLIT location 改为一等可写路由目标（worker 在 2G 硬分裂前持续接收写），`pick()` 改为在可写集合（非退休 + soft）上均匀取模；LM 侧 `onEpochRetired` 对"SOFT_SPLIT 且 worker 可用"的 epoch 保留在活跃集（其余 cause 移除），`allocateParallelLocations` 的 surviving 不再减 change.epoch（soft 上报不释放容量，仅 desired 增长或硬性移除后补缺）；全集回复包含 soft epoch，客户端收敛不会误清理；
 - **连带修复**：(a) `pick()`/`latest()` 的 size→get TOCTOU 竞态（fullSet 收敛 removeIf 并发缩容导致 ArrayIndexOutOfBoundsException，线上实锤）——改为 toArray 快照迭代；(b) re-push 成功日志按 batch 刷屏——按 firstRetire 去重；(c) 阻塞等新 location 的耗时记录（`revive()` 同步路径 + retry 等待）；
 - 测试适配：`PartitionLocationGroupSuiteJ` 的 `testRetireSwitchesCurrent` 重写为 `testSoftSplitStaysWritableHardSplitExcluded`（soft 参与路由、hard 排除、升级后排除）；`PartitionHotnessTrackerSuite` 新增 3 例活跃集保留/移除断言；`ChangePartitionManagerAdaptiveParallelismSuite` 分配数与全集回复期望适配新语义（SOFT 首报 surviving 含原 epoch、gap 减 1、回复含 soft epoch）。
+
+**Phase 1.6（退休上报通道修复——线上 NULL location 事故）**：
+- **线上实证（问题发现）**：Phase 1.5 上线后重度倾斜作业失败：`CelebornIOException: Partition location for shuffle 0 partition 868 is NULL!`。driver 侧同一 epoch 被反复以 PUSH_DATA_FAIL 上报且永不分配新 location。根因是上报通道两级丢弃 + LM 侧无防复活：(a) ReviveManager 批量发送时把"本地已满足"（`newerPartitionLocationExists` 或 mapperEnded）的请求整条丢弃——executor 对 soft-retained epoch 的后续 HARD/失败上报几乎总被该过滤吞掉（客户端 maxEpoch 已被全集回复推高）；(b) 同 partition 同批次只保留 max epoch 一条，低 epoch 的退休上报被折叠丢弃；(c) 跨 executor 乱序时迟到的 SOFT 上报会把已硬性移除的 epoch 重新加回活跃集。后果链：LM 活跃集被死 epoch 撑大（远超 desired）→ `surviving.size >= desired` → gap 恒为 0 → 不再分配新 location → executor 把所有已知 location 硬性退休后全集收敛仍无可写 → NULL 异常 → task 失败；
+- **修复**：(a) ReviveManager 开关开启时把所有退休上报（含已满足的）按 (partition, epoch) 去重（保留最硬 cause，非 SOFT 覆盖 SOFT）后一律转发，一条 Revive 可携带同 partition 多个 epoch；(b) `handleRevive`/`ChangeLocationsCallContext` 按 distinct partition 计数完成响应、同 partition 首条回复生效；(c) `PartitionHotnessTracker` 新增 `hardRetiredEpochs`，硬性移除为终态，迟到 SOFT 不复活；
+- **行为变化说明**：老 epoch 的硬性移除现在即时生效，但补缺分配仍由"前沿 epoch 事件"（无可写 location 的 revive / split 首报）触发——热点 partition 前沿事件持续发生，活跃宽度在下一次前沿分配时补回 desired，不会塌缩；
+- 测试：`PartitionHotnessTrackerSuite` 新增"迟到 SOFT 不复活"例；新增 `RequestLocationCallContextSuite`（同 partition 重复回复忽略、按 distinct 数完成）。
 
 **待办（上生产前必须做）**：
 - 集成测试（`tests/spark-it`）：`partitionSplit.threshold=10m`、重倾斜 Spark 作业——(a) reducer 数据与原生 shuffle 对拍一致；(b) 该 partition 最终有 >1 个 committed location 且数据无重复无丢失；(c) 写阶段无 revive 长尾（对比开关前后耗时）；

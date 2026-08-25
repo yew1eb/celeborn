@@ -924,8 +924,11 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
       oldPartitions: util.List[PartitionLocation],
       causes: util.List[StatusCode],
       serdeVersion: SerdeVersion): Unit = {
+    // One Revive message may carry several retire reports of the same partition (adaptive
+    // parallelism forwards every retired epoch, not only the latest one), so the response
+    // completes once every DISTINCT partition has been replied.
     val contextWrapper =
-      ChangeLocationsCallContext(context, partitionIds.size(), serdeVersion)
+      ChangeLocationsCallContext(context, partitionIds.asScala.toSet.size, serdeVersion)
     // If shuffle not registered, reply ShuffleNotRegistered and return
     if (!registeredShuffle.contains(shuffleId)) {
       logError(s"[handleRevive] shuffle $shuffleId not registered!")

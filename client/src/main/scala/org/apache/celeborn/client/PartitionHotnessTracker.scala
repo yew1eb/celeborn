@@ -39,6 +39,10 @@ private[client] class HotState {
   // for partitions that ever revived in adaptive-parallelism mode; other partitions derive their
   // active set as { latestPartitionLocation.epoch }.
   val activeEpochs = new util.LinkedHashSet[Integer]()
+  // Epochs retired by a non-soft cause (or a soft split of an unavailable worker). A late
+  // SOFT_SPLIT report of such an epoch (already in flight when the hard retire happened)
+  // must not resurrect it into the writable set.
+  val hardRetiredEpochs: util.Set[Integer] = ConcurrentHashMap.newKeySet[Integer]()
   // epoch -> when the location of the epoch was allocated (slots reserved) by this manager.
   val allocTimeMs = JavaUtils.newConcurrentHashMap[Int, java.lang.Long]()
   // Epochs whose first split report has been judged (dedupe repeated reports).
@@ -85,7 +89,8 @@ private[client] class PartitionHotnessTracker(
    * file keeps accepting writes until it reaches partitionSplitMaximumSize and hard-splits),
    * so the epoch is RETAINED in the active epoch set and remains a routing target; every other
    * cause (HARD_SPLIT, push failures, or a soft split of an unavailable worker) removes the
-   * epoch from the writable set.
+   * epoch from the writable set. Removal is final: a late SOFT_SPLIT report of an already
+   * removed epoch (sent before its hard retire) does not resurrect it.
    *
    * Hotness judgment: when the retire is measure-eligible, judge whether the partition is hot:
    * fillTime = now - allocTime(epoch). A location filled faster than the configured hot
@@ -116,10 +121,15 @@ private[client] class PartitionHotnessTracker(
     val workerAvailable = workerAvailableByLocation(oldPartition)
     val hotState = getOrCreateHotState(shuffleId, partitionId)
     hotState.synchronized {
-      if (cause.contains(StatusCode.SOFT_SPLIT) && workerAvailable) {
-        hotState.activeEpochs.add(Integer.valueOf(epoch))
+      val boxed = Integer.valueOf(epoch)
+      if (cause.contains(StatusCode.SOFT_SPLIT) && workerAvailable
+        && !hotState.hardRetiredEpochs.contains(boxed)) {
+        hotState.activeEpochs.add(boxed)
       } else {
-        hotState.activeEpochs.remove(Integer.valueOf(epoch))
+        // A retire that drops the epoch from the writable set is final: a late SOFT_SPLIT
+        // report of the same epoch (sent before the hard retire) must not resurrect it.
+        hotState.activeEpochs.remove(boxed)
+        hotState.hardRetiredEpochs.add(boxed)
       }
     }
     val measureEligible =

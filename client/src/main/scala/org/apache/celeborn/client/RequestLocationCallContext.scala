@@ -60,11 +60,15 @@ case class ChangeLocationsCallContext(
       additionalLocations: util.List[PartitionLocation] = util.Collections.emptyList()): Unit =
     this.synchronized {
       if (newLocs.containsKey(partitionId)) {
-        logError(s"PartitionId $partitionId already exists!")
-      }
-      newLocs.put(partitionId, (status, available, partitionLocationOpt.getOrElse(null)))
-      if (additionalLocations != null && !additionalLocations.isEmpty) {
-        additionalLocs.put(partitionId, additionalLocations)
+        // One Revive message can carry several requests of the same partition (adaptive
+        // parallelism reports every retired epoch); all of them are answered with the same
+        // full active set, so the first reply wins.
+        logDebug(s"PartitionId $partitionId already replied, ignore the duplicate reply.")
+      } else {
+        newLocs.put(partitionId, (status, available, partitionLocationOpt.getOrElse(null)))
+        if (additionalLocations != null && !additionalLocations.isEmpty) {
+          additionalLocs.put(partitionId, additionalLocations)
+        }
       }
 
       if (newLocs.size() == partitionCount || StatusCode.SHUFFLE_UNREGISTERED == status

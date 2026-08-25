@@ -64,12 +64,12 @@ public class PartitionLocationGroup {
   }
 
   /**
-   * Pick a writable location for {@code mapId}, skipping {@code excludeEpoch} (-1 = skip
-   * nothing). Writable means non-retired or soft-split: a SOFT_SPLIT file stays writable until it
-   * grows to partitionSplitMaximumSize and hard-splits, so soft-split locations remain first-class
-   * routing targets — this keeps the write load truly spread over all writable locations instead
-   * of collapsing onto the few non-retired ones. Traffic is spread uniformly over the writable
-   * subset via {@code mapId % writableCount}. Returns null when nothing is writable.
+   * Pick a writable location for {@code mapId}, skipping {@code excludeEpoch} (-1 = skip nothing).
+   * Writable means non-retired or soft-split: a SOFT_SPLIT file stays writable until it grows to
+   * partitionSplitMaximumSize and hard-splits, so soft-split locations remain first-class routing
+   * targets — this keeps the write load truly spread over all writable locations instead of
+   * collapsing onto the few non-retired ones. Traffic is spread uniformly over the writable subset
+   * via {@code mapId % writableCount}. Returns null when nothing is writable.
    */
   private PartitionLocation pick(int mapId, int excludeEpoch) {
     ParallelState p = parallel;
@@ -98,8 +98,7 @@ public class PartitionLocationGroup {
     return null;
   }
 
-  private static boolean isWritable(
-      ParallelState p, PartitionLocation loc, int excludeEpoch) {
+  private static boolean isWritable(ParallelState p, PartitionLocation loc, int excludeEpoch) {
     if (loc.getEpoch() == excludeEpoch) {
       return false;
     }
@@ -156,8 +155,7 @@ public class PartitionLocationGroup {
    * Mark {@code epoch} as retired with {@code cause}. Soft-retired locations stay writable and
    * remain routing targets; hard-retired ones are skipped by {@link #currentFor(int)}. A later
    * non-soft cause upgrades a previous SOFT_SPLIT retire (the location hard-split or failed
-   * afterwards), so it stops being writable; a harder cause is never downgraded back to
-   * SOFT_SPLIT.
+   * afterwards), so it stops being writable; a harder cause is never downgraded back to SOFT_SPLIT.
    *
    * @return true if this is the first time the epoch is retired (dedupe signal for the caller to
    *     send at most one revive per epoch).

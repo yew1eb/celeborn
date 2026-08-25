@@ -192,4 +192,21 @@ class PartitionHotnessTrackerSuite extends CelebornFunSuite {
       40000L)
     assert(tracker.currentActiveEpochs(shuffleId, partitionId).isEmpty)
   }
+
+  test("late SOFT_SPLIT report does not resurrect a hard-retired epoch") {
+    val tracker = makeTracker(_ => true)
+    val loc0 = makeLoc(partitionId, 0, "host1")
+    tracker.recordInitialAllocTime(shuffleId, Array(loc0), 0L)
+
+    // Epoch 0 soft-splits and stays writable, then hard-splits and is removed.
+    tracker.onEpochRetired(shuffleId, partitionId, 0, loc0, Some(StatusCode.SOFT_SPLIT), 30000L)
+    assert(tracker.currentActiveEpochs(shuffleId, partitionId) == Set(0))
+    tracker.onEpochRetired(shuffleId, partitionId, 0, loc0, Some(StatusCode.HARD_SPLIT), 40000L)
+    assert(tracker.currentActiveEpochs(shuffleId, partitionId).isEmpty)
+
+    // A SOFT_SPLIT report sent before the hard split arrives late: it must not resurrect
+    // the dead epoch into the writable set.
+    tracker.onEpochRetired(shuffleId, partitionId, 0, loc0, Some(StatusCode.SOFT_SPLIT), 41000L)
+    assert(tracker.currentActiveEpochs(shuffleId, partitionId).isEmpty)
+  }
 }
