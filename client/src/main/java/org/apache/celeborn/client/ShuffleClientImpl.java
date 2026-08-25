@@ -358,6 +358,19 @@ public class ShuffleClientImpl extends ShuffleClient {
           loc);
       pushState.removeBatch(batchId, loc.hostAndPushPort());
     } else if (request.reviveStatus != StatusCode.SUCCESS.getValue()) {
+      logger.warn(
+          "Revive for push data failed after waiting {} ms for shuffle {} map {} attempt {} partition {} batch {}: "
+              + "cause {}, revive status {}({}), old location {}.",
+          accumulatedTime,
+          shuffleId,
+          mapId,
+          attemptId,
+          partitionId,
+          batchId,
+          cause,
+          request.reviveStatus,
+          StatusCode.fromValue(request.reviveStatus),
+          request.loc);
       pushDataRpcResponseCallback.onFailure(
           new CelebornIOException(
               cause
@@ -1056,7 +1069,9 @@ public class ShuffleClientImpl extends ShuffleClient {
     ReviveRequest req =
         new ReviveRequest(shuffleId, mapId, attemptId, partitionId, epoch, oldLocation, cause);
     requests.add(req);
+    long reviveStartMs = System.currentTimeMillis();
     Map<Integer, Integer> results = reviveBatch(shuffleId, mapIds, requests);
+    long reviveElapsedMs = System.currentTimeMillis() - reviveStartMs;
 
     if (mapperEnded(shuffleId, mapId)) {
       logger.debug(
@@ -1067,9 +1082,22 @@ public class ShuffleClientImpl extends ShuffleClient {
           partitionId);
       return true;
     } else {
-      return results != null
-          && results.containsKey(partitionId)
-          && results.get(partitionId) == StatusCode.SUCCESS.getValue();
+      boolean success =
+          results != null
+              && results.containsKey(partitionId)
+              && results.get(partitionId) == StatusCode.SUCCESS.getValue();
+      // Map tasks block here waiting for the new location; record how long the wait took.
+      logger.info(
+          "Blocking revive for shuffle {} map {} attempt {} partition {} epoch {} (cause {}) {} after {} ms.",
+          shuffleId,
+          mapId,
+          attemptId,
+          partitionId,
+          epoch,
+          cause,
+          success ? "succeeded" : "failed",
+          reviveElapsedMs);
+      return success;
     }
   }
 
