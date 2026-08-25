@@ -24,8 +24,14 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.junit.Test;
 
@@ -186,5 +192,82 @@ public class PartitionLocationGroupSuiteJ {
     assertEquals(2, group.activeCount());
     assertEquals(2, group.currentFor(0).getEpoch());
     assertEquals(3, group.currentFor(1).getEpoch());
+  }
+
+  @Test
+  public void testConcurrentPickDuringFullSetEviction() throws Exception {
+    // Regression test: pick()/latest() must not throw ArrayIndexOutOfBoundsException when a
+    // concurrent full-set merge shrinks the active list via removeIf.
+    int numEpochs = 16;
+    List<PartitionLocation> all = new ArrayList<>();
+    for (int e = 0; e < numEpochs; e++) {
+      all.add(loc(e, "w" + e));
+    }
+    PartitionLocationGroup group = new PartitionLocationGroup(all.get(0));
+    group.mergeActiveLocations(all, true);
+    for (int e = 0; e < numEpochs; e += 2) {
+      group.retire(e, StatusCode.SOFT_SPLIT);
+    }
+
+    AtomicBoolean stop = new AtomicBoolean(false);
+    CopyOnWriteArrayList<Throwable> failures = new CopyOnWriteArrayList<>();
+    CountDownLatch startLatch = new CountDownLatch(1);
+
+    // Writer thread: alternate full-set merges that evict/re-add retired epochs, shrinking and
+    // growing the active list concurrently with the readers.
+    Thread writer =
+        new Thread(
+            () -> {
+              try {
+                startLatch.await();
+                while (!stop.get()) {
+                  // Report only odd epochs: even (retired) epochs get evicted from active.
+                  List<PartitionLocation> odd = new ArrayList<>();
+                  for (int e = 1; e < numEpochs; e += 2) {
+                    odd.add(loc(e, "w" + e));
+                  }
+                  group.mergeActiveLocations(odd, true);
+                  group.mergeActiveLocations(all, true);
+                }
+              } catch (Throwable t) {
+                failures.add(t);
+              }
+            });
+
+    List<Thread> readers = new ArrayList<>();
+    for (int r = 0; r < 4; r++) {
+      int mapIdBase = r * 1000;
+      Thread reader =
+          new Thread(
+              () -> {
+                try {
+                  startLatch.await();
+                  int i = 0;
+                  while (!stop.get()) {
+                    group.currentFor(mapIdBase + i);
+                    group.latest();
+                    group.anotherUsableFor(mapIdBase + i, 0);
+                    i++;
+                  }
+                } catch (Throwable t) {
+                  failures.add(t);
+                }
+              });
+      readers.add(reader);
+    }
+
+    writer.start();
+    for (Thread reader : readers) {
+      reader.start();
+    }
+    startLatch.countDown();
+    Thread.sleep(2000);
+    stop.set(true);
+    writer.join(TimeUnit.SECONDS.toMillis(10));
+    for (Thread reader : readers) {
+      reader.join(TimeUnit.SECONDS.toMillis(10));
+    }
+
+    assertTrue("Concurrent pick/merge threw: " + failures, failures.isEmpty());
   }
 }

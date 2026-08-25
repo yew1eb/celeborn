@@ -72,8 +72,10 @@ public class PartitionLocationGroup {
       PartitionLocation loc = single;
       return (loc != null && loc.getEpoch() != excludeEpoch) ? loc : null;
     }
-    List<PartitionLocation> active = p.active;
-    int n = active.size();
+    // Snapshot the active list: mergeActiveLocations(fullSet=true) may concurrently shrink it
+    // via removeIf, so size()-then-get() on the live list races and can go out of bounds.
+    PartitionLocation[] snapshot = p.active.toArray(new PartitionLocation[0]);
+    int n = snapshot.length;
     if (n == 0) {
       return null;
     }
@@ -81,7 +83,7 @@ public class PartitionLocationGroup {
     for (int pass = 0; pass < 2; pass++) {
       // pass 0: fully active locations; pass 1: soft-retired (draining) locations.
       for (int i = 0; i < n; i++) {
-        PartitionLocation loc = active.get((start + i) % n);
+        PartitionLocation loc = snapshot[(start + i) % n];
         if (loc.getEpoch() == excludeEpoch) {
           continue;
         }
@@ -103,8 +105,10 @@ public class PartitionLocationGroup {
     if (p == null) {
       return single;
     }
-    List<PartitionLocation> active = p.active;
-    return active.isEmpty() ? single : active.get(active.size() - 1);
+    // Snapshot for the same reason as pick(): a concurrent full-set eviction may shrink the
+    // list between the emptiness check and the last-element access.
+    PartitionLocation[] snapshot = p.active.toArray(new PartitionLocation[0]);
+    return snapshot.length == 0 ? single : snapshot[snapshot.length - 1];
   }
 
   public int maxEpoch() {
