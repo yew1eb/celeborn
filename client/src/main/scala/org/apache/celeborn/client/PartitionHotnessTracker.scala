@@ -34,9 +34,10 @@ import org.apache.celeborn.common.util.JavaUtils
  * location. All fields are mutated under this instance's monitor.
  */
 private[client] class HotState {
-  // Active epochs, insertion-ordered. Registered only for partitions that ever revived in
-  // adaptive-parallelism mode; other partitions derive their active set as
-  // { latestPartitionLocation.epoch }.
+  // Writable epochs, insertion-ordered. SOFT_SPLIT epochs of available workers stay here
+  // (still writable until hard split); hard-split / failed epochs are removed. Registered only
+  // for partitions that ever revived in adaptive-parallelism mode; other partitions derive their
+  // active set as { latestPartitionLocation.epoch }.
   val activeEpochs = new util.LinkedHashSet[Integer]()
   // epoch -> when the location of the epoch was allocated (slots reserved) by this manager.
   val allocTimeMs = JavaUtils.newConcurrentHashMap[Int, java.lang.Long]()
@@ -77,26 +78,19 @@ private[client] class PartitionHotnessTracker(
   private val shuffleInitialAllocTimeMs =
     JavaUtils.newConcurrentHashMap[Int, java.lang.Long]()
 
-  private def removeActiveEpoch(shuffleId: Int, partitionId: Int, epoch: Int): HotState = {
-    val map = partitionHotStates.get(shuffleId)
-    if (map != null) {
-      val entry = map.get(partitionId)
-      if (entry != null) {
-        entry.synchronized {
-          entry.activeEpochs.remove(Integer.valueOf(epoch))
-        }
-      }
-      entry
-    } else {
-      null
-    }
-  }
-
   /**
-   * Retire the epoch from the active epoch set and, when the retire is measure-eligible,
-   * judge whether the partition is hot: fillTime = now - allocTime(epoch). A location
-   * filled faster than the configured hot partition window raises the desired location
-   * count proportionally (see below), capped at maxLocationsPerPartition.
+   * Process the retire report of one epoch.
+   *
+   * Active-set maintenance: a SOFT_SPLIT location of an available worker stays writable (the
+   * file keeps accepting writes until it reaches partitionSplitMaximumSize and hard-splits),
+   * so the epoch is RETAINED in the active epoch set and remains a routing target; every other
+   * cause (HARD_SPLIT, push failures, or a soft split of an unavailable worker) removes the
+   * epoch from the writable set.
+   *
+   * Hotness judgment: when the retire is measure-eligible, judge whether the partition is hot:
+   * fillTime = now - allocTime(epoch). A location filled faster than the configured hot
+   * partition window raises the desired location count proportionally (see below), capped at
+   * maxLocationsPerPartition.
    *
    * A retire is measure-eligible when the cause is SOFT_SPLIT or HARD_SPLIT and the worker
    * of the retired location is still available: both split kinds reflect a threshold
@@ -119,20 +113,28 @@ private[client] class PartitionHotnessTracker(
       oldPartition: PartitionLocation,
       cause: Option[StatusCode],
       nowMs: Long): Unit = {
-    val hotState = removeActiveEpoch(shuffleId, partitionId, epoch)
+    val workerAvailable = workerAvailableByLocation(oldPartition)
+    val hotState = getOrCreateHotState(shuffleId, partitionId)
+    hotState.synchronized {
+      if (cause.contains(StatusCode.SOFT_SPLIT) && workerAvailable) {
+        hotState.activeEpochs.add(Integer.valueOf(epoch))
+      } else {
+        hotState.activeEpochs.remove(Integer.valueOf(epoch))
+      }
+    }
     val measureEligible =
       (cause.contains(StatusCode.SOFT_SPLIT) || cause.contains(StatusCode.HARD_SPLIT)) &&
-        workerAvailableByLocation(oldPartition)
+        workerAvailable
     if (!measureEligible) {
       logInfo(s"Partition $shuffleId-$partitionId epoch $epoch retired, not measured " +
         s"(cause ${cause.getOrElse("unknown")} not split-related or worker unavailable).")
       return
     }
-    if (hotState != null && hotState.splitReported.contains(Integer.valueOf(epoch))) {
+    if (hotState.splitReported.contains(Integer.valueOf(epoch))) {
       return
     }
     val allocTime = {
-      val recorded = if (hotState == null) null else hotState.allocTimeMs.get(epoch)
+      val recorded = hotState.allocTimeMs.get(epoch)
       if (recorded != null) {
         recorded
       } else if (epoch == 0) {
@@ -150,26 +152,25 @@ private[client] class PartitionHotnessTracker(
            s"${adaptivePartitionWriteParallelismHotWindowMs}ms."))
       return
     }
-    val state = getOrCreateHotState(shuffleId, partitionId)
-    state.synchronized {
-      if (state.splitReported.add(Integer.valueOf(epoch))) {
+    hotState.synchronized {
+      if (hotState.splitReported.add(Integer.valueOf(epoch))) {
         val fillTimeMs = nowMs - allocTime
         val target =
           math.ceil(adaptivePartitionWriteParallelismHotWindowMs.toDouble / fillTimeMs).toInt
         val newDesired = math.min(adaptivePartitionWriteParallelismMaxLocations, target)
-        state.judgedSplits += 1
-        if (newDesired > state.desired) {
-          state.desired = newDesired
+        hotState.judgedSplits += 1
+        if (newDesired > hotState.desired) {
+          hotState.desired = newDesired
           logInfo(s"Partition $shuffleId-$partitionId epoch $epoch filled a location in " +
             s"${fillTimeMs}ms (< window ${adaptivePartitionWriteParallelismHotWindowMs}ms), " +
-            s"boost desired location count to ${state.desired}.")
+            s"boost desired location count to ${hotState.desired}.")
         } else {
           // Log every measured fill time (not only boosts) so the hot window can be tuned
           // from observed fill times.
           logInfo(s"Partition $shuffleId-$partitionId epoch $epoch filled a location in " +
             s"${fillTimeMs}ms (< window ${adaptivePartitionWriteParallelismHotWindowMs}ms), " +
             s"computed target $newDesired location(s) does not exceed current desired " +
-            s"${state.desired}, no boost.")
+            s"${hotState.desired}, no boost.")
         }
       }
     }

@@ -138,7 +138,8 @@ class ChangePartitionManagerAdaptiveParallelismSuite extends CelebornFunSuite {
     changePartitionManager.recordInitialAllocTime(shuffleId, Array(loc0), 100000L)
 
     // Epoch 0 fills in 40s (< 60s window): the first SOFT_SPLIT report boosts desired to
-    // target ceil(60/40) = 2.
+    // target ceil(60/40) = 2. The soft-split epoch 0 stays writable, so only the gap of
+    // 2 - 1 = 1 fresh location is allocated.
     changePartitionManager.advance(40000)
     val context = new CapturingContext
     changePartitionManager.handleRequestPartitionLocation(
@@ -151,17 +152,16 @@ class ChangePartitionManagerAdaptiveParallelismSuite extends CelebornFunSuite {
       isSegmentGranularityVisible = false)
 
     assert(changePartitionManager.desiredLocationCount(shuffleId, partitionId) == 2)
-    // desired=2 with the retiring epoch 0: 2 fresh locations allocated on different workers.
     val newLocs = primaryLocs(shuffleId, partitionId).filter(_.getEpoch > 0)
-    assert(newLocs.map(_.getEpoch).toSet == Set(1, 2))
-    assert(newLocs.map(_.getHost).distinct.size == 2)
+    assert(newLocs.map(_.getEpoch).toSet == Set(1))
+    assert(newLocs.map(_.getHost).distinct.size == 1)
 
-    // The reply carries the full active set: max epoch as the primary reply, the rest
-    // as additional locations.
+    // The reply carries the full writable set including the soft-split epoch 0: max epoch as
+    // the primary reply, the rest as additional locations.
     val reply = context.replies.get(partitionId)
     assert(reply != null && reply.status == StatusCode.SUCCESS)
-    assert(reply.loc.isDefined && reply.loc.get.getEpoch == 2)
-    assert(reply.additionals.asScala.map(_.getEpoch).toSet == Set(1))
+    assert(reply.loc.isDefined && reply.loc.get.getEpoch == 1)
+    assert(reply.additionals.asScala.map(_.getEpoch).toSet == Set(0))
   }
 
   test("partition filled slower than the window is not boosted") {
@@ -173,7 +173,9 @@ class ChangePartitionManagerAdaptiveParallelismSuite extends CelebornFunSuite {
     val changePartitionManager = new FakeClockManager(conf, lifecycleManager, 100000L)
     changePartitionManager.recordInitialAllocTime(shuffleId, Array(loc0), 100000L)
 
-    // Normal file rolling: fillTime 70s > 60s window, desired stays 1 (plain replace).
+    // Normal file rolling: fillTime 70s > 60s window, desired stays 1. The soft-split
+    // epoch 0 stays writable, so no replacement is allocated and the reply points back
+    // to epoch 0 itself.
     changePartitionManager.advance(70000)
     val context = new CapturingContext
     changePartitionManager.handleRequestPartitionLocation(
@@ -187,10 +189,10 @@ class ChangePartitionManagerAdaptiveParallelismSuite extends CelebornFunSuite {
 
     assert(changePartitionManager.desiredLocationCount(shuffleId, partitionId) == 1)
     val newLocs = primaryLocs(shuffleId, partitionId).filter(_.getEpoch > 0)
-    assert(newLocs.map(_.getEpoch).toSet == Set(1))
+    assert(newLocs.isEmpty)
     val reply = context.replies.get(partitionId)
     assert(reply != null && reply.status == StatusCode.SUCCESS)
-    assert(reply.loc.isDefined && reply.loc.get.getEpoch == 1)
+    assert(reply.loc.isDefined && reply.loc.get.getEpoch == 0)
     assert(reply.additionals.isEmpty)
   }
 
@@ -214,8 +216,8 @@ class ChangePartitionManagerAdaptiveParallelismSuite extends CelebornFunSuite {
       isSegmentGranularityVisible = false)
 
     assert(changePartitionManager.desiredLocationCount(shuffleId, partitionId) == 1)
-    assert(primaryLocs(shuffleId, partitionId).filter(_.getEpoch > 0)
-      .map(_.getEpoch).toSet == Set(1))
+    // No boost, and the soft-split epoch 0 stays writable: nothing is allocated.
+    assert(primaryLocs(shuffleId, partitionId).filter(_.getEpoch > 0).isEmpty)
   }
 
   test("HARD_SPLIT with an unavailable worker only retires, never boosts") {
@@ -286,8 +288,8 @@ class ChangePartitionManagerAdaptiveParallelismSuite extends CelebornFunSuite {
     assert(primaryLocs(shuffleId, partitionId).size == locCountAfterBoost)
     val reply = context.replies.get(partitionId)
     assert(reply != null && reply.status == StatusCode.SUCCESS)
-    assert(reply.loc.isDefined && reply.loc.get.getEpoch == 2)
-    assert(reply.additionals.asScala.map(_.getEpoch).toSet == Set(1))
+    assert(reply.loc.isDefined && reply.loc.get.getEpoch == 1)
+    assert(reply.additionals.asScala.map(_.getEpoch).toSet == Set(0))
   }
 
   test("proportional step-up: a much faster fill jumps straight to the cap, no debounce") {
@@ -303,7 +305,8 @@ class ChangePartitionManagerAdaptiveParallelismSuite extends CelebornFunSuite {
     val changePartitionManager = new FakeClockManager(conf, lifecycleManager, 0L)
     changePartitionManager.recordInitialAllocTime(shuffleId, Array(loc0), 0L)
 
-    // t=40s: epoch 0 fills in 40s, target ceil(60/40) = 2 (epochs 1, 2 allocated at t=40s).
+    // t=40s: epoch 0 fills in 40s, target ceil(60/40) = 2; epoch 0 stays writable, so only
+    // epoch 1 is allocated at t=40s.
     changePartitionManager.advance(40000)
     changePartitionManager.handleRequestPartitionLocation(
       new CapturingContext,
@@ -315,16 +318,16 @@ class ChangePartitionManagerAdaptiveParallelismSuite extends CelebornFunSuite {
       isSegmentGranularityVisible = false)
     assert(changePartitionManager.desiredLocationCount(shuffleId, partitionId) == 2)
 
-    // t=50s: epoch 2 (allocated at t=40s) fills in 10s, target ceil(60/10) = 6, capped at
+    // t=50s: epoch 1 (allocated at t=40s) fills in 10s, target ceil(60/10) = 6, capped at
     // the configured max 4. No per-window debounce: the much faster fill corrects desired
     // immediately (the cap and the per-epoch first-report dedup bound the boosts).
     changePartitionManager.advance(10000)
-    val loc2 = primaryLocs(shuffleId, partitionId).find(_.getEpoch == 2).get
+    val loc1 = primaryLocs(shuffleId, partitionId).find(_.getEpoch == 1).get
     changePartitionManager.onEpochRetired(
       shuffleId,
       partitionId,
-      2,
-      loc2,
+      1,
+      loc1,
       Some(StatusCode.SOFT_SPLIT),
       50000L)
     assert(changePartitionManager.desiredLocationCount(shuffleId, partitionId) == 4)
@@ -425,7 +428,8 @@ class ChangePartitionManagerAdaptiveParallelismSuite extends CelebornFunSuite {
     val changePartitionManager = new FakeClockManager(conf, lifecycleManager, 100000L)
     changePartitionManager.recordInitialAllocTime(shuffleId, Array(loc0), 100000L)
 
-    // Boost to 2 active locations first (fillTime 40s -> target 2): active epochs {1, 2}.
+    // Boost to 2 writable locations first (fillTime 40s -> target 2): epoch 0 stays writable
+    // and epoch 1 is allocated, writable epochs {0, 1}.
     changePartitionManager.advance(40000)
     changePartitionManager.handleRequestPartitionLocation(
       new CapturingContext,
@@ -439,8 +443,8 @@ class ChangePartitionManagerAdaptiveParallelismSuite extends CelebornFunSuite {
     val loc1 = primaryLocs(shuffleId, partitionId).find(_.getEpoch == 1).get
 
     // A lagging executor retires epoch 1 slowly (fillTime 90s > window, no boost): the
-    // surviving epoch 2 already satisfies the writer, nothing is allocated, but the reply
-    // still carries the current active set.
+    // writable set {0, 1} already satisfies desired=2, nothing is allocated, but the reply
+    // still carries the current writable set.
     changePartitionManager.advance(90000)
     val context = new CapturingContext
     changePartitionManager.handleRequestPartitionLocation(
@@ -456,8 +460,8 @@ class ChangePartitionManagerAdaptiveParallelismSuite extends CelebornFunSuite {
     assert(primaryLocs(shuffleId, partitionId).size == locCountAfterBoost)
     val reply = context.replies.get(partitionId)
     assert(reply != null && reply.status == StatusCode.SUCCESS)
-    assert(reply.loc.isDefined && reply.loc.get.getEpoch == 2)
-    assert(reply.additionals.isEmpty)
+    assert(reply.loc.isDefined && reply.loc.get.getEpoch == 1)
+    assert(reply.additionals.asScala.map(_.getEpoch).toSet == Set(0))
   }
 
   test("concurrent revives of one partition allocate once and are replied the full set") {
@@ -503,17 +507,18 @@ class ChangePartitionManagerAdaptiveParallelismSuite extends CelebornFunSuite {
 
     changePartitionManager.handleRequestPartitions(shuffleId, Array(request2), false)
 
-    // desired=2, allocated exactly once (idempotent for concurrent revives).
+    // desired=2 with epoch 0 retained as writable: exactly one fresh location allocated
+    // (idempotent for concurrent revives).
     val newLocs = primaryLocs(shuffleId, partitionId).filter(_.getEpoch > 0)
-    assert(newLocs.map(_.getEpoch).toSet == Set(1, 2))
-    assert(newLocs.map(_.getHost).distinct.size == 2)
+    assert(newLocs.map(_.getEpoch).toSet == Set(1))
+    assert(newLocs.map(_.getHost).distinct.size == 1)
 
-    // Both requests are replied with the same full active set.
+    // Both requests are replied with the same full writable set (soft epoch 0 included).
     Seq(context1, context2).foreach { context =>
       val reply = context.replies.get(partitionId)
       assert(reply != null && reply.status == StatusCode.SUCCESS)
-      assert(reply.loc.isDefined && reply.loc.get.getEpoch == 2)
-      assert(reply.additionals.asScala.map(_.getEpoch).toSet == Set(1))
+      assert(reply.loc.isDefined && reply.loc.get.getEpoch == 1)
+      assert(reply.additionals.asScala.map(_.getEpoch).toSet == Set(0))
     }
   }
 }

@@ -257,9 +257,10 @@ class ChangePartitionManager(
       oldPartition,
       cause)
 
-    // The requested epoch is retiring: remove it from the active epoch set of the
-    // partition and, when the retire is measure-eligible, judge whether the partition is
-    // hot and needs more locations.
+    // The requested epoch is retiring: update the active epoch set of the partition (soft-split
+    // epochs of available workers stay writable and are retained; hard/failed ones are removed)
+    // and, when the retire is measure-eligible, judge whether the partition is hot and needs
+    // more locations.
     if (adaptivePartitionWriteParallelismEnabled && oldEpoch >= 0) {
       onEpochRetired(shuffleId, partitionId, oldEpoch, oldPartition, cause, nowMs())
     }
@@ -641,9 +642,10 @@ class ChangePartitionManager(
       val desired = math.min(
         desiredLocationCount(shuffleId, partitionId),
         adaptivePartitionWriteParallelismMaxLocations)
-      // The requested epoch was already removed from the registered active entry when the
-      // request arrived; for the derived case (no entry) remove it here.
-      val surviving = currentActiveEpochs(shuffleId, partitionId) - change.epoch
+      // The active epoch set is already up to date: it was maintained when the request
+      // arrived (soft-split epochs of available workers are retained as still writable;
+      // hard/failed epochs were removed). No need to subtract the requested epoch here.
+      val surviving = currentActiveEpochs(shuffleId, partitionId)
       val gap = math.max(0, desired - surviving.size)
       if (gap > 0) {
         val baseEpoch = math.max(

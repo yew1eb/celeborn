@@ -67,29 +67,30 @@ public class PartitionLocationGroupSuiteJ {
   }
 
   @Test
-  public void testRetireSwitchesCurrent() {
+  public void testSoftSplitStaysWritableHardSplitExcluded() {
     PartitionLocationGroup group = new PartitionLocationGroup(loc(0, "w1"));
     assertTrue(group.retire(0, StatusCode.SOFT_SPLIT));
     assertFalse(group.retire(0, StatusCode.SOFT_SPLIT));
     assertTrue(group.hasParallelState());
-    // Soft-retired location keeps draining when it is the only one.
+    // Soft-split location stays writable and keeps its routing share.
     assertEquals(0, group.currentFor(0).getEpoch());
     assertTrue(group.hasUsable());
 
     group.mergeActiveLocations(Arrays.asList(loc(0, "w1"), loc(1, "w2"), loc(2, "w3")), true);
     assertEquals(2, group.maxEpoch());
     assertEquals(3, group.activeCount());
-    // mapId % K dispatches to non-retired locations, skipping retired epoch 0.
-    assertEquals(1, group.currentFor(0).getEpoch());
+    // Writable set = {0 (soft), 1, 2}: mapId % 3 dispatches uniformly, soft epoch 0 included.
+    assertEquals(0, group.currentFor(0).getEpoch());
     assertEquals(1, group.currentFor(1).getEpoch());
     assertEquals(2, group.currentFor(2).getEpoch());
-    assertEquals(1, group.currentFor(3).getEpoch());
+    assertEquals(0, group.currentFor(3).getEpoch());
     assertEquals(2, group.latest().getEpoch());
 
     group.retire(1, StatusCode.HARD_SPLIT);
-    // Epoch 1 is hard-retired: everyone falls to epoch 2.
-    assertEquals(2, group.currentFor(0).getEpoch());
+    // Epoch 1 is hard-retired: the writable set shrinks to {0, 2}.
+    assertEquals(0, group.currentFor(0).getEpoch());
     assertEquals(2, group.currentFor(1).getEpoch());
+    assertEquals(0, group.currentFor(2).getEpoch());
     assertTrue(group.hasUsable());
   }
 

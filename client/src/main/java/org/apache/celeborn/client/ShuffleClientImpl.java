@@ -501,15 +501,19 @@ public class ShuffleClientImpl extends ShuffleClient {
       // the revive response. The retry thread reads the preset SUCCESS and picks the other
       // active location.
       request.reviveStatus = StatusCode.SUCCESS.getValue();
-      logger.info(
-          "Shuffle {} partition {}: location epoch {} retired (cause {}), "
-              + "re-push immediately to epoch {}@{} without waiting for revive.",
-          shuffleId,
-          request.partitionId,
-          epoch,
-          cause,
-          fallback.getEpoch(),
-          fallback.hostAndPushPort());
+      // Log only on the first retire of the epoch: every batch that gets the split response
+      // lands here, so logging unconditionally floods the executor log.
+      if (firstRetire) {
+        logger.info(
+            "Shuffle {} partition {}: location epoch {} retired (cause {}), "
+                + "re-push immediately to epoch {}@{} without waiting for revive.",
+            shuffleId,
+            request.partitionId,
+            epoch,
+            cause,
+            fallback.getEpoch(),
+            fallback.hostAndPushPort());
+      }
     } else if (firstRetire) {
       logger.info(
           "Shuffle {} partition {}: location epoch {} retired (cause {}), "
@@ -522,10 +526,11 @@ public class ShuffleClientImpl extends ShuffleClient {
   }
 
   /**
-   * Handle a SOFT_SPLIT of the given location: retire the epoch in the location group (parallel
-   * write) and, on the first retire of the epoch, report it to the LifecycleManager so that it can
-   * allocate a replacement (and boost the location count when the partition is hot). Data already
-   * landed on the worker, so writes are never blocked.
+   * Handle a SOFT_SPLIT of the given location: mark the epoch soft-split in the location group
+   * (it stays writable and keeps receiving its share of writes until it hard-splits) and, on the
+   * first retire of the epoch, report it to the LifecycleManager for hotness judgment (boosting
+   * the location count when the partition is hot). Data already landed on the worker, so writes
+   * are never blocked.
    */
   private void handleSoftSplitRetire(
       int shuffleId, int mapId, int attemptId, int partitionId, PartitionLocation latest) {
@@ -536,7 +541,7 @@ public class ShuffleClientImpl extends ShuffleClient {
         if (newlyRetired) {
           logger.info(
               "Shuffle {} partition {}: location epoch {}@{} soft-split, "
-                  + "keep draining and report to LifecycleManager.",
+                  + "remains writable for routing and report to LifecycleManager.",
               shuffleId,
               partitionId,
               latest.getEpoch(),

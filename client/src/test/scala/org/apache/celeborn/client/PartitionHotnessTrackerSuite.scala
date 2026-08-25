@@ -151,4 +151,45 @@ class PartitionHotnessTrackerSuite extends CelebornFunSuite {
       40000L)
     assert(tracker.desiredLocationCount(shuffleId, partitionId) == 4)
   }
+
+  test("SOFT_SPLIT of an available worker retains the epoch in the active set") {
+    val tracker = makeTracker(_ => true)
+    val loc0 = makeLoc(partitionId, 0, "host1")
+    tracker.recordInitialAllocTime(shuffleId, Array(loc0), 0L)
+
+    // Soft split: the file stays writable until it hard-splits, so epoch 0 is retained.
+    tracker.onEpochRetired(shuffleId, partitionId, 0, loc0, Some(StatusCode.SOFT_SPLIT), 30000L)
+    assert(tracker.currentActiveEpochs(shuffleId, partitionId) == Set(0))
+
+    // A later hard split of the same epoch removes it from the writable set.
+    tracker.onEpochRetired(shuffleId, partitionId, 0, loc0, Some(StatusCode.HARD_SPLIT), 40000L)
+    assert(tracker.currentActiveEpochs(shuffleId, partitionId).isEmpty)
+  }
+
+  test("SOFT_SPLIT of an unavailable worker removes the epoch from the active set") {
+    val tracker = makeTracker(_ => false)
+    val loc0 = makeLoc(partitionId, 0, "host1")
+    tracker.recordInitialAllocTime(shuffleId, Array(loc0), 0L)
+
+    tracker.onEpochRetired(shuffleId, partitionId, 0, loc0, Some(StatusCode.SOFT_SPLIT), 30000L)
+    assert(tracker.currentActiveEpochs(shuffleId, partitionId).isEmpty)
+  }
+
+  test("push failure cause removes the epoch from the active set") {
+    val tracker = makeTracker(_ => true)
+    val loc0 = makeLoc(partitionId, 0, "host1")
+    tracker.recordInitialAllocTime(shuffleId, Array(loc0), 0L)
+
+    // Seed the epoch as active via a soft split, then a push failure removes it.
+    tracker.onEpochRetired(shuffleId, partitionId, 0, loc0, Some(StatusCode.SOFT_SPLIT), 30000L)
+    assert(tracker.currentActiveEpochs(shuffleId, partitionId) == Set(0))
+    tracker.onEpochRetired(
+      shuffleId,
+      partitionId,
+      0,
+      loc0,
+      Some(StatusCode.PUSH_DATA_CONNECTION_EXCEPTION_PRIMARY),
+      40000L)
+    assert(tracker.currentActiveEpochs(shuffleId, partitionId).isEmpty)
+  }
 }

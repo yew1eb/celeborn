@@ -36,8 +36,10 @@ import org.apache.celeborn.common.protocol.message.StatusCode;
  * inflated lazily on the first SOFT_SPLIT/HARD_SPLIT/push failure, or when a revive response
  * delivers more than one active location.
  *
- * <p>Selection policy: {@code mapId % activeCount}, preferring non-retired locations; soft-retired
- * (draining) locations are used as fallback so in-flight writes are never dropped.
+ * <p>Selection policy: uniform over the writable subset — non-retired and SOFT_SPLIT locations (a
+ * soft-split file stays writable until it hard-splits) — via {@code mapId % writableCount}.
+ * Hard-retired (HARD_SPLIT / push failure) locations are skipped; writes to them are re-pushed to
+ * another writable location.
  */
 public class PartitionLocationGroup {
 
@@ -62,9 +64,12 @@ public class PartitionLocationGroup {
   }
 
   /**
-   * Pick a usable location for {@code mapId}, skipping {@code excludeEpoch} (-1 = skip nothing).
-   * Non-retired locations are preferred; soft-retired (draining) locations are the fallback so
-   * in-flight writes are never dropped. Returns null when nothing is usable.
+   * Pick a writable location for {@code mapId}, skipping {@code excludeEpoch} (-1 = skip
+   * nothing). Writable means non-retired or soft-split: a SOFT_SPLIT file stays writable until it
+   * grows to partitionSplitMaximumSize and hard-splits, so soft-split locations remain first-class
+   * routing targets — this keeps the write load truly spread over all writable locations instead
+   * of collapsing onto the few non-retired ones. Traffic is spread uniformly over the writable
+   * subset via {@code mapId % writableCount}. Returns null when nothing is writable.
    */
   private PartitionLocation pick(int mapId, int excludeEpoch) {
     ParallelState p = parallel;
@@ -75,28 +80,31 @@ public class PartitionLocationGroup {
     // Snapshot the active list: mergeActiveLocations(fullSet=true) may concurrently shrink it
     // via removeIf, so size()-then-get() on the live list races and can go out of bounds.
     PartitionLocation[] snapshot = p.active.toArray(new PartitionLocation[0]);
-    int n = snapshot.length;
-    if (n == 0) {
+    int writable = 0;
+    for (PartitionLocation loc : snapshot) {
+      if (isWritable(p, loc, excludeEpoch)) {
+        writable++;
+      }
+    }
+    if (writable == 0) {
       return null;
     }
-    int start = Math.floorMod(mapId, n);
-    for (int pass = 0; pass < 2; pass++) {
-      // pass 0: fully active locations; pass 1: soft-retired (draining) locations.
-      for (int i = 0; i < n; i++) {
-        PartitionLocation loc = snapshot[(start + i) % n];
-        if (loc.getEpoch() == excludeEpoch) {
-          continue;
-        }
-        StatusCode cause = p.retired.get(loc.getEpoch());
-        if (pass == 0 && cause == null) {
-          return loc;
-        }
-        if (pass == 1 && cause == StatusCode.SOFT_SPLIT) {
-          return loc;
-        }
+    int start = Math.floorMod(mapId, writable);
+    for (PartitionLocation loc : snapshot) {
+      if (isWritable(p, loc, excludeEpoch) && start-- == 0) {
+        return loc;
       }
     }
     return null;
+  }
+
+  private static boolean isWritable(
+      ParallelState p, PartitionLocation loc, int excludeEpoch) {
+    if (loc.getEpoch() == excludeEpoch) {
+      return false;
+    }
+    StatusCode cause = p.retired.get(loc.getEpoch());
+    return cause == null || cause == StatusCode.SOFT_SPLIT;
   }
 
   /** The location with the max epoch, used where a single representative location is needed. */
@@ -120,7 +128,7 @@ public class PartitionLocationGroup {
     return p.maxEpoch;
   }
 
-  /** Whether at least one location can still accept writes (active or soft-draining). */
+  /** Whether at least one location can still accept writes (active or soft-split). */
   public boolean hasUsable() {
     ParallelState p = parallel;
     if (p == null) {
@@ -145,10 +153,11 @@ public class PartitionLocationGroup {
   }
 
   /**
-   * Mark {@code epoch} as retired with {@code cause}. Soft-retired locations keep draining;
-   * hard-retired ones are skipped by {@link #currentFor(int)}. A later non-soft cause upgrades a
-   * previous SOFT_SPLIT retire (the draining location hard-split or failed afterwards), so it stops
-   * being a write fallback; a harder cause is never downgraded back to SOFT_SPLIT.
+   * Mark {@code epoch} as retired with {@code cause}. Soft-retired locations stay writable and
+   * remain routing targets; hard-retired ones are skipped by {@link #currentFor(int)}. A later
+   * non-soft cause upgrades a previous SOFT_SPLIT retire (the location hard-split or failed
+   * afterwards), so it stops being writable; a harder cause is never downgraded back to
+   * SOFT_SPLIT.
    *
    * @return true if this is the first time the epoch is retired (dedupe signal for the caller to
    *     send at most one revive per epoch).
@@ -281,7 +290,8 @@ public class PartitionLocationGroup {
 
   /** Parallel state, only exists for partitions that ever split or have multiple locations. */
   private static class ParallelState {
-    // Active locations, sorted by epoch ascending. Includes soft-retired (draining) ones.
+    // Active locations, sorted by epoch ascending. Includes soft-retired ones, which stay
+    // writable until they hard-split.
     final CopyOnWriteArrayList<PartitionLocation> active = new CopyOnWriteArrayList<>();
     // epoch -> retire cause
     final ConcurrentHashMap<Integer, StatusCode> retired = new ConcurrentHashMap<>();
