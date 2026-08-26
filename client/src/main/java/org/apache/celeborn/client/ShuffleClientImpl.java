@@ -410,7 +410,9 @@ public class ShuffleClientImpl extends ShuffleClient {
                             + newLocGroup.retiredEpochsSnapshot())));
         return;
       }
-      logger.info(
+      // One line per re-pushed batch: a churny partition (frequent split/retire) retries many
+      // batches per second, which floods the executor log at INFO.
+      logger.debug(
           "Revive for push data success after waiting {} ms, new location for shuffle {} map {} attempt {} partition {} batch {} is location {}.",
           accumulatedTime,
           shuffleId,
@@ -741,7 +743,9 @@ public class ShuffleClientImpl extends ShuffleClient {
     }
 
     if (accumulatedTime > 0) {
-      logger.info(
+      // Churny partitions (frequent split/retire) hit this per merged batch group; keep the
+      // executor log readable by demoting the per-group wait summary to DEBUG.
+      logger.debug(
           "Waited {} ms for revive results of {} batches for shuffle {} map {} attempt {} groupedBatch {}.",
           accumulatedTime,
           reviveRequests.length,
