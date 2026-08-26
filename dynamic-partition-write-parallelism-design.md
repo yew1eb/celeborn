@@ -5,14 +5,28 @@
 
 ## 1. 问题与动机
 
-- 写侧现状：**单活跃 location**（epoch 递增覆盖）；SOFT_SPLIT 不丢数据只发 revive，HARD_SPLIT 需重推，期间所有 map task 阻塞等新 location。
-- **SOFT→HARD 黄金窗口（问题本质）**：SOFT 模式下 split 升级判定为 `fileLength > splitThreshold(默认 1G) 且 < partitionSplitMaximumSize(默认 2G) → SOFT_SPLIT`；`≥ 2G → HARD_SPLIT`（同步阻塞所有写该 partition 的 map task）。多 mapper 并发写同一 partition 时，单 location 的 fileLength 由 N 个 mapper 共同推高（涨速 ×N），从 1G（SOFT）到 2G（HARD）的**窗口宽度 = 1G / 聚合写速**——写得快则窗口只有秒级，revive + 路由切换来不及完成就升 HARD，shuffle write 全局阻塞。**1:N 并行写的价值正在于此：N 个 mapper 散到 P 个 location，单 location 涨速 ÷P，窗口同比例拉宽**。HARD 模式（≥1G 直接 HARD_SPLIT）无 SOFT 预警，更需要并行写直接压低单 location 涨速。
-- **读侧天然支持一个 partition 多个文件**（方案的最大利好，零改动）：
-  - `reducerFileGroupsMap: shuffleId -> partitionId -> Set[PartitionLocation]`（`commit/CommitHandler.scala`）；
-  - reader 经 `GetReducerFileGroup` 拿整个 Set，`CelebornInputStream.nextReadableLocation()` 顺序串流；
-  - 去重已有：batch 头 (mapId, attemptId, batchId)，attempt 过滤 + 跨 location (mapId,batchId) 去重；batchId per-mapTask 全局单调，并行写不撞车；
-  - worker 文件名 `partitionId-epoch-mode`（`PartitionLocation.java`），多文件无冲突。
-- "单活跃 epoch"假设点（改造涉及）：`latestPartitionLocation`、`ChangePartitionManager.getLatestPartition`、`ShuffleClientImpl.newerPartitionLocationExists`、`updateLatestPartitionLocations`。
+### 1.1 背景：单活跃 location 的写模型
+
+Celeborn reduce partition 的写路径是**单活跃 location**：一个 partition 任一时刻只有一个活跃 PartitionLocation（某 worker 上的一个文件），所有 map task 的数据都写入这个文件；文件写满后换下一个 location，epoch 递增覆盖。
+
+为控制单文件大小，worker 对文件做 partition split（SOFT 模式下 `celeborn.client.shuffle.partitionSplit.threshold` 默认 1G 起判，`celeborn.worker.shuffle.partitionSplit.max` 默认 2G 为上限）：
+
+- `1G ≤ fileLength < 2G → SOFT_SPLIT`：本批数据已接收，client 只需发 revive 申请新 location，不丢数据；
+- `fileLength ≥ 2G → HARD_SPLIT`：本批数据被拒收，必须等新 location 并重推。
+
+### 1.2 问题：大分区的 split 开销拖慢整个 shuffle write
+
+split 的本质是一次"换文件"，其开销集中在**切换窗口**上：
+
+- **窗口随并发写塌缩**：一个 partition 的 fileLength 由写它的所有 mapper 共同推高。N 个 mapper 并发写一个大分区时，单文件涨速 = 聚合写速（×N），从 SOFT 阈值（1G）到 HARD 上限（2G）的窗口宽度 = 1G / 聚合写速——写得越快窗口越短，生产上 1000+ mapper 的场景实测只有百毫秒级。
+- **窗口塌缩 → 全局阻塞**：窗口内 revive + 路由切换来不及完成，文件即升 HARD_SPLIT，写该 partition 的所有 map task 一起同步阻塞等新 location（现有实现一条 revive 只换一个 location，多个退休 epoch 只能串行处理，阻塞时间随 epoch 数叠加）。
+- **生产实证**：写大分区（partition 868）时，单个 mapper 仅几 MB 数据就出现 queueWait=136s / queueStall=81s 的分钟级停顿；worker 磁盘紧张拒绝分配新 location 时等待进一步放大。
+
+**本优化要解决的问题**：减少写大分区时 partition split（换 location）带来的阻塞与重推开销，消除热点分区导致的 shuffle write 缓慢。
+
+### 1.3 思路：一个 partition 并行写多个 location
+
+N 个 mapper 按 mapId 散到 P 个活跃 location：单 location 涨速 ÷P → split 频率 ÷P、SOFT→HARD 窗口同比例拉宽；某个 location 发生 split 时其余 location 仍可写，写路径不再因切换而停顿。并行度无需静态配置——由 LifecycleManager 根据 location 被写满的速度做热点判定，自适应升档。
 
 ## 2. 目标与非目标
 
