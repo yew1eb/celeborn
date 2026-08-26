@@ -455,13 +455,16 @@ class ChangePartitionManagerAdaptiveParallelismSuite extends CelebornFunSuite {
     assert(allocated.size == 2)
 
     // As further split reports arrive, later rounds fill the remaining gap up to the cap.
+    // Retire the max allocated epoch so the request is not short-circuited by the
+    // newer-location early-return path.
     changePartitionManager.advance(1000)
+    val maxAllocated = primaryLocs(shuffleId, partitionId).filter(_.getEpoch > 0).maxBy(_.getEpoch)
     changePartitionManager.handleRequestPartitionLocation(
       new CapturingContext,
       shuffleId,
       partitionId,
-      allocated.head.getEpoch,
-      allocated.head,
+      maxAllocated.getEpoch,
+      maxAllocated,
       Some(StatusCode.SOFT_SPLIT),
       isSegmentGranularityVisible = false)
     val totalAllocated = primaryLocs(shuffleId, partitionId).filter(_.getEpoch > 0)

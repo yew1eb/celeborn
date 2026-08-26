@@ -157,8 +157,17 @@ private[client] class PartitionHotnessTracker(
       (cause.contains(StatusCode.SOFT_SPLIT) || cause.contains(StatusCode.HARD_SPLIT)) &&
         workerAvailable
     if (!measureEligible) {
-      logInfo(s"Partition $shuffleId-$partitionId epoch $epoch retired, not measured " +
-        s"(cause ${cause.getOrElse("unknown")} not split-related or worker unavailable).")
+      // Log only when the report changed the active set — with full retire forwarding (and the
+      // blocking revive attaching every outstanding retire), many executors report the same
+      // (partition, epoch) independently; those duplicates are idempotent no-ops and would
+      // otherwise flood the driver log (observed: thousands of identical lines per epoch).
+      if (epochRetained) {
+        logInfo(s"Partition $shuffleId-$partitionId epoch $epoch retired, not measured " +
+          s"(cause ${cause.getOrElse("unknown")} not split-related or worker unavailable).")
+      } else {
+        logDebug(s"Partition $shuffleId-$partitionId epoch $epoch retired (duplicate report), " +
+          s"not measured (cause ${cause.getOrElse("unknown")} not split-related or worker unavailable).")
+      }
       return
     }
     // First-eligible-report dedupe and judgment happen under one monitor: splitReported.add
