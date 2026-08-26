@@ -8,7 +8,7 @@
 - 写侧现状：**单活跃 location**（epoch 递增覆盖）；SOFT_SPLIT 不丢数据只发 revive，HARD_SPLIT 需重推，期间所有 map task 阻塞等新 location。
 - **SOFT→HARD 黄金窗口（问题本质）**：SOFT 模式下 split 升级判定为 `fileLength > splitThreshold(默认 1G) 且 < partitionSplitMaximumSize(默认 2G) → SOFT_SPLIT`；`≥ 2G → HARD_SPLIT`（同步阻塞所有写该 partition 的 map task）。多 mapper 并发写同一 partition 时，单 location 的 fileLength 由 N 个 mapper 共同推高（涨速 ×N），从 1G（SOFT）到 2G（HARD）的**窗口宽度 = 1G / 聚合写速**——写得快则窗口只有秒级，revive + 路由切换来不及完成就升 HARD，shuffle write 全局阻塞。**1:N 并行写的价值正在于此：N 个 mapper 散到 P 个 location，单 location 涨速 ÷P，窗口同比例拉宽**。HARD 模式（≥1G 直接 HARD_SPLIT）无 SOFT 预警，更需要并行写直接压低单 location 涨速。
 - **读侧天然支持一个 partition 多个文件**（方案的最大利好，零改动）：
-  - `reducerFileGroupsMap: partitionId -> Set[PartitionLocation]`（`LifecycleManager.scala`）；
+  - `reducerFileGroupsMap: shuffleId -> partitionId -> Set[PartitionLocation]`（`commit/CommitHandler.scala`）；
   - reader 经 `GetReducerFileGroup` 拿整个 Set，`CelebornInputStream.nextReadableLocation()` 顺序串流；
   - 去重已有：batch 头 (mapId, attemptId, batchId)，attempt 过滤 + 跨 location (mapId,batchId) 去重；batchId per-mapTask 全局单调，并行写不撞车；
   - worker 文件名 `partitionId-epoch-mode`（`PartitionLocation.java`），多文件无冲突。
@@ -252,12 +252,12 @@ SOFT_SPLIT 语义允许 split 后续写，提前增量 commit 会使续写 push 
 | `common/.../CelebornConf.scala` + `docs/configuration/client.md` | 3 个配置 + 文档再生成 | +43 |
 | `client/.../PartitionLocationGroup.java` | 薄包装 + ParallelState + 可写集合统一 pick（无判定逻辑）；retire cause 升级 + 全集收敛清理 | 298 |
 | `client/.../ShuffleClientImpl.java`、`ReviveManager.java` | §5.3 接入；退休上报全量转发（含本地已满足的，按 (partition,epoch) 去重保留最硬 cause） | ~+250 |
-| `client/.../ChangePartitionManager.scala` | 补差分配 + 全集回复；热点状态全部委托给 tracker（自身 757 行） | ~+250 |
+| `client/.../ChangePartitionManager.scala` | 补差分配 + 全集回复；热点状态全部委托给 tracker（自身 757 行） | ~+340 |
 | `client/.../PartitionHotnessTracker.scala` | HotState + 统一计量判定 + 比例步进 + hardRetiredEpochs 防复活 + 依赖注入（latestEpoch / workerAvailable / 时钟） | 275 |
 | `client/.../LifecycleManager.scala`、`RequestLocationCallContext.scala` | registerShuffle 记录 allocTime、additionalLocs 透传、Revive 按 distinct partition 计数 + 重复回复忽略 | ~+70 |
-| `client/src/test/...`（4 个套件） | PartitionLocationGroupSuiteJ 8 例、ChangePartitionManagerAdaptiveParallelismSuite 10 例、PartitionHotnessTrackerSuite 10 例、RequestLocationCallContextSuite 1 例 | ~1050 |
+| `client/src/test/...`（4 个套件） | PartitionLocationGroupSuiteJ 8 例、ChangePartitionManagerAdaptiveParallelismSuite 10 例、PartitionHotnessTrackerSuite 10 例、RequestLocationCallContextSuite 1 例 | 1077 |
 
-合计 ~1400 行含测试。
+合计约 2300 行（含测试，按上表累加）。注：带 ~ 的新增行数为约数——分支含 write-stats/UI 等并行工作，无法按 merge-base 精确隔离本特性。
 
 ## 10. 验证与线上事故教训
 
@@ -320,7 +320,7 @@ PR #3260（作者 ErikFang，2025-05 创建，[WIP]，diff ~3800 行）是唯一
 | **协议兼容** | `partition` 单值→repeated（旧 client 多元素 merge 畸形风险）+ 新 MessageType/StatusCode | proto3 additive `additionalPartitions`（field 5），双向降级安全（§8） |
 | **executor 改动** | LocationManager ~400 行 + 重试状态机重写（无单测） | PartitionLocationGroup 298 行薄包装 + 退休上报，重试路径复用 |
 | **测试** | Monitor 4 例 + 端到端时间断言 | 29 例（§10.1） |
-| **实现规模** | ~3800 行（WIP） | ~1400 行含测试 |
+| **实现规模** | ~3800 行（WIP） | ~2300 行含测试（§9） |
 | **上限/回收** | maxActiveLocation 默认 numMappers；只升不降 | maxLocations 默认 8；只升不降（同） |
 
 ## A.2 关键差异
