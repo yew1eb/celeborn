@@ -550,30 +550,71 @@ public class ShuffleClientImpl extends ShuffleClient {
               latest.hostAndPushPort());
         }
         if (newlyRetired && !mapperEnded(shuffleId, mapId)) {
-          ReviveRequest reviveRequest =
-              new ReviveRequest(
-                  shuffleId,
-                  mapId,
-                  attemptId,
-                  partitionId,
-                  latest.getEpoch(),
-                  latest,
-                  StatusCode.SOFT_SPLIT);
-          reviveManager.addRequest(reviveRequest);
+          submitSoftSplitRevive(shuffleId, mapId, attemptId, partitionId, latest);
         }
       }
     } else if (!newerPartitionLocationExists(
         reducePartitionMap.get(shuffleId), partitionId, latest.getEpoch(), false)) {
-      ReviveRequest reviveRequest =
-          new ReviveRequest(
-              shuffleId,
-              mapId,
-              attemptId,
-              partitionId,
-              latest.getEpoch(),
-              latest,
-              StatusCode.SOFT_SPLIT);
-      reviveManager.addRequest(reviveRequest);
+      submitSoftSplitRevive(shuffleId, mapId, attemptId, partitionId, latest);
+    }
+  }
+
+  /**
+   * Build and enqueue a SOFT_SPLIT revive report for the given location. The report carries no
+   * extra fields — it is the LifecycleManager's input for active-set maintenance and hotness
+   * judgment. Shared by the adaptive and non-adaptive SOFT_SPLIT paths.
+   */
+  private void submitSoftSplitRevive(
+      int shuffleId, int mapId, int attemptId, int partitionId, PartitionLocation latest) {
+    ReviveRequest reviveRequest =
+        new ReviveRequest(
+            shuffleId,
+            mapId,
+            attemptId,
+            partitionId,
+            latest.getEpoch(),
+            latest,
+            StatusCode.SOFT_SPLIT);
+    reviveManager.addRequest(reviveRequest);
+  }
+
+  /**
+   * Log the convergence of a partition's active set after a revive-batch response is applied: the
+   * parallel-write activation line when the active count grew beyond one, and the retired eviction
+   * line when stale retired entries were dropped. Extracted so the revive-batch response loop stays
+   * one line per concern.
+   */
+  private void logParallelWriteConvergence(
+      int shuffleId,
+      int partitionId,
+      List<PartitionLocation> allActive,
+      int beforeActive,
+      int afterActive,
+      int beforeRetired,
+      int afterRetired) {
+    if (afterActive > beforeActive && afterActive > 1) {
+      StringBuilder sb = new StringBuilder();
+      for (PartitionLocation l : allActive) {
+        if (sb.length() > 0) {
+          sb.append(",");
+        }
+        sb.append(l.getEpoch()).append("@").append(l.hostAndPushPort());
+      }
+      logger.info(
+          "Shuffle {} partition {}: parallel write active, now writing to {} locations: {}.",
+          shuffleId,
+          partitionId,
+          afterActive,
+          sb);
+    }
+    int evicted = beforeRetired - afterRetired;
+    if (evicted > 0) {
+      logger.info(
+          "Shuffle {} partition {}: evicted {} retired location(s) no longer reported "
+              + "by LifecycleManager.",
+          shuffleId,
+          partitionId,
+          evicted);
     }
   }
 
@@ -1155,43 +1196,33 @@ public class ShuffleClientImpl extends ShuffleClient {
               partitionLocationMap.computeIfAbsent(
                   partitionId, id -> new PartitionLocationGroup(loc));
           if (adaptivePartitionWriteParallelismEnabled) {
-            // Converge to the full active set delivered by the LifecycleManager.
+            // Converge to the full active set delivered by the LifecycleManager. The response is
+            // treated as a full set only when it genuinely carries additional active locations
+            // (additionalPartitions count > 0); a single-location response — whether from an old
+            // LM that never populates the field, or a new LM reporting a cold partition with only
+            // its max epoch — is NOT a full set, so it must not evict locally soft-retired epochs
+            // (M-E3: otherwise an old-LM single-element response would be treated as a full set
+            // and strip soft-retired routing targets from an already-inflated group).
+            List<PartitionLocation> additionals = response.additionalLocs().get(partitionId);
+            boolean fullSet = additionals != null && !additionals.isEmpty();
             List<PartitionLocation> allActive = new ArrayList<>();
             if (loc != null) {
               allActive.add(loc);
             }
-            List<PartitionLocation> additionals = response.additionalLocs().get(partitionId);
-            if (additionals != null) {
+            if (fullSet) {
               allActive.addAll(additionals);
             }
             int beforeActive = group.activeCount();
             int beforeRetired = group.retiredCount();
-            group.mergeActiveLocations(allActive, true);
-            int afterActive = group.activeCount();
-            if (afterActive > beforeActive && afterActive > 1) {
-              StringBuilder sb = new StringBuilder();
-              for (PartitionLocation l : allActive) {
-                if (sb.length() > 0) {
-                  sb.append(",");
-                }
-                sb.append(l.getEpoch()).append("@").append(l.hostAndPushPort());
-              }
-              logger.info(
-                  "Shuffle {} partition {}: parallel write active, now writing to {} locations: {}.",
-                  shuffleId,
-                  partitionId,
-                  afterActive,
-                  sb);
-            }
-            int evicted = beforeRetired - group.retiredCount();
-            if (evicted > 0) {
-              logger.info(
-                  "Shuffle {} partition {}: evicted {} retired location(s) no longer reported "
-                      + "by LifecycleManager.",
-                  shuffleId,
-                  partitionId,
-                  evicted);
-            }
+            group.mergeActiveLocations(allActive, fullSet);
+            logParallelWriteConvergence(
+                shuffleId,
+                partitionId,
+                allActive,
+                beforeActive,
+                group.activeCount(),
+                beforeRetired,
+                group.retiredCount());
           } else if (loc != null) {
             group.updateLatest(loc);
           }

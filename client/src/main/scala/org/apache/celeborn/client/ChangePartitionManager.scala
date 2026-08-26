@@ -128,9 +128,6 @@ class ChangePartitionManager(
   private[client] def desiredLocationCount(shuffleId: Int, partitionId: Int): Int =
     hotnessTracker.desiredLocationCount(shuffleId, partitionId)
 
-  private def getOrCreateHotState(shuffleId: Int, partitionId: Int): HotState =
-    hotnessTracker.getOrCreateHotState(shuffleId, partitionId)
-
   private def currentActiveEpochs(shuffleId: Int, partitionId: Int): Set[Int] =
     hotnessTracker.currentActiveEpochs(shuffleId, partitionId)
 
@@ -320,7 +317,7 @@ class ChangePartitionManager(
       shuffleId: Int,
       partitionId: Int): List[PartitionLocation] = {
     val epochs = currentActiveEpochs(shuffleId, partitionId)
-    val fromSnapshots = lifecycleManager
+    val located = lifecycleManager
       .workerSnapshots(shuffleId)
       .asScala
       .values
@@ -330,8 +327,20 @@ class ChangePartitionManager(
       .groupBy(_.getEpoch)
       .map(_._2.head)
       .toList
-    if (fromSnapshots.nonEmpty) {
-      fromSnapshots
+    // Drop locations whose worker has gone unavailable (excluded / shutting) and hard-retire
+    // their epochs from the hot state so the surviving set is not inflated by dead-worker epochs
+    // (which would silently shrink the allocation gap) and the full-set reply does not advertise
+    // dead-worker locations as writable targets (M-L1).
+    val (available, unavailable) = located.partition(loc =>
+      lifecycleManager.workerStatusTracker.workerAvailableByLocation(loc))
+    if (unavailable.nonEmpty) {
+      hotnessTracker.retireUnavailableWorkerEpochs(
+        shuffleId,
+        partitionId,
+        unavailable.map(_.getEpoch).toSet)
+    }
+    if (available.nonEmpty) {
+      available
     } else {
       val map = lifecycleManager.latestPartitionLocation.get(shuffleId)
       if (map == null) List.empty else Option(map.get(partitionId)).toList
@@ -520,18 +529,16 @@ class ChangePartitionManager(
     }
 
     // PartitionSplit all contains oldPartition
-    val (newlyAllocatedLocations, parallelAllocations) =
+    val newlyAllocatedLocations =
       if (adaptivePartitionWriteParallelismEnabled) {
         allocateParallelLocations(
           shuffleId,
           changePartitions.toList,
           candidates.asScala.toList)
       } else {
-        (
-          reallocateChangePartitionRequestSlotsFromCandidates(
-            changePartitions.toList,
-            candidates.asScala.toList),
-          Map.empty[Int, ParallelAllocation])
+        reallocateChangePartitionRequestSlotsFromCandidates(
+          changePartitions.toList,
+          candidates.asScala.toList)
       }
 
     if (!lifecycleManager.reserveSlotsWithRetry(
@@ -592,25 +599,25 @@ class ChangePartitionManager(
     }
 
     // Register the hot state of revived partitions (sparse): record the allocation time of
-    // every newly reserved epoch and the surviving active epoch set.
+    // every newly reserved epoch and ensure the surviving active epoch set is current. The
+    // epochs MUST come from the actually-reserved locations (newPrimaryLocations), not from a
+    // pre-reserve plan: reserveSlotsWithRetry retries a failed location with failedEpoch+1, which
+    // can shift a location's epoch away from the planned base+i (and even collide with another
+    // planned epoch). Registering the planned set would leave the real epoch unaccounted, evicted
+    // by currentActiveLocations' epoch filter, leaking the slot until StageEnd (B1). Surviving
+    // epochs are already in the hot state (maintained by onEpochRetired when each retire report
+    // arrived), so only the newly reserved epochs need registering here.
     if (adaptivePartitionWriteParallelismEnabled) {
       val allocTimeMs = nowMs()
-      parallelAllocations.foreach { case (partitionId, allocation) =>
-        if (allocation.newEpochs.nonEmpty) {
-          val entry = getOrCreateHotState(shuffleId, partitionId)
-          entry.synchronized {
-            (allocation.survivingEpochs ++ allocation.newEpochs).foreach { epoch =>
-              val boxed = Integer.valueOf(epoch)
-              if (!entry.activeEpochs.contains(boxed)) {
-                entry.activeEpochs.add(boxed)
-              }
-            }
-            allocation.newEpochs.foreach { epoch =>
-              entry.allocTimeMs.putIfAbsent(epoch, allocTimeMs)
-            }
-          }
+      newPrimaryLocations
+        .groupBy(_.getId)
+        .foreach { case (partitionId, locs) =>
+          hotnessTracker.registerAllocation(
+            shuffleId,
+            partitionId,
+            locs.map(_.getEpoch).toSet,
+            allocTimeMs)
         }
-      }
     }
 
     if (adaptivePartitionWriteParallelismEnabled) {
@@ -620,23 +627,20 @@ class ChangePartitionManager(
     }
   }
 
-  private case class ParallelAllocation(
-      survivingEpochs: Set[Int],
-      newEpochs: Set[Int])
-
   /**
    * Allocate new locations for each requested partition by the gap between the desired
    * location count (judged locally from eligible split reports, capped at the configured upper
    * bound) and the current active location count. The gap can be 0 when another executor
    * has already triggered the allocation. Newly allocated locations of one partition are
-   * placed on mutually different workers (best effort) with increasing epochs.
+   * placed on mutually different workers (best effort) with increasing epochs. Returns the
+   * pre-reserve WorkerResource; the actually-reserved epochs (post any reserve retry) are read
+   * back from the locations by the caller for hot-state registration (see B1).
    */
   private def allocateParallelLocations(
       shuffleId: Int,
       changePartitions: List[ChangePartitionRequest],
-      candidates: List[WorkerInfo]): (WorkerResource, Map[Int, ParallelAllocation]) = {
+      candidates: List[WorkerInfo]): WorkerResource = {
     val slots = new WorkerResource()
-    val allocations = scala.collection.mutable.Map[Int, ParallelAllocation]()
     changePartitions.foreach { change =>
       val partitionId = change.partitionId
       val desired = math.min(
@@ -670,12 +674,9 @@ class ChangePartitionManager(
             s"wanted $gap additional location(s) but allocated ${newEpochs.size} " +
             s"(not enough candidate workers).")
         }
-        allocations.put(partitionId, ParallelAllocation(surviving, newEpochs))
-      } else {
-        allocations.put(partitionId, ParallelAllocation(surviving, Set.empty))
       }
     }
-    (slots, allocations.toMap)
+    slots
   }
 
   private def allocateGapLocations(

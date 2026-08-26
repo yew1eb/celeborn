@@ -31,7 +31,16 @@ import org.apache.celeborn.common.util.JavaUtils
 /**
  * Driver-side hot state of one (shuffleId, partitionId), maintained by the
  * PartitionHotnessTracker to decide whether a partition needs more than one writable
- * location. All fields are mutated under this instance's monitor.
+ * location.
+ *
+ * <p>Synchronization strategy (per field): `activeEpochs` is a plain LinkedHashSet mutated only
+ * under the instance monitor (in `onEpochRetired`, `retireUnavailableWorkerEpochs`, and the
+ * allocation-registration path in `ChangePartitionManager`). `hardRetiredEpochs` and
+ * `splitReported` are concurrent sets, mutated under the same monitor but read lock-free
+ * (`desiredLocationCount` reads `desired`). `allocTimeMs` is a CHM mutated by `putIfAbsent`
+ * (lock-free, from allocation registration) and read under the monitor (in `onEpochRetired`).
+ * `desired` and `judgedSplits` are volatile, written under the monitor and read lock-free.
+ * The split-cause storage on the executor side (`PartitionLocationGroup`) is separate.
  */
 private[client] class HotState {
   // Writable epochs, insertion-ordered. SOFT_SPLIT epochs of available workers stay here
@@ -140,56 +149,51 @@ private[client] class PartitionHotnessTracker(
         s"(cause ${cause.getOrElse("unknown")} not split-related or worker unavailable).")
       return
     }
-    if (hotState.splitReported.contains(Integer.valueOf(epoch))) {
-      return
-    }
-    val allocTime = {
-      val recorded = hotState.allocTimeMs.get(epoch)
-      if (recorded != null) {
-        recorded
-      } else if (epoch == 0) {
-        shuffleInitialAllocTimeMs.get(shuffleId)
-      } else {
-        null
-      }
-    }
-    if (allocTime == null || nowMs - allocTime >= adaptivePartitionWriteParallelismHotWindowMs) {
-      markSplitReported(hotState, epoch)
-      logInfo(s"Partition $shuffleId-$partitionId epoch $epoch retired " +
-        s"(cause ${cause.get}), not hot: " +
-        (if (allocTime == null) "alloc time unknown."
-         else s"fill time ${nowMs - allocTime}ms >= window " +
-           s"${adaptivePartitionWriteParallelismHotWindowMs}ms."))
-      return
-    }
+    // First-eligible-report dedupe and judgment happen under one monitor: splitReported.add
+    // returns true only for the first eligible report of an epoch, so both the not-hot and the
+    // boost branches log exactly once per epoch (the old lock-free contains-precheck followed
+    // by a lock-free markSplitReported re-logged on repeat reports and was a benign but noisy
+    // double check).
     hotState.synchronized {
       if (hotState.splitReported.add(Integer.valueOf(epoch))) {
-        val fillTimeMs = nowMs - allocTime
-        val target =
-          math.ceil(adaptivePartitionWriteParallelismHotWindowMs.toDouble / fillTimeMs).toInt
-        val newDesired = math.min(adaptivePartitionWriteParallelismMaxLocations, target)
-        hotState.judgedSplits += 1
-        if (newDesired > hotState.desired) {
-          hotState.desired = newDesired
-          logInfo(s"Partition $shuffleId-$partitionId epoch $epoch filled a location in " +
-            s"${fillTimeMs}ms (< window ${adaptivePartitionWriteParallelismHotWindowMs}ms), " +
-            s"boost desired location count to ${hotState.desired}.")
-        } else {
-          // Log every measured fill time (not only boosts) so the hot window can be tuned
-          // from observed fill times.
-          logInfo(s"Partition $shuffleId-$partitionId epoch $epoch filled a location in " +
-            s"${fillTimeMs}ms (< window ${adaptivePartitionWriteParallelismHotWindowMs}ms), " +
-            s"computed target $newDesired location(s) does not exceed current desired " +
-            s"${hotState.desired}, no boost.")
+        val allocTime = {
+          val recorded = hotState.allocTimeMs.get(epoch)
+          if (recorded != null) {
+            recorded
+          } else if (epoch == 0) {
+            shuffleInitialAllocTimeMs.get(shuffleId)
+          } else {
+            null
+          }
         }
-      }
-    }
-  }
-
-  private def markSplitReported(hotState: HotState, epoch: Int): Unit = {
-    if (hotState != null) {
-      hotState.synchronized {
-        hotState.splitReported.add(Integer.valueOf(epoch))
+        if (allocTime == null || nowMs - allocTime >= adaptivePartitionWriteParallelismHotWindowMs) {
+          logDebug(s"Partition $shuffleId-$partitionId epoch $epoch retired " +
+            s"(cause ${cause.get}), not hot: " +
+            (if (allocTime == null) "alloc time unknown."
+             else s"fill time ${nowMs - allocTime}ms >= window " +
+               s"${adaptivePartitionWriteParallelismHotWindowMs}ms."))
+        } else {
+          // Guard against fillTime == 0 (allocTime == nowMs, e.g. a split report arriving in the
+          // same millisecond as the allocation): ceil(window / 0) = Infinity would pin desired to
+          // maxLocations on a single spurious report. Floor fillTime at 1ms so the step-up is
+          // bounded by ceil(window / 1ms) = window(ms), still capped by maxLocations.
+          val fillTimeMs = math.max(1L, nowMs - allocTime)
+          val target =
+            math.ceil(adaptivePartitionWriteParallelismHotWindowMs.toDouble / fillTimeMs).toInt
+          val newDesired = math.min(adaptivePartitionWriteParallelismMaxLocations, target)
+          hotState.judgedSplits += 1
+          if (newDesired > hotState.desired) {
+            hotState.desired = newDesired
+            logInfo(s"Partition $shuffleId-$partitionId epoch $epoch filled a location in " +
+              s"${fillTimeMs}ms (< window ${adaptivePartitionWriteParallelismHotWindowMs}ms), " +
+              s"boost desired location count to ${hotState.desired}.")
+          } else {
+            logDebug(s"Partition $shuffleId-$partitionId epoch $epoch filled a location in " +
+              s"${fillTimeMs}ms (< window ${adaptivePartitionWriteParallelismHotWindowMs}ms), " +
+              s"computed target $newDesired location(s) does not exceed current desired " +
+              s"${hotState.desired}, no boost.")
+          }
+        }
       }
     }
   }
@@ -217,6 +221,31 @@ private[client] class PartitionHotnessTracker(
     getOrCreateHotState(shuffleId, partitionId).allocTimeMs.putIfAbsent(epoch, nowMs)
   }
 
+  /**
+   * Register a batch of newly reserved epochs of a partition: add each to the active epoch set
+   * (if not already present) and record its allocation time. This is the single entry point for
+   * allocation registration, so the HotState internal representation does not leak to
+   * ChangePartitionManager. The epochs MUST be the actually-reserved epochs (post any reserve
+   * retry), not a pre-reserve plan — see B1.
+   */
+  private[client] def registerAllocation(
+      shuffleId: Int,
+      partitionId: Int,
+      epochs: Set[Int],
+      nowMs: Long): Unit = {
+    if (epochs.isEmpty) return
+    val entry = getOrCreateHotState(shuffleId, partitionId)
+    entry.synchronized {
+      epochs.foreach { epoch =>
+        val boxed = Integer.valueOf(epoch)
+        if (!entry.activeEpochs.contains(boxed)) {
+          entry.activeEpochs.add(boxed)
+        }
+        entry.allocTimeMs.putIfAbsent(epoch, nowMs)
+      }
+    }
+  }
+
   /** The desired total location count of a partition: the registered value, 1 if none. */
   private[client] def desiredLocationCount(shuffleId: Int, partitionId: Int): Int = {
     val map = partitionHotStates.get(shuffleId)
@@ -224,7 +253,7 @@ private[client] class PartitionHotnessTracker(
     if (entry == null) 1 else entry.desired
   }
 
-  private[client] def getOrCreateHotState(shuffleId: Int, partitionId: Int): HotState = {
+  private def getOrCreateHotState(shuffleId: Int, partitionId: Int): HotState = {
     val map = partitionHotStates.computeIfAbsent(
       shuffleId,
       new util.function.Function[Int, ConcurrentHashMap[Integer, HotState]]() {
@@ -251,6 +280,32 @@ private[client] class PartitionHotnessTracker(
       }
     } else {
       latestEpoch(shuffleId, partitionId).toSet
+    }
+  }
+
+  /**
+   * Hard-retire the given epochs of a partition when their hosting worker has gone
+   * unavailable (excluded / shutting). This keeps the surviving active set from being
+   * inflated by dead-worker epochs (which would silently shrink the allocation gap) and
+   * stops the full-set reply from advertising locations on dead workers as writable targets
+   * (M-L1). Removal is final: a late SOFT_SPLIT report of such an epoch must not resurrect it.
+   * Idempotent: no-op if the partition has no hot state entry.
+   */
+  private[client] def retireUnavailableWorkerEpochs(
+      shuffleId: Int,
+      partitionId: Int,
+      epochs: Set[Int]): Unit = {
+    if (epochs.isEmpty) return
+    val map = partitionHotStates.get(shuffleId)
+    if (map == null) return
+    val entry = map.get(partitionId)
+    if (entry == null) return
+    entry.synchronized {
+      epochs.foreach { epoch =>
+        val boxed = Integer.valueOf(epoch)
+        entry.activeEpochs.remove(boxed)
+        entry.hardRetiredEpochs.add(boxed)
+      }
     }
   }
 

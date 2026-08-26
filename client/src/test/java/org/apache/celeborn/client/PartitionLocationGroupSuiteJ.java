@@ -271,4 +271,63 @@ public class PartitionLocationGroupSuiteJ {
 
     assertTrue("Concurrent pick/merge threw: " + failures, failures.isEmpty());
   }
+
+  @Test
+  public void testNonFullSetSingleLocationDoesNotEvictSoftRetired() {
+    // M-E3: a single-location response that is NOT a full set (old LM, or new LM reporting a cold
+    // partition with only its max epoch) must not evict locally soft-retired epochs from an
+    // already-inflated group — otherwise the soft-retired routing targets are stripped and the
+    // write load collapses onto the single max-epoch location.
+    PartitionLocationGroup group = new PartitionLocationGroup(loc(0, "w1"));
+    group.mergeActiveLocations(Arrays.asList(loc(0, "w1"), loc(1, "w2")), true);
+    assertTrue(group.retire(0, StatusCode.SOFT_SPLIT));
+    // Soft-retired epoch 0 stays writable and keeps its routing share.
+    assertEquals(0, group.currentFor(0).getEpoch());
+    assertEquals(1, group.currentFor(1).getEpoch());
+    // A single-location non-full-set update (fullSet=false) must not evict epoch 0.
+    group.mergeActiveLocations(Collections.singletonList(loc(1, "w2")), false);
+    assertEquals(2, group.activeCount());
+    assertEquals(0, group.currentFor(0).getEpoch());
+    assertEquals(1, group.currentFor(1).getEpoch());
+    assertTrue(group.hasUsable());
+  }
+
+  @Test
+  public void testStaleFullSetDoesNotResurrectHardRetiredEpoch() {
+    // Mechanism one of M-E1: after a hard-retired epoch is digested (LM no longer reports it)
+    // and its tombstone pruned below the high water mark, a stale out-of-order full-set response
+    // that still carries the epoch must NOT resurrect it as a writable target.
+    PartitionLocationGroup group = new PartitionLocationGroup(loc(0, "w1"));
+    group.mergeActiveLocations(Arrays.asList(loc(0, "w1"), loc(1, "w2")), true);
+    group.retire(0, StatusCode.HARD_SPLIT);
+    // LM digests epoch 0 (no longer reports it); a newer hard retire advances the mark so that
+    // epoch 0's tombstone is pruned below the mark.
+    group.retire(2, StatusCode.HARD_SPLIT);
+    group.mergeActiveLocations(Arrays.asList(loc(1, "w2")), true);
+    // The stale out-of-order response still contains epoch 0 (and the long-digested epoch 2).
+    group.mergeActiveLocations(Arrays.asList(loc(0, "w1"), loc(1, "w2"), loc(2, "w3")), true);
+    for (int mapId = 0; mapId < 16; mapId++) {
+      assertNotEquals(0, group.currentFor(mapId).getEpoch());
+      assertNotEquals(2, group.currentFor(mapId).getEpoch());
+    }
+    assertEquals(1, group.activeCount());
+    assertEquals(1, group.latest().getEpoch());
+  }
+
+  @Test
+  public void testStaleFullSetDoesNotResurrectSoftRetiredThenHardRetiredEpoch() {
+    // A SOFT-retired epoch that the LM has digested (dropped from its full set) must not be
+    // resurrected by a stale response, even before any local HARD upgrade arrives.
+    PartitionLocationGroup group = new PartitionLocationGroup(loc(0, "w1"));
+    group.mergeActiveLocations(Arrays.asList(loc(0, "w1"), loc(1, "w2")), true);
+    assertTrue(group.retire(0, StatusCode.SOFT_SPLIT));
+    // LM digests epoch 0 and reports only epoch 1; the mark advances over the digested soft epoch.
+    group.mergeActiveLocations(Arrays.asList(loc(1, "w2")), true);
+    // Stale response still carrying epoch 0.
+    group.mergeActiveLocations(Arrays.asList(loc(0, "w1"), loc(1, "w2")), true);
+    for (int mapId = 0; mapId < 16; mapId++) {
+      assertNotEquals(0, group.currentFor(mapId).getEpoch());
+    }
+    assertEquals(1, group.activeCount());
+  }
 }

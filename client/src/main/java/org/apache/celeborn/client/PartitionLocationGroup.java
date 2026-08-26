@@ -24,6 +24,8 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 
+import com.google.common.annotations.VisibleForTesting;
+
 import org.apache.celeborn.common.protocol.PartitionLocation;
 import org.apache.celeborn.common.protocol.message.StatusCode;
 
@@ -80,22 +82,22 @@ public class PartitionLocationGroup {
     // Snapshot the active list: mergeActiveLocations(fullSet=true) may concurrently shrink it
     // via removeIf, so size()-then-get() on the live list races and can go out of bounds.
     PartitionLocation[] snapshot = p.active.toArray(new PartitionLocation[0]);
-    int writable = 0;
+    // Single pass: collect the writable locations once, then floorMod on the collected size.
+    // A two-pass count-then-select read the live retired CHM twice and raced with a concurrent
+    // retire cause upgrade (SOFT -> HARD) or full-set eviction between the passes, which could
+    // either spuriously return null (no item at the computed index) or select a location that
+    // was just hard-retired. Collecting once on the snapshot removes the race and is simpler.
+    List<PartitionLocation> writable = new ArrayList<>();
     for (PartitionLocation loc : snapshot) {
       if (isWritable(p, loc, excludeEpoch)) {
-        writable++;
+        writable.add(loc);
       }
     }
-    if (writable == 0) {
+    if (writable.isEmpty()) {
       return null;
     }
-    int start = Math.floorMod(mapId, writable);
-    for (PartitionLocation loc : snapshot) {
-      if (isWritable(p, loc, excludeEpoch) && start-- == 0) {
-        return loc;
-      }
-    }
-    return null;
+    int start = Math.floorMod(mapId, writable.size());
+    return writable.get(start);
   }
 
   private static boolean isWritable(ParallelState p, PartitionLocation loc, int excludeEpoch) {
@@ -128,6 +130,7 @@ public class PartitionLocationGroup {
   }
 
   /** Whether at least one location can still accept writes (active or soft-split). */
+  @VisibleForTesting
   public boolean hasUsable() {
     ParallelState p = parallel;
     if (p == null) {
@@ -174,16 +177,34 @@ public class PartitionLocationGroup {
               ? cause
               : existing;
         });
+    // Advance the hard-retired high water mark for a hard cause. Volatile max is safe under
+    // concurrent retires: a lost update leaves the mark smaller, which is conservative. The mark
+    // is only read defensively at merge time to refuse stale resurrected epochs, so a stale-smaller
+    // value merely weakens the guard until the next retire/merge re-advances it.
+    StatusCode effective = p.retired.get(epoch);
+    if (effective != null && effective != StatusCode.SOFT_SPLIT) {
+      int hw = p.hardRetiredHighWatermark;
+      if (epoch > hw) {
+        p.hardRetiredHighWatermark = epoch;
+      }
+    }
     return firstRetire[0];
   }
 
   /**
    * Converge to the active set delivered by the LifecycleManager: add locally missing epochs, never
-   * re-add locally retired ones. When {@code fullSet} is true the list is the LM's full active set,
-   * so retired epochs that the LM no longer reports (it has processed the retirement and allocated
-   * replacements) are dropped from both the active list and the retired map — this bounds the list
-   * size and keeps {@code mapId}-based routing uniform among live locations. Synchronized because
-   * the check-then-add of {@link #insertActive} is not atomic across concurrent revive responses.
+   * re-add locally retired ones. When {@code fullSet} is true the list is the LM's full active set.
+   * Resurrection is prevented by two layers: (1) the retired cause map is never cleared of an epoch
+   * still needed for cause lookup, and (2) a monotone {@code hardRetiredHighWatermark} — any epoch
+   * <= the mark that is not in the active list is definitively retired, so a stale out-of-order
+   * full-set response carrying such an epoch is refused rather than re-added.
+   *
+   * <p>The retired-tombstone cleanup that deleted epochs the LM no longer reports was removed: it
+   * deleted a tombstone and then let a stale response re-add the epoch as a fresh writable target
+   * (race with retire/compute on the same CHM). Digested hard-retired epochs are now pruned only
+   * below the high water mark, where the mark itself guards against resurrection. Synchronized
+   * because the check-then-add of {@link #insertActive} is not atomic across concurrent revive
+   * responses.
    */
   public synchronized void mergeActiveLocations(
       List<PartitionLocation> locations, boolean fullSet) {
@@ -197,25 +218,62 @@ public class PartitionLocationGroup {
     }
     ParallelState p = inflateIfNeeded();
     for (PartitionLocation loc : locations) {
-      if (loc == null || p.retired.containsKey(loc.getEpoch())) {
+      if (loc == null) {
+        continue;
+      }
+      int epoch = loc.getEpoch();
+      if (p.retired.containsKey(epoch)) {
+        // Tombstoned (retired) epoch — never re-add as a fresh writable target.
+        continue;
+      }
+      if (epoch <= p.hardRetiredHighWatermark && !activeContainsEpoch(p, epoch)) {
+        // Stale out-of-order full-set response carrying a digested (hard-retired) epoch.
         continue;
       }
       insertActive(p, loc);
-      if (loc.getEpoch() > p.maxEpoch) {
-        p.maxEpoch = loc.getEpoch();
+      if (epoch > p.maxEpoch) {
+        p.maxEpoch = epoch;
       }
     }
-    if (fullSet && !p.retired.isEmpty()) {
+    if (fullSet) {
       Set<Integer> reported = new HashSet<>();
       for (PartitionLocation loc : locations) {
         if (loc != null) {
           reported.add(loc.getEpoch());
         }
       }
+      // Evict any retired epoch (soft or hard) the LM no longer reports — bounds the active list
+      // and keeps mapId-based routing uniform over live locations. Reads retired (CHM) only;
+      // does not mutate it, so no race with retire/compute.
       p.active.removeIf(
-          loc -> p.retired.containsKey(loc.getEpoch()) && !reported.contains(loc.getEpoch()));
-      p.retired.keySet().removeIf(epoch -> !reported.contains(epoch));
+          loc -> !reported.contains(loc.getEpoch()) && p.retired.containsKey(loc.getEpoch()));
+      // Advance the high water mark over every retired epoch the LM has digested (no longer
+      // reports). The mark is monotone across full-set merges and covers both soft and hard
+      // retired epochs: once digested, the epoch is gone for good.
+      int maxDigested = p.hardRetiredHighWatermark;
+      for (Integer e : p.retired.keySet()) {
+        if (!reported.contains(e) && e > maxDigested) {
+          maxDigested = e;
+        }
+      }
+      p.hardRetiredHighWatermark = maxDigested;
+      // Prune digested tombstones strictly below the mark and no longer in the active list. Safe:
+      // any stale out-of-order response carrying such an epoch is refused by the mark guard at the
+      // top of the loop. A newly retired epoch has epoch > previous mark, so it survives this
+      // prune — the retire/compute vs this removeIf scan is therefore benign (weakly-consistent
+      // CHM iteration never prunes an epoch that still needs its tombstone).
+      final int mark = maxDigested;
+      p.retired.keySet().removeIf(e -> e < mark && !activeContainsEpoch(p, e));
     }
+  }
+
+  private static boolean activeContainsEpoch(ParallelState p, int epoch) {
+    for (PartitionLocation loc : p.active) {
+      if (loc.getEpoch() == epoch) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
@@ -294,5 +352,12 @@ public class PartitionLocationGroup {
     // epoch -> retire cause
     final ConcurrentHashMap<Integer, StatusCode> retired = new ConcurrentHashMap<>();
     volatile int maxEpoch = -1;
+    // Monotone high water mark of hard-retired epochs (HARD_SPLIT / push failure). Once an epoch
+    // is hard-retired the mark advances to it; any epoch <= hw that is not in the active list is
+    // definitively retired, so a stale out-of-order full-set response carrying such an epoch is
+    // refused at merge time instead of resurrecting the epoch as a writable target. This replaces
+    // the old retired-tombstone cleanup (which deleted then re-allowed resurrection) and removes
+    // the retire/compute vs merge/removeIf happens-before gap.
+    volatile int hardRetiredHighWatermark = -1;
   }
 }
