@@ -26,7 +26,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.celeborn.common.CelebornConf;
-import org.apache.celeborn.common.protocol.PartitionLocation;
 import org.apache.celeborn.common.protocol.ReviveRequest;
 import org.apache.celeborn.common.protocol.message.StatusCode;
 import org.apache.celeborn.common.util.ThreadUtils;
@@ -65,32 +64,58 @@ class ReviveManager {
               ArrayList<ReviveRequest> filteredRequests = new ArrayList<>();
               Map<Integer, ReviveRequest> requestsToSend = new HashMap<>();
 
-              Map<Integer, PartitionLocation> partitionMap =
+              Map<Integer, PartitionLocationGroup> partitionMap =
                   shuffleClient.reducePartitionMap.get(shuffleId);
               // Insert request that is not MapperEnded and with the max epoch
               // into requestsToSend
               Iterator<ReviveRequest> iter = requests.iterator();
+              // Adaptive parallelism only: every retire report must reach the LifecycleManager
+              // (its active-set bookkeeping depends on it), even when already satisfied locally.
+              // Deduped per (partitionId, epoch), keeping the hardest cause.
+              Map<Long, ReviveRequest> retireReports = new HashMap<>();
               while (iter.hasNext()) {
                 ReviveRequest req = iter.next();
                 if (shuffleClient.newerPartitionLocationExists(
                         partitionMap, req.partitionId, req.epoch, false)
                     || shuffleClient.mapperEnded(shuffleId, req.mapId)) {
                   req.reviveStatus = StatusCode.SUCCESS.getValue();
+                  if (shuffleClient.adaptivePartitionWriteParallelismEnabled) {
+                    mapIds.add(req.mapId);
+                    putReport(retireReports, req);
+                  }
                 } else {
                   filteredRequests.add(req);
                   mapIds.add(req.mapId);
-                  if (!requestsToSend.containsKey(req.partitionId)
-                      || requestsToSend.get(req.partitionId).epoch < req.epoch) {
+                  ReviveRequest current = requestsToSend.get(req.partitionId);
+                  if (current == null || current.epoch < req.epoch) {
+                    if (current != null && shuffleClient.adaptivePartitionWriteParallelismEnabled) {
+                      // The displaced lower-epoch request rides on the max-epoch request's
+                      // response, but its retirement still has to be reported.
+                      putReport(retireReports, current);
+                    }
                     requestsToSend.put(req.partitionId, req);
+                  } else if (current.epoch > req.epoch
+                      && shuffleClient.adaptivePartitionWriteParallelismEnabled) {
+                    putReport(retireReports, req);
                   }
                 }
               }
+              // An epoch covered by a waiting (non-satisfied) request is reported by it.
+              retireReports
+                  .values()
+                  .removeIf(
+                      req -> {
+                        ReviveRequest waiting = requestsToSend.get(req.partitionId);
+                        return waiting != null && waiting.epoch == req.epoch;
+                      });
 
-              if (!requestsToSend.isEmpty()) {
+              ArrayList<ReviveRequest> allToSend = new ArrayList<>(requestsToSend.values());
+              allToSend.addAll(retireReports.values());
+              if (!allToSend.isEmpty()) {
                 // Call reviveBatch. Return null means Exception caught or
                 // SHUFFLE_NOT_REGISTERED
                 Map<Integer, Integer> results =
-                    shuffleClient.reviveBatch(shuffleId, mapIds, requestsToSend.values());
+                    shuffleClient.reviveBatch(shuffleId, mapIds, allToSend);
                 if (results == null) {
                   for (ReviveRequest req : filteredRequests) {
                     req.reviveStatus = StatusCode.REVIVE_FAILED.getValue();
@@ -122,6 +147,19 @@ class ReviveManager {
       requestQueue.put(request);
     } catch (InterruptedException e) {
       logger.error("Exception when put into requests!", e);
+    }
+  }
+
+  private static long reportKey(int partitionId, int epoch) {
+    return ((long) partitionId << 32) | (epoch & 0xffffffffL);
+  }
+
+  /** Dedupe per (partitionId, epoch), keeping the hardest cause (non-SOFT_SPLIT wins). */
+  private static void putReport(Map<Long, ReviveRequest> reports, ReviveRequest req) {
+    long key = reportKey(req.partitionId, req.epoch);
+    ReviveRequest existing = reports.get(key);
+    if (existing == null || existing.cause == StatusCode.SOFT_SPLIT) {
+      reports.put(key, req);
     }
   }
 
