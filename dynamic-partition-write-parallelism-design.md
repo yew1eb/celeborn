@@ -14,19 +14,18 @@ Celeborn reduce partition 的写路径是**单活跃 location**：一个 partiti
 - `1G ≤ fileLength < 2G → SOFT_SPLIT`：本批数据已接收，client 只需发 revive 申请新 location，不丢数据；
 - `fileLength ≥ 2G → HARD_SPLIT`：本批数据被拒收，必须等新 location 并重推。
 
-### 1.2 问题：大分区的 split 开销拖慢整个 shuffle write
+### 1.2 问题：大分区的写压集中于单点，拖慢整个 shuffle write
 
-split 的本质是一次"换文件"，其开销集中在**切换窗口**上：
+根本问题是：**单活跃 location 把写一个大分区的所有 mapper 的聚合写压，集中到同一时刻的一个 worker 的一个文件上**。这一个根因同时产生两个表现：
 
-- **窗口随并发写塌缩**：一个 partition 的 fileLength 由写它的所有 mapper 共同推高。N 个 mapper 并发写一个大分区时，单文件涨速 = 聚合写速（×N），从 SOFT 阈值（1G）到 HARD 上限（2G）的窗口宽度 = 1G / 聚合写速——写得越快窗口越短，生产上 1000+ mapper 的场景实测只有百毫秒级。
-- **窗口塌缩 → 全局阻塞**：窗口内 revive + 路由切换来不及完成，文件即升 HARD_SPLIT，写该 partition 的所有 map task 一起同步阻塞等新 location（现有实现一条 revive 只换一个 location，多个退休 epoch 只能串行处理，阻塞时间随 epoch 数叠加）。
-- **生产实证**：写大分区（partition 868）时，单个 mapper 仅几 MB 数据就出现 queueWait=136s / queueStall=81s 的分钟级停顿；worker 磁盘紧张拒绝分配新 location 时等待进一步放大。
+- **表现一：split 窗口塌缩 → 全局阻塞**。一个 partition 的 fileLength 由写它的所有 mapper 共同推高，N 个 mapper 并发写时单文件涨速 = 聚合写速（×N），从 SOFT 阈值（1G）到 HARD 上限（2G）的窗口宽度 = 1G / 聚合写速——写得越快窗口越短，生产上 1000+ mapper 的场景实测只有百毫秒级（此时 Celeborn worker 使用的已是本地 SSD 磁盘，聚合写速远超 HDD 场景，窗口只会更短）。窗口内 revive + 路由切换来不及完成，文件即升 HARD_SPLIT，写该 partition 的所有 map task 一起同步阻塞等新 location（现有实现一条 revive 只换一个 location，多个退休 epoch 只能串行处理，阻塞时间随 epoch 数叠加）。
+- **表现二：单点写入瓶颈 → 反压停顿**。同一时刻一个 worker 的一个文件要吞下全部聚合写速，push RTT 升高、per-worker in-flight 饱和，mapper 写线程被 push 队列反压顶住。生产实证：写大分区（partition 868）期间，单个 mapper 仅几 MB 数据就出现 queueWait=136s / queueStall=81s 的分钟级停顿（指标定义见 `DataPusher`/`DataPushQueue`：push 队列反压 + in-flight 饱和），相关 worker avgRtt 高达秒级、slowPush(>5s) 数十次；split 风暴期的 blocking revive 与批量重推进一步放大了停顿。
 
-**本优化要解决的问题**：减少写大分区时 partition split（换 location）带来的阻塞与重推开销，消除热点分区导致的 shuffle write 缓慢。
+**本优化要解决的问题**：打散大分区集中于单点的写压，消除 partition split 切换阻塞与单点写入瓶颈导致的 shuffle write 缓慢。
 
 ### 1.3 思路：一个 partition 并行写多个 location
 
-N 个 mapper 按 mapId 散到 P 个活跃 location：单 location 涨速 ÷P → split 频率 ÷P、SOFT→HARD 窗口同比例拉宽；某个 location 发生 split 时其余 location 仍可写，写路径不再因切换而停顿。并行度无需静态配置——由 LifecycleManager 根据 location 被写满的速度做热点判定，自适应升档。
+N 个 mapper 按 mapId 散到 P 个活跃 location，对上述两个表现同时起效：单 location 涨速 ÷P → split 频率 ÷P、SOFT→HARD 窗口同比例拉宽；单 worker 承接的写压 ÷P → push RTT 回落、in-flight 饱和缓解；某个 location 发生 split 时其余 location 仍可写，写路径不再因切换而停顿。并行度无需静态配置——由 LifecycleManager 根据 location 被写满的速度做热点判定，自适应升档。
 
 ## 2. 目标与非目标
 
