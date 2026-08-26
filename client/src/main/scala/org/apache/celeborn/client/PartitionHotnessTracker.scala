@@ -114,11 +114,12 @@ private[client] class PartitionHotnessTracker(
    * with unknown allocTime (e.g. legacy data) conservatively never boost.
    *
    * Proportional step-up (no per-window debounce): with K active locations each one fills
-   * in ~K * fillTime, so K = ceil(window / fillTime) locations push the per-location fill
-   * time above the window. The judgment jumps straight to that level instead of climbing
-   * +1 per window, so a very hot partition reaches the cap after its first split report.
-   * desired is monotone and capped, and each epoch is judged at most once, so no debounce
-   * is needed to bound the total number of boosts.
+   * in ~K * fillTime, so K = ceil(K_measured * window / fillTime_measured) locations push the
+   * per-location fill time above the window — the measured fillTime is taken under the current
+   * parallelism, so the K factor rescales it to the aggregate fill rate. The judgment jumps
+   * straight to that level instead of climbing +1 per window, so a very hot partition reaches
+   * the cap after its first split report. desired is monotone and capped, and each epoch is
+   * judged at most once, so no debounce is needed to bound the total number of boosts.
    */
   private[client] def onEpochRetired(
       shuffleId: Int,
@@ -129,18 +130,29 @@ private[client] class PartitionHotnessTracker(
       nowMs: Long): Unit = {
     val workerAvailable = workerAvailableByLocation(oldPartition)
     val hotState = getOrCreateHotState(shuffleId, partitionId)
-    hotState.synchronized {
-      val boxed = Integer.valueOf(epoch)
-      if (cause.contains(StatusCode.SOFT_SPLIT) && workerAvailable
-        && !hotState.hardRetiredEpochs.contains(boxed)) {
-        hotState.activeEpochs.add(boxed)
-      } else {
-        // A retire that drops the epoch from the writable set is final: a late SOFT_SPLIT
-        // report of the same epoch (sent before the hard retire) must not resurrect it.
-        hotState.activeEpochs.remove(boxed)
-        hotState.hardRetiredEpochs.add(boxed)
+    // Whether the retired epoch was in the active set before this report, whether the report
+    // retained it (SOFT_SPLIT of an available worker), and the active set size after applying
+    // the report — together these reconstruct the parallelism K under which the location filled
+    // (see the step-up formula in the judgment below). All captured under one monitor so a
+    // concurrent report cannot skew the values.
+    val (wasActiveBefore: Boolean, epochRetained: Boolean, activeCountAfterRetire: Int) =
+      hotState.synchronized {
+        val boxed = Integer.valueOf(epoch)
+        val wasActive = hotState.activeEpochs.contains(boxed)
+        val retained =
+          if (cause.contains(StatusCode.SOFT_SPLIT) && workerAvailable
+            && !hotState.hardRetiredEpochs.contains(boxed)) {
+            hotState.activeEpochs.add(boxed)
+            true
+          } else {
+            // A retire that drops the epoch from the writable set is final: a late SOFT_SPLIT
+            // report of the same epoch (sent before the hard retire) must not resurrect it.
+            hotState.activeEpochs.remove(boxed)
+            hotState.hardRetiredEpochs.add(boxed)
+            false
+          }
+        (wasActive, retained, hotState.activeEpochs.size())
       }
-    }
     val measureEligible =
       (cause.contains(StatusCode.SOFT_SPLIT) || cause.contains(StatusCode.HARD_SPLIT)) &&
         workerAvailable
@@ -178,20 +190,33 @@ private[client] class PartitionHotnessTracker(
           // maxLocations on a single spurious report. Floor fillTime at 1ms so the step-up is
           // bounded by ceil(window / 1ms) = window(ms), still capped by maxLocations.
           val fillTimeMs = math.max(1L, nowMs - allocTime)
-          val target =
-            math.ceil(adaptivePartitionWriteParallelismHotWindowMs.toDouble / fillTimeMs).toInt
+          // The measured fillTime is the per-location fill time under the CURRENT parallelism K
+          // (the location was one of K active locations sharing the partition's write load), so
+          // the aggregate fill rate the formula needs is K / fillTime. Without the K factor the
+          // target is systematically underestimated K-fold once K > 1: a partition with K active
+          // locations each filling in window/9 ms computes target 9 forever and never boosts
+          // (observed in production: K = 38, fillTime = 1146ms, window = 10s, target stuck at 9).
+          // K counts the locations that were active while this one filled. After applying the
+          // retire report, a SOFT_SPLIT epoch is retained in the active set (already counted),
+          // while a removed epoch (HARD_SPLIT / failure / unavailable worker) must be added
+          // back once; floor 1 (K = 1 reproduces the single-location formula exactly).
+          val parallelismDuringFill =
+            math.max(1, activeCountAfterRetire + (if (wasActiveBefore && !epochRetained) 1 else 0))
+          val target = math.ceil(
+            parallelismDuringFill * adaptivePartitionWriteParallelismHotWindowMs.toDouble / fillTimeMs).toInt
           val newDesired = math.min(adaptivePartitionWriteParallelismMaxLocations, target)
           hotState.judgedSplits += 1
           if (newDesired > hotState.desired) {
             hotState.desired = newDesired
-            logInfo(s"Partition $shuffleId-$partitionId epoch $epoch filled a location in " +
-              s"${fillTimeMs}ms (< window ${adaptivePartitionWriteParallelismHotWindowMs}ms), " +
-              s"boost desired location count to ${hotState.desired}.")
+            logInfo(s"Partition $shuffleId-$partitionId epoch $epoch filled one of " +
+              s"$parallelismDuringFill active location(s) in ${fillTimeMs}ms (< window " +
+              s"${adaptivePartitionWriteParallelismHotWindowMs}ms), boost desired location count to " +
+              s"${hotState.desired}.")
           } else {
-            logDebug(s"Partition $shuffleId-$partitionId epoch $epoch filled a location in " +
-              s"${fillTimeMs}ms (< window ${adaptivePartitionWriteParallelismHotWindowMs}ms), " +
-              s"computed target $newDesired location(s) does not exceed current desired " +
-              s"${hotState.desired}, no boost.")
+            logDebug(s"Partition $shuffleId-$partitionId epoch $epoch filled one of " +
+              s"$parallelismDuringFill active location(s) in ${fillTimeMs}ms (< window " +
+              s"${adaptivePartitionWriteParallelismHotWindowMs}ms), computed target $newDesired " +
+              s"location(s) does not exceed current desired ${hotState.desired}, no boost.")
           }
         }
       }

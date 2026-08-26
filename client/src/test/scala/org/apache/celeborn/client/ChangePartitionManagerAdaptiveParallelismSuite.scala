@@ -318,9 +318,10 @@ class ChangePartitionManagerAdaptiveParallelismSuite extends CelebornFunSuite {
       isSegmentGranularityVisible = false)
     assert(changePartitionManager.desiredLocationCount(shuffleId, partitionId) == 2)
 
-    // t=50s: epoch 1 (allocated at t=40s) fills in 10s, target ceil(60/10) = 6, capped at
-    // the configured max 4. No per-window debounce: the much faster fill corrects desired
-    // immediately (the cap and the per-epoch first-report dedup bound the boosts).
+    // t=50s: epoch 1 (allocated at t=40s) fills in 10s, measured under K=2 ({epoch 0
+    // soft-retained, epoch 1}): target ceil(2*60/10) = 12, capped at the configured max 4.
+    // No per-window debounce: the much faster fill corrects desired immediately (the cap and
+    // the per-epoch first-report dedup bound the boosts).
     changePartitionManager.advance(10000)
     val loc1 = primaryLocs(shuffleId, partitionId).find(_.getEpoch == 1).get
     changePartitionManager.onEpochRetired(
@@ -346,8 +347,9 @@ class ChangePartitionManagerAdaptiveParallelismSuite extends CelebornFunSuite {
     val changePartitionManager = new ChangePartitionManager(conf, lifecycleManager)
     changePartitionManager.recordInitialAllocTime(shuffleId, Array(loc0), 0L)
 
-    // Proportional climb: fillTime 40s -> target 2, 25s -> 3, 15s -> 4, then a 10s fill
-    // (target 6) is capped at the configured max 4.
+    // Proportional climb: fillTime 40s under K=1 -> target 2; fillTime 25s under K=2
+    // ({epoch 0 soft-retained, epoch 1}) -> target ceil(120/25) = 5, capped at the
+    // configured max 4; a subsequent 15s fill keeps it at the cap.
     changePartitionManager.onEpochRetired(
       shuffleId,
       partitionId,
@@ -364,7 +366,7 @@ class ChangePartitionManagerAdaptiveParallelismSuite extends CelebornFunSuite {
       makeLoc(partitionId, 1, workers.head.host),
       Some(StatusCode.SOFT_SPLIT),
       95000L)
-    assert(changePartitionManager.desiredLocationCount(shuffleId, partitionId) == 3)
+    assert(changePartitionManager.desiredLocationCount(shuffleId, partitionId) == 4)
     changePartitionManager.recordAllocTime(shuffleId, partitionId, 2, 140000L)
     changePartitionManager.onEpochRetired(
       shuffleId,
@@ -398,7 +400,8 @@ class ChangePartitionManagerAdaptiveParallelismSuite extends CelebornFunSuite {
     // (written by another subset). Each epoch is measured against its own alloc time.
     changePartitionManager.recordAllocTime(shuffleId, partitionId, 5, 50000L)
     changePartitionManager.recordAllocTime(shuffleId, partitionId, 10, 0L)
-    // Epoch 10 fills first: fillTime 30s < window, boost.
+    // Epoch 10 fills first: fillTime 30s < window, measured under K=1 (it is the only active
+    // epoch so far) -> target 2.
     changePartitionManager.onEpochRetired(
       shuffleId,
       partitionId,
@@ -407,8 +410,8 @@ class ChangePartitionManagerAdaptiveParallelismSuite extends CelebornFunSuite {
       Some(StatusCode.SOFT_SPLIT),
       30000L)
     assert(changePartitionManager.desiredLocationCount(shuffleId, partitionId) == 2)
-    // Epoch 5 fills later at t=75s: measured against its own allocTime, fillTime 25s ->
-    // target 3, unaffected by the out-of-order event.
+    // Epoch 5 fills later at t=75s: measured against its own allocTime, fillTime 25s under
+    // K=2 ({5, 10}, both soft-retained in the active set) -> target ceil(2*60/25) = 5.
     changePartitionManager.onEpochRetired(
       shuffleId,
       partitionId,
@@ -416,7 +419,53 @@ class ChangePartitionManagerAdaptiveParallelismSuite extends CelebornFunSuite {
       makeLoc(partitionId, 5, workers.head.host),
       Some(StatusCode.SOFT_SPLIT),
       75000L)
-    assert(changePartitionManager.desiredLocationCount(shuffleId, partitionId) == 3)
+    assert(changePartitionManager.desiredLocationCount(shuffleId, partitionId) == 5)
+  }
+
+  test("gap allocation per round is capped to avoid herd oscillation") {
+    val conf = makeConf()
+    conf.set(
+      CelebornConf.CLIENT_SHUFFLE_ADAPTIVE_PARTITION_WRITE_PARALLELISM_MAX_LOCATIONS.key,
+      "8")
+    conf.set(
+      CelebornConf.CLIENT_SHUFFLE_ADAPTIVE_PARTITION_WRITE_PARALLELISM_MAX_ALLOC_PER_ROUND.key,
+      "2")
+    val shuffleId = 1
+    val partitionId = 0
+    val workers = (1 to 8).map(makeWorker)
+    prepareLifecycleManager(conf, shuffleId, partitionId, workers)
+    val changePartitionManager = new FakeClockManager(conf, lifecycleManager, 0L)
+    val loc0 = primaryLocs(shuffleId, partitionId).head
+    changePartitionManager.recordInitialAllocTime(shuffleId, Array(loc0), 0L)
+
+    // A very hot first fill jumps desired straight to the cap 8, but a single allocation round
+    // only allocates maxAllocPerRound = 2 fresh locations — the full gap burst would make all
+    // new locations fill and split in lockstep (herd oscillation).
+    changePartitionManager.advance(1000)
+    changePartitionManager.handleRequestPartitionLocation(
+      new CapturingContext,
+      shuffleId,
+      partitionId,
+      0,
+      loc0,
+      Some(StatusCode.SOFT_SPLIT),
+      isSegmentGranularityVisible = false)
+    assert(changePartitionManager.desiredLocationCount(shuffleId, partitionId) == 8)
+    val allocated = primaryLocs(shuffleId, partitionId).filter(_.getEpoch > 0)
+    assert(allocated.size == 2)
+
+    // As further split reports arrive, later rounds fill the remaining gap up to the cap.
+    changePartitionManager.advance(1000)
+    changePartitionManager.handleRequestPartitionLocation(
+      new CapturingContext,
+      shuffleId,
+      partitionId,
+      allocated.head.getEpoch,
+      allocated.head,
+      Some(StatusCode.SOFT_SPLIT),
+      isSegmentGranularityVisible = false)
+    val totalAllocated = primaryLocs(shuffleId, partitionId).filter(_.getEpoch > 0)
+    assert(totalAllocated.size == 4)
   }
 
   test("request with active set already satisfied allocates 0 but still replies full set") {

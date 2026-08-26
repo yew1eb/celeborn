@@ -1163,6 +1163,8 @@ class CelebornConf(loadDefaults: Boolean) extends Cloneable with Logging with Se
     get(CLIENT_SHUFFLE_ADAPTIVE_PARTITION_WRITE_PARALLELISM_MAX_LOCATIONS)
   def clientShuffleAdaptivePartitionWriteParallelismHotWindowMs: Long =
     get(CLIENT_SHUFFLE_ADAPTIVE_PARTITION_WRITE_PARALLELISM_HOT_WINDOW)
+  def clientShuffleAdaptivePartitionWriteParallelismMaxAllocPerRound: Int =
+    get(CLIENT_SHUFFLE_ADAPTIVE_PARTITION_WRITE_PARALLELISM_MAX_ALLOC_PER_ROUND)
   def batchHandleChangePartitionEnabled: Boolean = get(CLIENT_BATCH_HANDLE_CHANGE_PARTITION_ENABLED)
   def batchHandleChangePartitionBuckets: Int =
     get(CLIENT_BATCH_HANDLE_CHANGE_PARTITION_BUCKETS)
@@ -5424,12 +5426,28 @@ object CelebornConf extends Logging {
       .doc("The window to judge whether a partition is hot when " +
         "celeborn.client.shuffle.adaptivePartitionWriteParallelism.enabled is true. If a partition location " +
         "is filled up (soft/hard split) faster than this window, the partition is hot " +
-        "and its desired active location count is raised to ceil(window / fillTime), " +
-        "i.e. the location count that would push the per-location fill time above this " +
-        "window, capped by celeborn.client.shuffle.adaptivePartitionWriteParallelism.maxLocations.")
+        "and its desired active location count is raised to ceil(K * window / fillTime), " +
+        "where K is the active location count the fill was measured under and fillTime " +
+        "the per-location fill time, i.e. the location count that would push the per-location " +
+        "fill time above this window, capped by " +
+        "celeborn.client.shuffle.adaptivePartitionWriteParallelism.maxLocations.")
       .version("0.7.0")
       .timeConf(TimeUnit.MILLISECONDS)
       .createWithDefaultString("60s")
+
+  val CLIENT_SHUFFLE_ADAPTIVE_PARTITION_WRITE_PARALLELISM_MAX_ALLOC_PER_ROUND: ConfigEntry[Int] =
+    buildConf("celeborn.client.shuffle.adaptivePartitionWriteParallelism.maxAllocPerRound")
+      .categories("client")
+      .doc("Max number of new locations allocated for one partition in a single allocation " +
+        "round when celeborn.client.shuffle.adaptivePartitionWriteParallelism.enabled is true. " +
+        "A full gap burst (desired - surviving) is allocated at the same instant, which makes " +
+        "all new locations fill in lockstep and split in lockstep (herd oscillation); capping " +
+        "the per-round burst staggers the allocation. The remaining gap is filled by later " +
+        "rounds as split reports arrive.")
+      .version("0.7.0")
+      .intConf
+      .checkValue(v => v > 0, "Must be positive.")
+      .createWithDefault(4)
 
   val SHUFFLE_COMPRESSION_CODEC: ConfigEntry[String] =
     buildConf("celeborn.client.shuffle.compression.codec")

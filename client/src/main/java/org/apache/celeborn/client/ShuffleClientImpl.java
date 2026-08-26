@@ -388,10 +388,26 @@ public class ShuffleClientImpl extends ShuffleClient {
     } else {
       PartitionLocationGroup newLocGroup = locationGroup(shuffleId, partitionId);
       PartitionLocation newLoc = newLocGroup == null ? null : newLocGroup.currentFor(mapId);
+      if (newLoc == null && newLocGroup != null && adaptivePartitionWriteParallelismEnabled) {
+        // Revive reported SUCCESS but every known location is locally retired — the LM's active
+        // set is stale (its digest of the retire reports lags). Do a bounded blocking revive
+        // with all outstanding retire reports attached instead of failing the task.
+        newLoc =
+            reviveUntilUsable(
+                shuffleId, mapId, attemptId, partitionId, newLocGroup, /* maxAttempts= */ 3);
+      }
       if (newLoc == null) {
         pushDataRpcResponseCallback.onFailure(
             new CelebornIOException(
-                cause + " then revive but no usable location for partition " + partitionId));
+                cause
+                    + " then revive but no usable location for partition "
+                    + partitionId
+                    + (newLocGroup == null
+                        ? ""
+                        : "; active epochs: "
+                            + newLocGroup.activeEpochsSnapshot()
+                            + ", retired: "
+                            + newLocGroup.retiredEpochsSnapshot())));
         return;
       }
       logger.info(
@@ -1101,6 +1117,113 @@ public class ShuffleClientImpl extends ShuffleClient {
     }
   }
 
+  /**
+   * Blocking revive for the all-locations-unusable case of adaptive parallelism. Besides the fresh
+   * location request for the partition's max epoch, every locally retired location still held in
+   * the active list is forwarded as a retire report — the LM counts those epochs as surviving until
+   * the report arrives, so without them the gap-based allocation finds gap == 0, re-replies the
+   * same retired epochs, and this executor is left with no writable location (the NULL-location
+   * failure). Returns the response status per partition, or null when the RPC itself failed.
+   */
+  private Map<Integer, Integer> reviveWithRetires(
+      int shuffleId,
+      int mapId,
+      int attemptId,
+      int partitionId,
+      int epoch,
+      PartitionLocation oldLocation,
+      StatusCode cause,
+      PartitionLocationGroup group) {
+    excludeWorkerByCause(cause, oldLocation);
+
+    Set<Integer> mapIds = new HashSet<>();
+    mapIds.add(mapId);
+    List<ReviveRequest> requests = new ArrayList<>();
+    requests.add(
+        new ReviveRequest(shuffleId, mapId, attemptId, partitionId, epoch, oldLocation, cause));
+    for (PartitionLocationGroup.OutstandingRetire retire : group.outstandingRetires()) {
+      // Skip the primary request's epoch — it is already carried by the request above.
+      if (retire.location.getEpoch() != epoch) {
+        requests.add(
+            new ReviveRequest(
+                shuffleId,
+                mapId,
+                attemptId,
+                partitionId,
+                retire.location.getEpoch(),
+                retire.location,
+                retire.cause));
+      }
+    }
+    return reviveBatch(shuffleId, mapIds, requests);
+  }
+
+  /**
+   * Revive with all outstanding retire reports attached, up to {@code maxAttempts} times, until the
+   * partition has a writable location for {@code mapId}. Each attempt re-snapshots the group: a
+   * previous attempt may have delivered locations that a concurrent retire took down again, so the
+   * retire reports of the next attempt reflect the newest local state. Returns the usable location,
+   * or null when attempts are exhausted / the RPC fails / the mapper has ended (the push caller
+   * treats a null return as unusable and skips or fails accordingly).
+   */
+  private PartitionLocation reviveUntilUsable(
+      int shuffleId,
+      int mapId,
+      int attemptId,
+      int partitionId,
+      PartitionLocationGroup group,
+      int maxAttempts) {
+    for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+      if (mapperEnded(shuffleId, mapId)) {
+        return null;
+      }
+      long reviveStartMs = System.currentTimeMillis();
+      Map<Integer, Integer> results =
+          reviveWithRetires(
+              shuffleId,
+              mapId,
+              attemptId,
+              partitionId,
+              group.maxEpoch(),
+              group.latest(),
+              StatusCode.PUSH_DATA_FAIL_NON_CRITICAL_CAUSE_PRIMARY,
+              group);
+      long elapsedMs = System.currentTimeMillis() - reviveStartMs;
+      boolean success =
+          results != null
+              && results.containsKey(partitionId)
+              && results.get(partitionId) == StatusCode.SUCCESS.getValue();
+      logger.info(
+          "Blocking revive for shuffle {} map {} attempt {} partition {} epoch {} attempt {}/{} {} after {} ms.",
+          shuffleId,
+          mapId,
+          attemptId,
+          partitionId,
+          group.maxEpoch(),
+          attempt,
+          maxAttempts,
+          success ? "succeeded" : "failed",
+          elapsedMs);
+      if (success) {
+        PartitionLocation loc = group.currentFor(mapId);
+        if (loc != null) {
+          return loc;
+        }
+        // SUCCESS but nothing writable: the response carried only epochs this executor has
+        // already retired (stale active set on the LM side). Fall through and retry — the
+        // next attempt forwards the retire reports of those very epochs.
+        logger.warn(
+            "Shuffle {} partition {}: blocking revive returned SUCCESS but no writable location "
+                + "(attempt {}/{}); retrying with outstanding retire reports.",
+            shuffleId,
+            partitionId,
+            attempt,
+            maxAttempts);
+      }
+    }
+    return null;
+  }
+
   private boolean revive(
       int shuffleId,
       int mapId,
@@ -1335,28 +1458,20 @@ public class ShuffleClientImpl extends ShuffleClient {
     PartitionLocationGroup group = map.get(partitionId);
     PartitionLocation currentLoc = group == null ? null : group.currentFor(mapId);
     if (currentLoc == null && group != null && adaptivePartitionWriteParallelismEnabled) {
-      // All known locations of this partition are unusable, synchronously revive for a
-      // fresh location (same semantics as the legacy single-location revive).
+      // All known locations of this partition are unusable. Revive with every outstanding retire
+      // report attached, then retry a bounded number of times: a single response may still carry
+      // only epochs this executor has already retired (the LM digests retire reports with a delay,
+      // and a concurrent full-set merge may retire the newly delivered location again before the
+      // pick). Retrying is safe — the request is idempotent from this executor's perspective — and
+      // beats failing the task with a NULL location on a transiently stale active set.
       logger.info(
           "Shuffle {} partition {}: all {} location(s) unusable, blocking revive from epoch {}.",
           shuffleId,
           partitionId,
           group.activeCount(),
           group.maxEpoch());
-      if (!revive(
-          shuffleId,
-          mapId,
-          attemptId,
-          partitionId,
-          group.maxEpoch(),
-          group.latest(),
-          StatusCode.PUSH_DATA_FAIL_NON_CRITICAL_CAUSE_PRIMARY)) {
-        throw new CelebornIOException(
-            String.format(
-                "Revive for shuffle %s partition %d failed, all locations unusable.",
-                shuffleId, partitionId));
-      }
-      currentLoc = group.currentFor(mapId);
+      currentLoc =
+          reviveUntilUsable(shuffleId, mapId, attemptId, partitionId, group, /* maxAttempts= */ 3);
       if (currentLoc != null) {
         logger.info(
             "Shuffle {} partition {}: blocking revive succeeded, writing to epoch {}@{}.",
@@ -1370,7 +1485,11 @@ public class ShuffleClientImpl extends ShuffleClient {
     if (loc == null) {
       throw new CelebornIOException(
           String.format(
-              "Partition location for shuffle %s partition %d is NULL!", shuffleId, partitionId));
+              "Partition location for shuffle %s partition %d is NULL! Active epochs: %s; retired: %s.",
+              shuffleId,
+              partitionId,
+              group == null ? "[]" : group.activeEpochsSnapshot(),
+              group == null ? "[]" : group.retiredEpochsSnapshot()));
     }
 
     PushState pushState = getPushState(mapKey);

@@ -92,6 +92,8 @@ class ChangePartitionManager(
     conf.clientShuffleAdaptivePartitionWriteParallelismEnabled
   private val adaptivePartitionWriteParallelismMaxLocations =
     conf.clientShuffleAdaptivePartitionWriteParallelismMaxLocations
+  private val adaptivePartitionWriteParallelismMaxAllocPerRound =
+    conf.clientShuffleAdaptivePartitionWriteParallelismMaxAllocPerRound
 
   // Injectable clock for testing.
   private[client] var nowMs: () => Long = () => System.currentTimeMillis()
@@ -650,7 +652,13 @@ class ChangePartitionManager(
       // arrived (soft-split epochs of available workers are retained as still writable;
       // hard/failed epochs were removed). No need to subtract the requested epoch here.
       val surviving = currentActiveEpochs(shuffleId, partitionId)
-      val gap = math.max(0, desired - surviving.size)
+      // Cap the per-round allocation burst: allocating the whole gap at the same instant makes
+      // all new locations fill in lockstep and split in lockstep (herd oscillation observed in
+      // production — dozens of locations reported filled within the same millisecond). The
+      // remaining gap is filled by later rounds as the next split reports arrive.
+      val gap = math.max(
+        0,
+        math.min(desired - surviving.size, adaptivePartitionWriteParallelismMaxAllocPerRound))
       if (gap > 0) {
         val baseEpoch = math.max(
           latestEpoch(shuffleId, partitionId).getOrElse(change.epoch),

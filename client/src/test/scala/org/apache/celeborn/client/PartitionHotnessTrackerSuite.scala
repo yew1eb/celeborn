@@ -103,11 +103,13 @@ class PartitionHotnessTrackerSuite extends CelebornFunSuite {
     val loc0 = makeLoc(partitionId, 0, "host1")
     tracker.recordInitialAllocTime(shuffleId, Array(loc0), 0L)
 
-    // fillTime 30s -> target ceil(60/30) = 2.
+    // fillTime 30s under K=1 (epoch 0 was the only active location): target ceil(1*60/30) = 2.
+    // Epoch 0 is soft-retained in the active set after the report.
     tracker.onEpochRetired(shuffleId, partitionId, 0, loc0, Some(StatusCode.SOFT_SPLIT), 30000L)
     assert(tracker.desiredLocationCount(shuffleId, partitionId) == 2)
 
-    // fillTime 25s -> target ceil(60/25) = 3.
+    // fillTime 25s measured under K=2 ({epoch 0 soft-retained, epoch 1}):
+    // target ceil(2*60/25) = 5, capped at the configured max 4.
     tracker.recordAllocTime(shuffleId, partitionId, 1, 30000L)
     tracker.onEpochRetired(
       shuffleId,
@@ -116,19 +118,33 @@ class PartitionHotnessTrackerSuite extends CelebornFunSuite {
       makeLoc(partitionId, 1, "host1"),
       Some(StatusCode.SOFT_SPLIT),
       55000L)
-    assert(tracker.desiredLocationCount(shuffleId, partitionId) == 3)
+    assert(tracker.desiredLocationCount(shuffleId, partitionId) == 4)
+  }
 
-    // fillTime 10s -> target 6, capped at the configured max 4: a very hot partition
-    // reaches the cap after its first fast split report, without any debounce window.
-    tracker.recordAllocTime(shuffleId, partitionId, 2, 55000L)
+  test("fillTime measured under K active locations scales the target by K") {
+    // Production regression: with K > 1 active locations the measured fillTime is the
+    // per-location fill time, so the old formula ceil(window / fillTime) underestimated the
+    // needed parallelism K-fold (K = 38, fillTime = 1146ms, window = 10s computed target 9
+    // forever) and desired was frozen at the value judged once under K ~ 1.
+    val tracker = makeTracker(_ => true, 64)
+    val loc0 = makeLoc(partitionId, 0, "host1")
+    tracker.recordInitialAllocTime(shuffleId, Array(loc0), 0L)
+
+    // First fill under K = 1: fillTime 30s -> target ceil(60/30) = 2.
+    tracker.onEpochRetired(shuffleId, partitionId, 0, loc0, Some(StatusCode.SOFT_SPLIT), 30000L)
+    assert(tracker.desiredLocationCount(shuffleId, partitionId) == 2)
+
+    // Both epochs 0 (soft-retained) and 1 active. Epoch 1 fills in 10s under K = 2:
+    // target ceil(2 * 60 / 10) = 12 — NOT the K-blind ceil(60/10) = 6.
+    tracker.registerAllocation(shuffleId, partitionId, Set(1), 30000L)
     tracker.onEpochRetired(
       shuffleId,
       partitionId,
-      2,
-      makeLoc(partitionId, 2, "host1"),
+      1,
+      makeLoc(partitionId, 1, "host1"),
       Some(StatusCode.SOFT_SPLIT),
-      65000L)
-    assert(tracker.desiredLocationCount(shuffleId, partitionId) == 4)
+      40000L)
+    assert(tracker.desiredLocationCount(shuffleId, partitionId) == 12)
   }
 
   test("desired never decreases on slower subsequent fills") {
@@ -140,7 +156,8 @@ class PartitionHotnessTrackerSuite extends CelebornFunSuite {
     tracker.onEpochRetired(shuffleId, partitionId, 0, loc0, Some(StatusCode.SOFT_SPLIT), 10000L)
     assert(tracker.desiredLocationCount(shuffleId, partitionId) == 4)
 
-    // After the fan-out the next location fills slower (30s, target 3): desired stays 4.
+    // After the fan-out the next location fills slower (30s under K=2, target ceil(120/30) = 4):
+    // desired stays 4.
     tracker.recordAllocTime(shuffleId, partitionId, 1, 10000L)
     tracker.onEpochRetired(
       shuffleId,

@@ -330,4 +330,51 @@ public class PartitionLocationGroupSuiteJ {
     }
     assertEquals(1, group.activeCount());
   }
+
+  @Test
+  public void testOutstandingRetires() {
+    // NULL-location regression: when every known epoch is locally retired, the outstanding-retire
+    // view must cover exactly the epochs still in the active list (LM not yet digested), epoch
+    // ascending, with the upgraded cause — they are attached to the blocking revive so the LM
+    // shrinks its stale active set and the gap allocation produces a fresh location.
+    PartitionLocationGroup group = new PartitionLocationGroup(loc(0, "w1"));
+    assertTrue(group.outstandingRetires().isEmpty());
+
+    group.mergeActiveLocations(Arrays.asList(loc(0, "w1"), loc(1, "w2"), loc(2, "w3")), true);
+    assertTrue(group.retire(0, StatusCode.SOFT_SPLIT));
+    assertFalse(group.retire(0, StatusCode.HARD_SPLIT)); // soft upgraded to hard
+    assertTrue(group.retire(2, StatusCode.HARD_SPLIT));
+    // Epoch 1 is still writable.
+    List<PartitionLocationGroup.OutstandingRetire> retires = group.outstandingRetires();
+    assertEquals(2, retires.size());
+    assertEquals(0, retires.get(0).location.getEpoch());
+    assertEquals(StatusCode.HARD_SPLIT, retires.get(0).cause);
+    assertEquals(2, retires.get(1).location.getEpoch());
+    assertEquals(StatusCode.HARD_SPLIT, retires.get(1).cause);
+    // Epoch 1 is the only writable location: every mapId routes to it.
+    assertEquals(1, group.currentFor(0).getEpoch());
+
+    // After the LM digests both retires (full set reports only epoch 1), they are evicted from
+    // the active list and no longer outstanding.
+    group.mergeActiveLocations(Collections.singletonList(loc(1, "w2")), true);
+    assertTrue(group.outstandingRetires().isEmpty());
+    assertEquals(1, group.activeCount());
+  }
+
+  @Test
+  public void testEpochsSnapshots() {
+    PartitionLocationGroup group = new PartitionLocationGroup(loc(0, "w1"));
+    assertEquals(Collections.singletonList(0), group.activeEpochsSnapshot());
+    assertTrue(group.retiredEpochsSnapshot().isEmpty());
+
+    group.mergeActiveLocations(Arrays.asList(loc(0, "w1"), loc(1, "w2")), true);
+    group.retire(0, StatusCode.HARD_SPLIT);
+    group.retire(1, StatusCode.SOFT_SPLIT);
+    assertEquals(Arrays.asList(0, 1), group.activeEpochsSnapshot());
+    // Retired snapshot lists epoch=cause pairs regardless of active membership.
+    List<String> retired = group.retiredEpochsSnapshot();
+    assertEquals(2, retired.size());
+    assertTrue(retired.get(0).startsWith("0="));
+    assertTrue(retired.get(1).startsWith("1="));
+  }
 }

@@ -18,8 +18,10 @@
 package org.apache.celeborn.client;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -152,6 +154,43 @@ public class PartitionLocationGroup {
    */
   public PartitionLocation anotherUsableFor(int mapId, int excludeEpoch) {
     return pick(mapId, excludeEpoch);
+  }
+
+  /**
+   * A retire report for a locally retired location that the LifecycleManager may not have digested
+   * yet — the location is still held in the active list, i.e. the LM most likely still counts its
+   * epoch as surviving and keeps reporting it in full-set responses. Forwarding these reports with
+   * a revive lets the LM shrink its active set to the truth so gap allocation produces a fresh
+   * location instead of re-replying with epochs this executor has already retired.
+   */
+  public static final class OutstandingRetire {
+    public final PartitionLocation location;
+    public final StatusCode cause;
+
+    OutstandingRetire(PartitionLocation location, StatusCode cause) {
+      this.location = location;
+      this.cause = cause;
+    }
+  }
+
+  /**
+   * Snapshot of {@link OutstandingRetire}s, epoch ascending. Only epochs still present in the
+   * active list are included: an evicted epoch (no longer reported by the LM) has already been
+   * digested, and its location object is gone, so there is nothing left to report.
+   */
+  public List<OutstandingRetire> outstandingRetires() {
+    ParallelState p = parallel;
+    if (p == null) {
+      return new ArrayList<>(0);
+    }
+    List<OutstandingRetire> retires = new ArrayList<>();
+    for (PartitionLocation loc : p.active.toArray(new PartitionLocation[0])) {
+      StatusCode cause = p.retired.get(loc.getEpoch());
+      if (cause != null) {
+        retires.add(new OutstandingRetire(loc, cause));
+      }
+    }
+    return retires;
   }
 
   /**
@@ -310,6 +349,38 @@ public class PartitionLocationGroup {
   int retiredCount() {
     ParallelState p = parallel;
     return p == null ? 0 : p.retired.size();
+  }
+
+  /** Epochs of the active list, ascending — for diagnostics in failure messages. */
+  List<Integer> activeEpochsSnapshot() {
+    ParallelState p = parallel;
+    if (p == null) {
+      PartitionLocation loc = single;
+      List<Integer> epochs = new ArrayList<>(1);
+      if (loc != null) {
+        epochs.add(loc.getEpoch());
+      }
+      return epochs;
+    }
+    List<Integer> epochs = new ArrayList<>(p.active.size());
+    for (PartitionLocation loc : p.active) {
+      epochs.add(loc.getEpoch());
+    }
+    return epochs;
+  }
+
+  /** Retired epochs and their causes, for diagnostics in failure messages. */
+  List<String> retiredEpochsSnapshot() {
+    ParallelState p = parallel;
+    if (p == null) {
+      return new ArrayList<>(0);
+    }
+    List<String> retires = new ArrayList<>(p.retired.size());
+    for (Map.Entry<Integer, StatusCode> entry : p.retired.entrySet()) {
+      retires.add(entry.getKey() + "=" + entry.getValue());
+    }
+    retires.sort(Comparator.comparing(s -> Integer.parseInt(s.substring(0, s.indexOf('=')))));
+    return retires;
   }
 
   private ParallelState inflateIfNeeded() {
