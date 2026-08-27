@@ -37,6 +37,8 @@ repeated PbPartitionLocation additionalPartitions = 5;
 
 ### 数据流概览
 
+**术语约定**(对齐 `docs/developers/lifecyclemanager.md` 的 "Revive/PartitionSplit" 词汇):本文的**退休(retire)**指 client 将某个 (partition, epoch) 标记为不再承接新写、并把 cause 随 Revive 上报 LM 的账本动作——即既有 Revive/PartitionSplit 流程中"旧 location 退出"的一侧;cause 为 SOFT_SPLIT/HARD_SPLIT 时对应 partition split 事件,也包括 push 失败与 worker 不可用。**revive** 沿用既有含义:client 向 LM 请求新 location 的 RPC。
+
 ```
 mapper pushData(partitionId)
    └─ ShuffleClientImpl.pushOrMergeData
