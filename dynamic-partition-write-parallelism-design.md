@@ -29,7 +29,7 @@ repeated PbPartitionLocation additionalPartitions = 5;
 |---|---|---|
 | `...adaptivePartitionWriteParallelism.enabled` | false | 总开关;关闭时所有路径与现状等价 |
 | `...adaptivePartitionWriteParallelism.maxLocations` | -1 | 活跃 location 上限 = min(配置值, 该 shuffle 的 mapper 数);-1 = 仅按 mapper 数(路由 mapId % K,超过 mapper 数必空转,天然上限) |
-| `...adaptivePartitionWriteParallelism.hotWindow` | 60s | 热点判定窗口;语义 = 让单 location 写满 threshold 的周期 ≥ window(升档目标 = ceil(K × 窗口 / 写满耗时))。window 越大并行度越高、单点写压越薄,代价是热点 partition 占用的 worker 越多(见 性能验证 · hotWindow 敏感性) |
+| `...adaptivePartitionWriteParallelism.hotWindow` | 60s | 热点判定窗口;语义 = 让单 location 写满 threshold 的周期 ≥ window(升档目标 = ceil(K × 窗口 / 写满耗时))。window 越大并行度越高、单点写压越薄,代价是热点 partition 占用的 worker 越多(见 性能验证(生产个例)) |
 
 **观测点**(均一次性,无重复刷屏):LM 侧升档判定 / 补差分配 / 分配不足(INFO/WARN);executor 侧并行激活 / SOFT 首报退休(含换路去向)/ 全不可用触发阻塞 revive 及其成功后的新目标(INFO);per-batch 重推成功(DEBUG)。
 
@@ -141,28 +141,22 @@ allocTime 来源:新 epoch 由分配登记;epoch 0 用 registerShuffle 时刻(�
 
 ### 性能验证(生产个例)
 
-以下数据来自一个代表性极端负载的生产作业:单 reduce partition 承接全部 26090 mapper(9.4TB shuffle 写),即本特性目标问题(单点聚合写压)的最严苛形态。结论适用于该类倾斜负载,不做跨负载外推:
+作业形态:一个简单的 SparkSQL scan + shuffle + write 作业;单 reduce partition 承接全部 26090 mapper,即本特性目标问题(单点聚合写压)的最严苛形态。结论适用于该类倾斜负载,不做跨负载外推。
 
-| 指标 | 开启前 | 开启后 | 改善 |
-|---|---|---|---|
-| 写侧 stage 耗时 | 21m35s | 7m00s | 3.1×(数据量还大 59%) |
-| per-task writeTime p50 / p90 | 27.5s / 110.8s | 615ms / 1.8s | 45× / 61× |
-| total shuffle write time(全集群线程) | 607.5h | 6.0h | 101× |
-| 每 GB 写线程耗时 | 361s/GB | 2.3s/GB | 157× |
-| shuffle read 聚合吞吐 | 17.6GB/s | 26.3GB/s | +49%(fetchWait/GB 持平) |
+同一作业四组对照(输入 3.53TB,shuffle 写 9.37TB;作业耗时含读侧与调度噪声,仅供参照,写侧指标是主信号):
 
-#### hotWindow 敏感性(同一作业,四组对照)
+| 运行 | 写吞吐 (MB/s) | Shuffle 写线程总耗时 | Executor 运行总耗时 | vcore·h | 作业耗时 |
+|---|---|---|---|---|---|
+| 未开启 | 6.33 | 431h20m | 546.1h | 1128.7 | 40m47s |
+| hotWindow=10s | 391.75 | 6h58m | 177.8h | 433.9 | 7m23s |
+| hotWindow=30s | 552.66 | 4h56m | 170.9h | 504.6 | 8m08s |
+| hotWindow=60s(默认) | 648.97 | 4h12m | 167.5h | 403.3 | 6m34s |
 
-| 运行 | 作业耗时 | shuffle write 吞吐 | total shuffle write time |
-|---|---|---|---|
-| 未开启 | 40m47s | 6.33 MB/s | 431h20m |
-| hotWindow=10s | 7m23s | 391.75 MB/s | 6h58m |
-| hotWindow=30s | 8m08s | 552.66 MB/s | 4h56m |
-| hotWindow=60s(默认) | 6m34s | 648.97 MB/s | 4h12m |
+另一轮同作业对照(开启前 vs hotWindow=60s):per-task writeTime p50/p90 = 27.5s/110.8s → 615ms/1.8s(45×/61×);shuffle read 聚合吞吐 17.6 → 26.3 GB/s(+49%,fetchWait/GB 持平,读侧无回退)。
 
-window 定义的是稳态均衡点:升档公式的不动点是"单 location 写满 1G 的周期 = window",即单 location 写速均衡在 threshold/window——10s/30s/60s 分别对应约 100/34/17 MB/s。聚合速率固定,window 越大 → 目标并行度越高,收益来自三处:(1) SOFT→HARD 安全窗 = 1G/单路速率,恰等于 window——60s 均衡下几乎总能在 SOFT 态平滑退休,零重推零阻塞;10s 均衡下重推频繁,而重推是重复写,这是 total write time 阶梯(6h58m → 4h56m → 4h12m)的主因;(2) 写压分摊到更多 worker,push RTT 与排队下降;(3) 热点判定要求 fillTime < window,小窗口下写得稍慢的 partition 不触发升档,且 fillTime 一旦 ≥ window 升档即冻结——小窗口目标低、封顶早。代价是热点 partition 占用更多 worker(由 `maxLocations`/mapper 数上限兜底)。30s 组作业耗时略逊于 10s 组是读侧与调度噪声,写侧指标单调改善。
+**hotWindow 怎么起作用**:window 定义稳态均衡点——升档公式的不动点是"单 location 写满 1G 的周期 = window",即单 location 写速均衡在 threshold/window,10s/30s/60s 分别对应约 100/34/17 MB/s。聚合速率固定,window 越大 → 目标并行度越高,收益来自三处:(1) SOFT→HARD 安全窗 = 1G/单路速率,恰等于 window——60s 均衡下几乎总能在 SOFT 态平滑退休,零重推零阻塞;10s 均衡下重推频繁,而重推是重复写,这是 Shuffle 写线程总耗时阶梯(6h58m → 4h56m → 4h12m)的主因;(2) 写压分摊到更多 worker,push RTT 与排队下降;(3) 热点判定要求 fillTime < window,小窗口下写得稍慢的 partition 不触发升档,且 fillTime ≥ window 后升档冻结——小窗口目标低、封顶早。代价是热点 partition 占用更多 worker(由 `maxLocations`/mapper 数上限兜底)。
 
-(注:shuffle write 吞吐列为作业级平均口径;基线 6.33 MB/s 反映的是严重反压下 mapper 大部分时间阻塞,而非磁盘上限。)
+(注:基线写吞吐 6.33 MB/s 反映的是严重反压下 mapper 大部分时间阻塞,而非磁盘上限;30s 组 vcore·h 略高于 10s 组为集群调度波动。)
 
 ## Compatibility, Deprecation, and Migration Plan
 
