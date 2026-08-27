@@ -57,8 +57,7 @@ private[client] class HotState {
 private[client] class PartitionHotnessTracker(
     conf: CelebornConf,
     latestEpoch: (Int, Int) => Option[Int],
-    workerAvailableByLocation: PartitionLocation => Boolean,
-    numMappersOf: Int => Int) extends Logging {
+    workerAvailableByLocation: PartitionLocation => Boolean) extends Logging {
 
   private val adaptivePartitionWriteParallelismMaxLocations =
     conf.clientShuffleAdaptivePartitionWriteParallelismMaxLocations
@@ -66,16 +65,21 @@ private[client] class PartitionHotnessTracker(
     conf.clientShuffleAdaptivePartitionWriteParallelismHotWindowMs
 
   /**
-   * The cap on a partition's desired location count: the configured maxLocations when positive,
-   * otherwise the shuffle's number of mappers (routing is mapId % activeCount, so more locations
-   * than mappers can never be utilized).
+   * The cap on a partition's desired location count: min of the configured maxLocations (when
+   * positive) and the shuffle's number of mappers registered at registerShuffle (routing is
+   * mapId % activeCount, so more locations than mappers can never be utilized). Falls back to 1
+   * when neither is known.
    */
-  private def locationCap(shuffleId: Int): Int =
-    if (adaptivePartitionWriteParallelismMaxLocations > 0) {
-      adaptivePartitionWriteParallelismMaxLocations
-    } else {
-      math.max(1, numMappersOf(shuffleId))
-    }
+  private def locationCap(shuffleId: Int): Int = {
+    val mappers = shuffleNumMappers.getOrDefault(shuffleId, 0).intValue()
+    val mapperCap = if (mappers > 0) mappers else Int.MaxValue
+    val configCap =
+      if (adaptivePartitionWriteParallelismMaxLocations > 0)
+        adaptivePartitionWriteParallelismMaxLocations
+      else Int.MaxValue
+    val cap = math.min(configCap, mapperCap)
+    if (cap == Int.MaxValue) 1 else cap
+  }
 
   // shuffleId -> (partitionId -> hot state). Sparse: only partitions revived in
   // adaptive-parallelism mode get an entry (see currentActiveEpochs).
@@ -85,6 +89,10 @@ private[client] class PartitionHotnessTracker(
   // shuffleId -> when its initial (epoch 0) locations were allocated at registerShuffle.
   private val shuffleInitialAllocTimeMs =
     JavaUtils.newConcurrentHashMap[Int, java.lang.Long]()
+
+  // shuffleId -> its number of mappers, registered at registerShuffle; used as the routing cap.
+  private val shuffleNumMappers =
+    JavaUtils.newConcurrentHashMap[Int, java.lang.Integer]()
 
   /**
    * Process the retire report of one epoch.
@@ -175,15 +183,18 @@ private[client] class PartitionHotnessTracker(
 
   /**
    * Record when the initial (epoch 0) locations of a shuffle were allocated at
-   * registerShuffle, so the fill time of epoch 0 can be measured. putIfAbsent semantics:
-   * a repeated registration does not overwrite.
+   * registerShuffle, so the fill time of epoch 0 can be measured, and the shuffle's number of
+   * mappers, which caps the desired location count. putIfAbsent semantics: a repeated
+   * registration does not overwrite.
    */
   private[client] def recordInitialAllocTime(
       shuffleId: Int,
       partitionLocations: Array[PartitionLocation],
+      numMappers: Int,
       nowMs: Long): Unit = {
     if (partitionLocations != null && partitionLocations.nonEmpty) {
       shuffleInitialAllocTimeMs.putIfAbsent(shuffleId, nowMs)
+      shuffleNumMappers.putIfAbsent(shuffleId, numMappers)
     }
   }
 
@@ -273,5 +284,6 @@ private[client] class PartitionHotnessTracker(
   private[client] def removeShuffle(shuffleId: Int): Unit = {
     partitionHotStates.remove(shuffleId)
     shuffleInitialAllocTimeMs.remove(shuffleId)
+    shuffleNumMappers.remove(shuffleId)
   }
 }

@@ -33,8 +33,7 @@ class PartitionHotnessTrackerSuite extends CelebornFunSuite {
 
   private def makeTracker(
       workerAvailable: PartitionLocation => Boolean,
-      maxLocations: Int = -1,
-      numMappersOf: Int => Int = _ => 1000): PartitionHotnessTracker = {
+      maxLocations: Int = -1): PartitionHotnessTracker = {
     val conf = new CelebornConf()
     if (maxLocations > 0) {
       // Pin the cap so capping tests are independent of the product default.
@@ -42,15 +41,13 @@ class PartitionHotnessTrackerSuite extends CelebornFunSuite {
         CelebornConf.CLIENT_SHUFFLE_ADAPTIVE_PARTITION_WRITE_PARALLELISM_MAX_LOCATIONS.key,
         maxLocations.toString)
     }
-    // With the product default maxLocations=-1 the cap resolves to the shuffle's mapper count;
-    // give the fake shuffle enough mappers that only an explicitly pinned maxLocations caps it.
-    new PartitionHotnessTracker(conf, (_, _) => None, workerAvailable, numMappersOf)
+    new PartitionHotnessTracker(conf, (_, _) => None, workerAvailable)
   }
 
   test("HARD_SPLIT with an unavailable worker only retires, never boosts") {
     val tracker = makeTracker(_ => false)
     val loc0 = makeLoc(partitionId, 0, "host1")
-    tracker.recordInitialAllocTime(shuffleId, Array(loc0), 0L)
+    tracker.recordInitialAllocTime(shuffleId, Array(loc0), 1000, 0L)
 
     // A HARD_SPLIT of a known-unavailable worker is not measured: desired stays 1.
     tracker.onEpochRetired(shuffleId, partitionId, 0, loc0, Some(StatusCode.HARD_SPLIT), 10000L)
@@ -60,7 +57,7 @@ class PartitionHotnessTrackerSuite extends CelebornFunSuite {
   test("push failure cause only retires, never boosts") {
     val tracker = makeTracker(_ => true)
     val loc0 = makeLoc(partitionId, 0, "host1")
-    tracker.recordInitialAllocTime(shuffleId, Array(loc0), 0L)
+    tracker.recordInitialAllocTime(shuffleId, Array(loc0), 1000, 0L)
 
     tracker.onEpochRetired(
       shuffleId,
@@ -76,7 +73,7 @@ class PartitionHotnessTrackerSuite extends CelebornFunSuite {
     Seq(StatusCode.SOFT_SPLIT, StatusCode.HARD_SPLIT).foreach { cause =>
       val tracker = makeTracker(_ => true)
       val loc0 = makeLoc(partitionId, 0, "host1")
-      tracker.recordInitialAllocTime(shuffleId, Array(loc0), 0L)
+      tracker.recordInitialAllocTime(shuffleId, Array(loc0), 1000, 0L)
 
       // Fast fill of epoch 0 (45s, target 2): both causes boost desired to 2.
       tracker.onEpochRetired(shuffleId, partitionId, 0, loc0, Some(cause), 45000L)
@@ -93,7 +90,7 @@ class PartitionHotnessTrackerSuite extends CelebornFunSuite {
   test("fillTime proportionally steps desired, capped at maxLocationsPerPartition") {
     val tracker = makeTracker(_ => true, 4)
     val loc0 = makeLoc(partitionId, 0, "host1")
-    tracker.recordInitialAllocTime(shuffleId, Array(loc0), 0L)
+    tracker.recordInitialAllocTime(shuffleId, Array(loc0), 1000, 0L)
 
     // fillTime 30s under K=1 -> target ceil(1*60/30) = 2. Epoch 0 is soft-retained in the
     // active set after the report.
@@ -131,7 +128,7 @@ class PartitionHotnessTrackerSuite extends CelebornFunSuite {
     // once under K ~ 1.
     val tracker = makeTracker(_ => true, maxLocations = 64)
     val loc0 = makeLoc(partitionId, 0, "host1")
-    tracker.recordInitialAllocTime(shuffleId, Array(loc0), 0L)
+    tracker.recordInitialAllocTime(shuffleId, Array(loc0), 1000, 0L)
 
     // First fill under K = 1: fillTime 30s -> target ceil(60/30) = 2.
     tracker.onEpochRetired(shuffleId, partitionId, 0, loc0, Some(StatusCode.SOFT_SPLIT), 30000L)
@@ -155,9 +152,9 @@ class PartitionHotnessTrackerSuite extends CelebornFunSuite {
     // a regular fill below the cap takes its target unchanged; a zero fillTime (report in
     // the same millisecond as the allocation) is floored at 1ms instead of computing
     // ceil(window/0) = Infinity, so desired is capped at the mapper count.
-    val tracker = makeTracker(_ => true, maxLocations = -1, numMappersOf = _ => 128)
+    val tracker = makeTracker(_ => true, maxLocations = -1)
     val loc0 = makeLoc(partitionId, 0, "host1")
-    tracker.recordInitialAllocTime(shuffleId, Array(loc0), 0L)
+    tracker.recordInitialAllocTime(shuffleId, Array(loc0), 128, 0L)
 
     // Regular fill: fillTime 10s -> target 6 < 128, desired takes the target.
     tracker.onEpochRetired(shuffleId, partitionId, 0, loc0, Some(StatusCode.SOFT_SPLIT), 10000L)
@@ -175,20 +172,36 @@ class PartitionHotnessTrackerSuite extends CelebornFunSuite {
     assert(tracker.desiredLocationCount(shuffleId, partitionId) == 128)
   }
 
-  test("positive maxLocations takes precedence over the mapper count") {
-    val tracker = makeTracker(_ => true, maxLocations = 4, numMappersOf = _ => 128)
+  test("desired is capped by min(maxLocations, numMappers)") {
+    // maxLocations below the mapper count: capped at the configured 4.
+    val tracker = makeTracker(_ => true, maxLocations = 4)
     val loc0 = makeLoc(partitionId, 0, "host1")
-    tracker.recordInitialAllocTime(shuffleId, Array(loc0), 0L)
+    tracker.recordInitialAllocTime(shuffleId, Array(loc0), 128, 0L)
 
     // fillTime 10s -> target 6, capped at the configured 4 despite 128 mappers.
     tracker.onEpochRetired(shuffleId, partitionId, 0, loc0, Some(StatusCode.SOFT_SPLIT), 10000L)
     assert(tracker.desiredLocationCount(shuffleId, partitionId) == 4)
+
+    // maxLocations above the mapper count: capped at the 128 mappers (surplus locations
+    // would idle under mapId % activeCount routing).
+    val tracker2 = makeTracker(_ => true, maxLocations = 200)
+    tracker2.recordInitialAllocTime(2, Array(makeLoc(partitionId, 0, "host1")), 128, 0L)
+    tracker2.registerAllocation(2, partitionId, Set(1), 0L)
+    // Zero fillTime: target ceil(1*60000/1) = 60000, capped at the 128 mappers.
+    tracker2.onEpochRetired(
+      2,
+      partitionId,
+      1,
+      makeLoc(partitionId, 1, "host1"),
+      Some(StatusCode.SOFT_SPLIT),
+      0L)
+    assert(tracker2.desiredLocationCount(2, partitionId) == 128)
   }
 
   test("desired never decreases on slower subsequent fills") {
     val tracker = makeTracker(_ => true, 4)
     val loc0 = makeLoc(partitionId, 0, "host1")
-    tracker.recordInitialAllocTime(shuffleId, Array(loc0), 0L)
+    tracker.recordInitialAllocTime(shuffleId, Array(loc0), 1000, 0L)
 
     // Very fast fill: jump straight to the cap.
     tracker.onEpochRetired(shuffleId, partitionId, 0, loc0, Some(StatusCode.SOFT_SPLIT), 10000L)
@@ -209,7 +222,7 @@ class PartitionHotnessTrackerSuite extends CelebornFunSuite {
   test("SOFT_SPLIT of an available worker retains the epoch in the active set") {
     val tracker = makeTracker(_ => true)
     val loc0 = makeLoc(partitionId, 0, "host1")
-    tracker.recordInitialAllocTime(shuffleId, Array(loc0), 0L)
+    tracker.recordInitialAllocTime(shuffleId, Array(loc0), 1000, 0L)
 
     // Soft split: the file stays writable until it hard-splits, so epoch 0 is retained.
     tracker.onEpochRetired(shuffleId, partitionId, 0, loc0, Some(StatusCode.SOFT_SPLIT), 30000L)
@@ -223,7 +236,7 @@ class PartitionHotnessTrackerSuite extends CelebornFunSuite {
   test("SOFT_SPLIT of an unavailable worker removes the epoch from the active set") {
     val tracker = makeTracker(_ => false)
     val loc0 = makeLoc(partitionId, 0, "host1")
-    tracker.recordInitialAllocTime(shuffleId, Array(loc0), 0L)
+    tracker.recordInitialAllocTime(shuffleId, Array(loc0), 1000, 0L)
 
     tracker.onEpochRetired(shuffleId, partitionId, 0, loc0, Some(StatusCode.SOFT_SPLIT), 30000L)
     assert(tracker.currentActiveEpochs(shuffleId, partitionId).isEmpty)
@@ -232,7 +245,7 @@ class PartitionHotnessTrackerSuite extends CelebornFunSuite {
   test("push failure cause removes the epoch from the active set") {
     val tracker = makeTracker(_ => true)
     val loc0 = makeLoc(partitionId, 0, "host1")
-    tracker.recordInitialAllocTime(shuffleId, Array(loc0), 0L)
+    tracker.recordInitialAllocTime(shuffleId, Array(loc0), 1000, 0L)
 
     // Seed the epoch as active via a soft split, then a push failure removes it.
     tracker.onEpochRetired(shuffleId, partitionId, 0, loc0, Some(StatusCode.SOFT_SPLIT), 30000L)
@@ -250,7 +263,7 @@ class PartitionHotnessTrackerSuite extends CelebornFunSuite {
   test("late SOFT_SPLIT report does not resurrect a hard-retired epoch") {
     val tracker = makeTracker(_ => true)
     val loc0 = makeLoc(partitionId, 0, "host1")
-    tracker.recordInitialAllocTime(shuffleId, Array(loc0), 0L)
+    tracker.recordInitialAllocTime(shuffleId, Array(loc0), 1000, 0L)
 
     // Epoch 0 soft-splits and stays writable, then hard-splits and is removed.
     tracker.onEpochRetired(shuffleId, partitionId, 0, loc0, Some(StatusCode.SOFT_SPLIT), 30000L)

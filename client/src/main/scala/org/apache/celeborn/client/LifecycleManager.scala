@@ -887,6 +887,7 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
         changePartitionManager.recordInitialAllocTime(
           shuffleId,
           allPrimaryPartitionLocations,
+          numMappers,
           System.currentTimeMillis())
       }
       replyRegisterShuffle(RegisterShuffleResponse(

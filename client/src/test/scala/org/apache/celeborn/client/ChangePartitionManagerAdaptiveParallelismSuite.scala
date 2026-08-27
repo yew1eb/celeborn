@@ -138,7 +138,7 @@ class ChangePartitionManagerAdaptiveParallelismSuite extends CelebornFunSuite {
     val workers = (1 to 3).map(makeWorker)
     val loc0 = prepareLifecycleManager(conf, shuffleId, partitionId, workers)
     val changePartitionManager = new FakeClockManager(conf, lifecycleManager, 100000L)
-    changePartitionManager.recordInitialAllocTime(shuffleId, Array(loc0), 100000L)
+    changePartitionManager.recordInitialAllocTime(shuffleId, Array(loc0), 1000, 100000L)
 
     // Epoch 0 fills in 40s (< 60s window): the first SOFT_SPLIT report boosts desired to
     // target ceil(60/40) = 2. The soft-split epoch 0 stays writable, so only the gap of
@@ -174,7 +174,7 @@ class ChangePartitionManagerAdaptiveParallelismSuite extends CelebornFunSuite {
     val workers = (1 to 2).map(makeWorker)
     val loc0 = prepareLifecycleManager(conf, shuffleId, partitionId, workers)
     val changePartitionManager = new FakeClockManager(conf, lifecycleManager, 100000L)
-    changePartitionManager.recordInitialAllocTime(shuffleId, Array(loc0), 100000L)
+    changePartitionManager.recordInitialAllocTime(shuffleId, Array(loc0), 1000, 100000L)
 
     // Normal file rolling: fillTime 70s > 60s window, desired stays 1. The soft-split
     // epoch 0 stays writable, so no replacement is allocated and the reply points back
@@ -230,7 +230,7 @@ class ChangePartitionManagerAdaptiveParallelismSuite extends CelebornFunSuite {
     val workers = (1 to 2).map(makeWorker)
     val loc0 = prepareLifecycleManager(conf, shuffleId, partitionId, workers)
     val changePartitionManager = new FakeClockManager(conf, lifecycleManager, 100000L)
-    changePartitionManager.recordInitialAllocTime(shuffleId, Array(loc0), 100000L)
+    changePartitionManager.recordInitialAllocTime(shuffleId, Array(loc0), 1000, 100000L)
     // The worker of epoch 0 is known unavailable: the HARD_SPLIT is not measured, but the
     // epoch is still removed from the writable set, so one replacement is allocated.
     lifecycleManager.workerStatusTracker.excludedWorkers.put(
@@ -260,7 +260,7 @@ class ChangePartitionManagerAdaptiveParallelismSuite extends CelebornFunSuite {
     val workers = (1 to 3).map(makeWorker)
     val loc0 = prepareLifecycleManager(conf, shuffleId, partitionId, workers)
     val changePartitionManager = new FakeClockManager(conf, lifecycleManager, 100000L)
-    changePartitionManager.recordInitialAllocTime(shuffleId, Array(loc0), 100000L)
+    changePartitionManager.recordInitialAllocTime(shuffleId, Array(loc0), 1000, 100000L)
 
     changePartitionManager.advance(40000)
     changePartitionManager.handleRequestPartitionLocation(
@@ -306,7 +306,7 @@ class ChangePartitionManagerAdaptiveParallelismSuite extends CelebornFunSuite {
     val workers = (1 to 3).map(makeWorker)
     val loc0 = prepareLifecycleManager(conf, shuffleId, partitionId, workers)
     val changePartitionManager = new FakeClockManager(conf, lifecycleManager, 0L)
-    changePartitionManager.recordInitialAllocTime(shuffleId, Array(loc0), 0L)
+    changePartitionManager.recordInitialAllocTime(shuffleId, Array(loc0), 1000, 0L)
 
     // t=40s: epoch 0 fills in 40s under K=1, target ceil(1*60/40) = 2; epoch 0 stays
     // writable, so only epoch 1 is allocated at t=40s.
@@ -348,6 +348,12 @@ class ChangePartitionManagerAdaptiveParallelismSuite extends CelebornFunSuite {
     val workers = (1 to 2).map(makeWorker)
     prepareLifecycleManager(conf, shuffleId, partitionId, workers)
     val changePartitionManager = new ChangePartitionManager(conf, lifecycleManager)
+    // Register the mapper count (registerShuffle-time hook): it caps the desired location count.
+    changePartitionManager.recordInitialAllocTime(
+      shuffleId,
+      Array(makeLoc(partitionId, 0, workers.head.host)),
+      1000,
+      0L)
 
     // With K > 1, epoch 10 (written by one mapper subset) can fill up before epoch 5
     // (written by another subset). Each epoch is measured against its own alloc time.
@@ -383,7 +389,7 @@ class ChangePartitionManagerAdaptiveParallelismSuite extends CelebornFunSuite {
     val workers = (1 to 3).map(makeWorker)
     val loc0 = prepareLifecycleManager(conf, shuffleId, partitionId, workers)
     val changePartitionManager = new FakeClockManager(conf, lifecycleManager, 100000L)
-    changePartitionManager.recordInitialAllocTime(shuffleId, Array(loc0), 100000L)
+    changePartitionManager.recordInitialAllocTime(shuffleId, Array(loc0), 1000, 100000L)
 
     // Boost to 2 writable locations first (fillTime 40s -> target 2): epoch 0 stays writable
     // and epoch 1 is allocated, writable epochs {0, 1}.
@@ -428,7 +434,7 @@ class ChangePartitionManagerAdaptiveParallelismSuite extends CelebornFunSuite {
     val workers = (1 to 3).map(makeWorker)
     val loc0 = prepareLifecycleManager(conf, shuffleId, partitionId, workers)
     val changePartitionManager = new ChangePartitionManager(conf, lifecycleManager)
-    changePartitionManager.recordInitialAllocTime(shuffleId, Array(loc0), 100000L)
+    changePartitionManager.recordInitialAllocTime(shuffleId, Array(loc0), 1000, 100000L)
 
     // The first SOFT_SPLIT report of epoch 0 (fillTime 40s, target 2) boosts desired to
     // 2; reports of the same epoch queued from other executors are deduped.

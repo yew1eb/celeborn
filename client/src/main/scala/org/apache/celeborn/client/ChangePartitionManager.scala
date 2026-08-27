@@ -90,24 +90,14 @@ class ChangePartitionManager(
   private[client] val hotnessTracker = new PartitionHotnessTracker(
     conf,
     latestEpoch,
-    loc => lifecycleManager.workerStatusTracker.workerAvailableByLocation(loc),
-    numMappersOf)
-
-  /**
-   * The shuffle's number of map tasks, from the commit manager's mapper-attempts bookkeeping
-   * (populated at registerShuffle). Returns 0 when the shuffle is not (yet) registered; callers
-   * treat a non-positive mapper count as "unknown" and fall back to the configured cap.
-   */
-  private def numMappersOf(shuffleId: Int): Int = {
-    val attempts = lifecycleManager.commitManager.getMapperAttempts(shuffleId)
-    if (attempts == null) 0 else attempts.length
-  }
+    loc => lifecycleManager.workerStatusTracker.workerAvailableByLocation(loc))
 
   private[client] def recordInitialAllocTime(
       shuffleId: Int,
       partitionLocations: Array[PartitionLocation],
+      numMappers: Int,
       nowMs: Long): Unit =
-    hotnessTracker.recordInitialAllocTime(shuffleId, partitionLocations, nowMs)
+    hotnessTracker.recordInitialAllocTime(shuffleId, partitionLocations, numMappers, nowMs)
 
   def start(): Unit = {
     batchHandleChangePartition = batchHandleChangePartitionSchedulerThread.map {

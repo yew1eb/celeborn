@@ -5379,7 +5379,8 @@ object CelebornConf extends Logging {
     buildConf("celeborn.client.shuffle.adaptivePartitionWriteParallelism.maxLocations")
       .categories("client")
       .doc("Max number of active locations one partition can write to in parallel. " +
-        "-1 (default) means the shuffle's number of mappers.")
+        "The effective cap is min of this value and the shuffle's number of mappers; " +
+        "-1 (default) means capped by the mapper count only.")
       .version("0.7.0")
       .intConf
       .checkValue(v => v == -1 || v > 0, "Must be -1 or positive.")

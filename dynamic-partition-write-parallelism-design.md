@@ -117,7 +117,7 @@ allocTime 来源:新 epoch 由分配登记;epoch 0 用 registerShuffle 时刻(�
 | 配置 | 默认 | 说明 |
 |---|---|---|
 | `celeborn.client.shuffle.adaptivePartitionWriteParallelism.enabled` | false | 总开关;关闭时所有路径与现状等价 |
-| `...adaptivePartitionWriteParallelism.maxLocations` | -1 | 活跃 location 上限;-1 = 该 shuffle 的 mapper 数(天然上限);正数 = 显式上限 |
+| `...adaptivePartitionWriteParallelism.maxLocations` | -1 | 活跃 location 上限 = min(配置值, 该 shuffle 的 mapper 数);-1 = 仅按 mapper 数(路由 mapId % K,超过 mapper 数必空转,天然上限) |
 | `...adaptivePartitionWriteParallelism.hotWindow` | 60s | 热点判定窗口;升档目标 = ceil(K × 窗口 / 写满耗时) |
 
 观测点(均一次性,无重复刷屏):LM 侧升档判定 / 补差分配 / 分配不足(INFO/WARN);executor 侧并行激活 / SOFT 首报退休(含换路去向)/ 全不可用 fallback(INFO);per-batch 重推成功(DEBUG)。
