@@ -10,7 +10,7 @@ Celeborn reduce partition 的写路径是**单活跃 location**:一个 partition
 - **SOFT→HARD 窗口塌缩**:N 个 mapper 并发写同一文件,涨速 = 聚合写速(×N);从 SOFT 阈值(默认 1G)到 HARD 上限(2G)的窗口 = 1G / 聚合写速。写得快则窗口只有亚秒级,revive + 路由切换来不及完成就升 HARD_SPLIT,写该 partition 的所有 map task 同步阻塞等新 location。
 - **单点写瓶颈**:push RTT 升至秒级,per-worker in-flight 饱和,mapper 线程被 push 队列反压顶住。在一个单 reduce partition、26090 mapper 的生产倾斜作业上实测:per-task shuffle writeTime p50 = 27.5s 而 task 总时长 p50 仅 30.6s——90% 的 task 时间在等写。
 
-本特性允许热点 partition **并行写多个活跃 location**:mapper 按 `mapId % activeCount` 散到各 location,由 LifecycleManager 根据实测写满速度自适应升档。N 个 location 并行写时单 location 涨速 ÷N:SOFT→HARD 窗口同比例拉宽、单 worker 写压 ÷N、某 location split 时其余仍可写,写路径不因切换停顿。生产效果见 Proposed Changes · 性能验证(生产个例)(写侧 stage 3.1×、per-task writeTime p50 45×)。
+本特性允许热点 partition **并行写多个活跃 location**:mapper 按 `mapId % activeCount` 散到各 location,由 LifecycleManager 根据实测写满速度自适应升档。N 个 location 并行写时单 location 涨速 ÷N:SOFT→HARD 窗口同比例拉宽、单 worker 写压 ÷N、某 location split 时其余仍可写,写路径不因切换停顿。生产效果见 Proposed Changes · 性能验证(生产个例):shuffle 写线程总耗时 431h → 4h12m,作业耗时 40m47s → 6m34s。
 
 ## Public Interfaces
 
@@ -151,8 +151,6 @@ allocTime 来源:新 epoch 由分配登记;epoch 0 用 registerShuffle 时刻(�
 | hotWindow=10s | 391.75 | 6h58m | 177.8h | 433.9 | 7m23s |
 | hotWindow=30s | 552.66 | 4h56m | 170.9h | 504.6 | 8m08s |
 | hotWindow=60s(默认) | 648.97 | 4h12m | 167.5h | 403.3 | 6m34s |
-
-另一轮同作业对照(开启前 vs hotWindow=60s):per-task writeTime p50/p90 = 27.5s/110.8s → 615ms/1.8s(45×/61×);shuffle read 聚合吞吐 17.6 → 26.3 GB/s(+49%,fetchWait/GB 持平,读侧无回退)。
 
 **hotWindow 怎么起作用**:window 定义稳态均衡点——升档公式的不动点是"单 location 写满 1G 的周期 = window",即单 location 写速均衡在 threshold/window,10s/30s/60s 分别对应约 100/34/17 MB/s。聚合速率固定,window 越大 → 目标并行度越高,收益来自三处:(1) SOFT→HARD 安全窗 = 1G/单路速率,恰等于 window——60s 均衡下几乎总能在 SOFT 态平滑退休,零重推零阻塞;10s 均衡下重推频繁,而重推是重复写,这是 Shuffle 写线程总耗时阶梯(6h58m → 4h56m → 4h12m)的主因;(2) 写压分摊到更多 worker,push RTT 与排队下降;(3) 热点判定要求 fillTime < window,小窗口下写得稍慢的 partition 不触发升档,且 fillTime ≥ window 后升档冻结——小窗口目标低、封顶早。代价是热点 partition 占用更多 worker(由 `maxLocations`/mapper 数上限兜底)。
 
