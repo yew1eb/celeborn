@@ -22,11 +22,14 @@ mapper pushData(partitionId)
              ├─ SOFT_SPLIT → retire(epoch, SOFT)(保持可写,不阻塞),首次退休上报 LM
              ├─ HARD_SPLIT / push 失败 → retire + 预置 SUCCESS:
              │     有另一可写 location 时重推线程立即换目标(不等 LM 响应)
-             └─ 全部不可写 → 入口一次性同步 revive(maxEpoch;LM 收缩活跃集并补差分配);
-                  重推路径预算化重 revive——ReviveManager 的"本地已满足"判定要求
-                  当前有可写 location,不可写则请求必到 LM,杜绝空转
+             └─ 全部不可写 → 阻塞 revive(ReviveManager 统一入口,per-partition
+                  single-flight,有界 3 次):每次尝试携带全部未消化退休上报,
+                  LM 消化后一轮补满活跃集;等锁线程复查可写性,通常零 RPC——
+                  ReviveManager 的"本地已满足"判定要求当前有可写 location,
+                  不可写则异步请求必到 LM,杜绝空转
 
-关键不变量:revive SUCCESS ⟺ 该 partition 当前存在可写 location。
+关键不变量:revive SUCCESS ⟺ 该 partition 当前存在可写 location(同步路径靠
+"携带退休上报 + 逐次重查"维持,见决策 5)。
 
 LM (ChangePartitionManager → PartitionHotnessTracker):
   收到带 cause 的 revive → 活跃集维护:SOFT_SPLIT 且 worker 可用 → epoch 保留;
@@ -49,6 +52,7 @@ LM (ChangePartitionManager → PartitionHotnessTracker):
 2. **比例步进含 K 因子**:测得的 fillTime 是当前并行度 K 下的单 location 写满时间,聚合写满速率 = K/fillTime,故目标 = `ceil(K × window / fillTime)`。不乘 K 则目标被低估 K 倍,desired 冻结在早期 K≈1 时的一次判定。判定一次直达目标,desired 单调递增 + per-epoch 首报去重 + 上限截断,无需去抖窗口。
 3. **全集回复保证 executor 一致性**:每次 revive 响应携带该 partition 的完整活跃集(max epoch 为主回复 + `additionalPartitions`),按 epoch 有序插入,所有 executor 一次 revive 即收敛到**相同顺序**的活跃列表,`mapId % K` 分派全局一致。对比 PR#3260 的 50ms 轮询收敛:无收敛延迟、无中间态路由分歧。
 4. **SOFT_SPLIT location 是一等路由目标,退休上报一条不丢**:soft 文件在 2G 硬上限前持续可写,把它排除出新写路由会使稳态下所有槽位都处于 soft 态、写压塌缩到最新的 1~2 个 location(线上实证过)。配套地,LM 的活跃集记账依赖每个 (partition, epoch) 的退休 cause 到达——包括"本地已满足"的上报;丢弃任何一条会让 LM 活跃集被死 epoch 撑大、gap 分配归零,最终 executor 无可写 location(线上 `Partition location ... is NULL!` 事故的根因)。
+5. **全部不可写时的阻塞 revive:携带退休上报 + 有界重试 + single-flight,三者都是承重结构**。LM 补差分配按 `gap = desired − LM 簿记活跃数`;只发一条 max-epoch 请求时 LM 只消化 1 个退休,gap≈0,响应回几乎全已退休的旧集合,executor 无可写 location 抛错致 task 失败(线上事故)。携带全部未消化退休上报后 LM 一轮补满 K 个 location;否则每次只补 1 个 → 全 executor 的 mapper 投影到唯一可写 location → 秒级再次 HARD_SPLIT → churn 正反馈(线上实测 epoch 6 分钟冲到 3371,旧实现同期 ~400)。single-flight(per-partition 锁 + 拿锁后复查可写性)把 mass-retire 唤醒的 pusher 线程收敛到每 executor 每 partition 至多 1 个在飞 RPC,避免 herd 打挂 LM(60s `requestPartition.askTimeout` 超时)。两次回归实证:纯异步 fallback 版本(不阻塞,靠 worker 拒收重触发)性能严重变差;单发同步 revive(无上报、无重试)版本直接 task 失败。
 
 ## 4. 协议改动
 
@@ -74,7 +78,7 @@ repeated PbPartitionLocation additionalPartitions = 5;
 - **路由**:`currentFor(mapId)` / `anotherUsableFor` 委托 `pick(mapId, excludeEpoch)`——快照 active 列表单遍收集可写子集(非退休 + soft),`floorMod(mapId, size)` 均匀分派;同一 map task 稳定写同一 location(保住 PushState 按 host 聚合)。
 - **退休**:`retire(epoch, cause)` CHM compute 原子,返回是否首次(每 epoch 只上报一次);cause 可升级(SOFT→HARD)不可降级;与全集 merge 同 monitor,防墓碑写与清理交错。
 - **全集收敛**:`mergeActiveLocations(locations, fullSet)` 按 epoch 有序插入、跳过本地已退休 epoch;`fullSet=true` 时清理 LM 已消化(全集中不再出现)的退休条目。仅携带 additionals 的响应才视为全集——单元素响应(老 LM / 冷 partition)不当全集,避免误清 soft-retired 条目。
-- **诊断视图**:`activeEpochsSnapshot()`/`retiredEpochsSnapshot()` 供失败信息。
+- **诊断视图**:`activeEpochsSnapshot()`/`retiredEpochsSnapshot()` 供失败信息;`outstandingRetires()` 供同步 revive 携带未消化退休上报(仅含仍在 active 列表中的退休 epoch,被全集清理的说明 LM 已消化)。
 
 ### ShuffleClientImpl 接入
 
@@ -82,11 +86,11 @@ repeated PbPartitionLocation additionalPartitions = 5;
 |---|---|
 | SOFT_SPLIT 回调 | `retire(epoch, SOFT)`(保持可写),首报且 mapper 未结束时上报;数据已落盘,零阻塞 |
 | HARD_SPLIT / push 失败 | `retire` + 若有另一可写 location 则预置 `reviveStatus=SUCCESS`,重推线程立即换路不等 LM |
-| 全部不可用 | 入口:一次性同步 revive(maxEpoch),LM 收缩活跃集并补差分配后重读选路;重推路径:预算化重 revive(对齐 mergeData)。前提是不变量"revive SUCCESS ⟺ 存在可写 location"——ReviveManager 的满足判定要求 `currentFor(mapId) != null`,不可写则请求必到 LM,不会空转 |
+| 全部不可用 | 入口与重推路径统一走 `ReviveManager.reviveUntilWritable`:per-partition single-flight 阻塞 revive(有界 3 次),每次尝试携带全部未消化退休上报,LM 消化后一轮补满活跃集;不带上报的单条请求会让 gap 分配归零、回已退休 epoch(线上事故,见决策 5)。配套不变量"revive SUCCESS ⟺ 存在可写 location"——异步路径的满足判定要求 `currentFor(mapId) != null`,不可写则请求必到 LM,不会空转 |
 
 ### 并发要点
 
-Group 被四类线程并发访问(push 线程、push 回调、ReviveManager 调度器、push 线程直连的同步 revive):读路径 COW+CHM 快照无锁;`retire`/`mergeActiveLocations`/`updateLatest` 同 group monitor;`retire` 首报信号靠 CHM compute 原子。LM 侧同一 partition 的批处理由条纹锁 + `inBatchPartitions` 去重串行。
+Group 被四类线程并发访问(push 线程、push 回调、ReviveManager 调度器、push/重推线程经 ReviveManager 的同步 revive):读路径 COW+CHM 快照无锁;`retire`/`mergeActiveLocations`/`updateLatest` 同 group monitor;`retire` 首报信号靠 CHM compute 原子。同步 revive 由 per-partition single-flight 锁串行,拿锁后先复查可写性再决定是否发 RPC。LM 侧同一 partition 的批处理由条纹锁 + `inBatchPartitions` 去重串行。
 
 ### 正确性
 
@@ -123,13 +127,14 @@ allocTime 来源:新 epoch 由分配登记;epoch 0 用 registerShuffle 时刻(�
 | `...adaptivePartitionWriteParallelism.maxLocations` | -1 | 活跃 location 上限 = min(配置值, 该 shuffle 的 mapper 数);-1 = 仅按 mapper 数(路由 mapId % K,超过 mapper 数必空转,天然上限) |
 | `...adaptivePartitionWriteParallelism.hotWindow` | 60s | 热点判定窗口;升档目标 = ceil(K × 窗口 / 写满耗时) |
 
-观测点(均一次性,无重复刷屏):LM 侧升档判定 / 补差分配 / 分配不足(INFO/WARN);executor 侧并行激活 / SOFT 首报退休(含换路去向)/ 全不可用触发同步 revive(INFO);per-batch 重推成功(DEBUG)。
+观测点(均一次性,无重复刷屏):LM 侧升档判定 / 补差分配 / 分配不足(INFO/WARN);executor 侧并行激活 / SOFT 首报退休(含换路去向)/ 全不可用触发阻塞 revive 及其成功后的新目标(INFO);per-batch 重推成功(DEBUG)。
 
 ## 8. 测试
 
 | 套件 | 例数 | 覆盖 |
 |---|---|---|
-| `PartitionLocationGroupSuiteJ` | 9 | 快路径、soft 参与路由/hard 排除、cause 升级、全集收敛与清理、乱序 epoch、并发 pick×merge、epoch 快照视图 |
+| `PartitionLocationGroupSuiteJ` | 10 | 快路径、soft 参与路由/hard 排除、cause 升级、全集收敛与清理、乱序 epoch、并发 pick×merge、epoch 快照视图、outstandingRetires 视图 |
+| `ReviveManagerSuiteJ` | 5 | 同步 revive:可写快速路径零 RPC、重试收敛且每轮携带全部退休上报、SUCCESS 无可写/RPC 失败有界放弃(3 次)、single-flight 并发去重(2 线程 1 RPC) |
 | `PartitionHotnessTrackerSuite` | 12 | 计量守卫(不可用 worker/push 失败)、K 因子缩放、fillTime 下限与 -1=mapper 数上限、显式上限优先、单调不降、soft 保留/移除、迟到 SOFT 不复活 |
 | `ChangePartitionManagerAdaptiveParallelismSuite` | 9 | 升档+补差分配、超窗不升、allocTime 未知保守、首报去重、比例步进、epoch 乱序、gap=0 仍回全集、并发 revive 收敛 |
 | `RequestLocationCallContextSuite` | 1 | 同 partition 重复回复忽略、按 distinct 数完成响应 |

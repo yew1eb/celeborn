@@ -18,6 +18,7 @@
 package org.apache.celeborn.client;
 
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -26,6 +27,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.celeborn.common.CelebornConf;
+import org.apache.celeborn.common.protocol.PartitionLocation;
 import org.apache.celeborn.common.protocol.ReviveRequest;
 import org.apache.celeborn.common.protocol.message.StatusCode;
 import org.apache.celeborn.common.util.ThreadUtils;
@@ -162,6 +164,97 @@ class ReviveManager {
       requestQueue.put(request);
     } catch (InterruptedException e) {
       logger.error("Exception when put into requests!", e);
+    }
+  }
+
+  /**
+   * Bounded attempts for one synchronous revive round. Every attempt carries all outstanding retire
+   * reports, so a single successful round lets the LM's gap-based allocation replenish the whole
+   * active set at once; three attempts comfortably cover the LM digest window without blocking a
+   * push thread indefinitely when the LM is genuinely unresponsive.
+   */
+  private static final int SYNC_REVIVE_MAX_ATTEMPTS = 3;
+
+  /**
+   * Single-flight locks per (shuffleId, partitionId): a mass-retire event wakes every pusher thread
+   * of the partition, but only one synchronous revive RPC may be in flight at a time; the rest
+   * re-check writability after the lock wait and normally return without any RPC.
+   */
+  private final ConcurrentHashMap<String, Object> syncReviveLocks = new ConcurrentHashMap<>();
+
+  /**
+   * Synchronous revive for the all-locations-unwritable case of adaptive parallelism. Unlike the
+   * async batched path, every attempt attaches the partition's outstanding retire reports (see
+   * {@link PartitionLocationGroup#outstandingRetires()}): without them the LM's gap-based
+   * allocation still counts the locally retired epochs as active (gap == 0) and re-replies
+   * already-retired epochs, leaving this executor with no writable location.
+   *
+   * @return a writable location for {@code mapId}, or null when the mapper has ended or the
+   *     attempts are exhausted (RPC failures, or SUCCESS replies whose locations are all retired
+   *     locally — the LM's active-set bookkeeping lags this executor's retires).
+   */
+  PartitionLocation reviveUntilWritable(int shuffleId, int mapId, int attemptId, int partitionId) {
+    PartitionLocationGroup group = shuffleClient.locationGroup(shuffleId, partitionId);
+    if (group == null) {
+      return null;
+    }
+    PartitionLocation loc = group.currentFor(mapId);
+    if (loc != null) {
+      return loc;
+    }
+    String lockKey = shuffleId + "-" + partitionId;
+    Object lock = syncReviveLocks.computeIfAbsent(lockKey, k -> new Object());
+    synchronized (lock) {
+      try {
+        for (int attempt = 1; attempt <= SYNC_REVIVE_MAX_ATTEMPTS; attempt++) {
+          // Re-check after the lock wait and after every attempt: a concurrent synchronous
+          // revive or an async batch response may already have made the partition writable.
+          loc = group.currentFor(mapId);
+          if (loc != null || shuffleClient.mapperEnded(shuffleId, mapId)) {
+            return loc;
+          }
+          StatusCode cause = StatusCode.PUSH_DATA_FAIL_NON_CRITICAL_CAUSE_PRIMARY;
+          PartitionLocation latest = group.latest();
+          shuffleClient.excludeWorkerByCause(cause, latest);
+          Set<Integer> mapIds = new HashSet<>();
+          mapIds.add(mapId);
+          List<ReviveRequest> requests = new ArrayList<>();
+          int maxEpoch = group.maxEpoch();
+          requests.add(
+              new ReviveRequest(shuffleId, mapId, attemptId, partitionId, maxEpoch, latest, cause));
+          for (PartitionLocationGroup.OutstandingRetire retire : group.outstandingRetires()) {
+            // The primary request already carries the max epoch.
+            if (retire.location.getEpoch() != maxEpoch) {
+              requests.add(
+                  new ReviveRequest(
+                      shuffleId,
+                      mapId,
+                      attemptId,
+                      partitionId,
+                      retire.location.getEpoch(),
+                      retire.location,
+                      retire.cause));
+            }
+          }
+          Map<Integer, Integer> results = shuffleClient.reviveBatch(shuffleId, mapIds, requests);
+          boolean success =
+              results != null
+                  && results.get(partitionId) != null
+                  && results.get(partitionId) == StatusCode.SUCCESS.getValue();
+          logger.debug(
+              "Synchronous revive for shuffle {} partition {}: attempt {}/{} {}.",
+              shuffleId,
+              partitionId,
+              attempt,
+              SYNC_REVIVE_MAX_ATTEMPTS,
+              success ? "succeeded" : "failed");
+          // On SUCCESS the loop re-checks writability at the top: if the reply only carried
+          // locally retired epochs, the next attempt forwards their retire reports.
+        }
+        return group.currentFor(mapId);
+      } finally {
+        syncReviveLocks.remove(lockKey, lock);
+      }
     }
   }
 

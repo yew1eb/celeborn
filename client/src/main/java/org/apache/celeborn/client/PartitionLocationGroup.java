@@ -126,6 +126,40 @@ public class PartitionLocationGroup {
   }
 
   /**
+   * A retired epoch still present in the active list, i.e. not yet confirmed digested by the
+   * LifecycleManager. Carried by the synchronous revive so the LM's gap-based allocation sees the
+   * real active-set size (see ReviveManager#reviveUntilWritable).
+   */
+  static final class OutstandingRetire {
+    final PartitionLocation location;
+    final StatusCode cause;
+
+    OutstandingRetire(PartitionLocation location, StatusCode cause) {
+      this.location = location;
+      this.cause = cause;
+    }
+  }
+
+  /**
+   * Snapshot of {@link OutstandingRetire}s, epoch ascending. Only epochs still in the active list
+   * are included — an evicted epoch has already been digested by the LM.
+   */
+  List<OutstandingRetire> outstandingRetires() {
+    ParallelState p = parallel;
+    if (p == null) {
+      return new ArrayList<>(0);
+    }
+    List<OutstandingRetire> retires = new ArrayList<>();
+    for (PartitionLocation loc : p.active.toArray(new PartitionLocation[0])) {
+      StatusCode cause = p.retired.get(loc.getEpoch());
+      if (cause != null) {
+        retires.add(new OutstandingRetire(loc, cause));
+      }
+    }
+    return retires;
+  }
+
+  /**
    * Mark {@code epoch} as retired with {@code cause}; soft-retired locations stay writable, hard
    * ones are skipped by routing. A non-soft cause upgrades a previous SOFT_SPLIT retire and is
    * never downgraded back. Synchronized so the tombstone write cannot interleave with the full-set

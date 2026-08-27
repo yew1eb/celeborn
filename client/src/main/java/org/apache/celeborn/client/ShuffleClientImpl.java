@@ -362,39 +362,10 @@ public class ShuffleClientImpl extends ShuffleClient {
       PartitionLocationGroup newLocGroup = locationGroup(shuffleId, partitionId);
       PartitionLocation newLoc = newLocGroup == null ? null : newLocGroup.currentFor(mapId);
       if (newLoc == null && newLocGroup != null && adaptivePartitionWriteParallelismEnabled) {
-        // Revive reported SUCCESS but nothing is writable (TOCTOU: the picked location was
-        // retired concurrently, or the reply carried only locally retired epochs). Re-revive
-        // for the current max epoch instead of pushing to a known-retired location: with the
-        // writability-aware satisfaction in ReviveManager this request reaches the LM, which
-        // allocates a replacement. Bounded by the remaining revive budget, mirroring the
-        // merged-data path's re-revive.
-        if (remainReviveTimes > 0) {
-          ReviveRequest reReviveRequest =
-              new ReviveRequest(
-                  shuffleId,
-                  mapId,
-                  attemptId,
-                  partitionId,
-                  newLocGroup.maxEpoch(),
-                  newLocGroup.latest(),
-                  StatusCode.PUSH_DATA_FAIL_NON_CRITICAL_CAUSE_PRIMARY);
-          reviveManager.addRequest(reReviveRequest);
-          long reReviveDueTime =
-              System.currentTimeMillis()
-                  + conf.clientRpcRequestPartitionLocationAskTimeout().duration().toMillis();
-          pushDataRetryPool.submit(
-              () ->
-                  submitRetryPushData(
-                      shuffleId,
-                      body,
-                      batchId,
-                      pushDataRpcResponseCallback,
-                      pushState,
-                      reReviveRequest,
-                      remainReviveTimes - 1,
-                      reReviveDueTime));
-          return;
-        }
+        // Revive reported SUCCESS but every known location is locally retired — the LM's active
+        // set is stale (its digest of the retire reports lags). Blocking revive with all
+        // outstanding retire reports attached instead of failing the task.
+        newLoc = reviveManager.reviveUntilWritable(shuffleId, mapId, attemptId, partitionId);
       }
       if (newLoc == null) {
         pushDataRpcResponseCallback.onFailure(
@@ -475,7 +446,8 @@ public class ShuffleClientImpl extends ShuffleClient {
     return reviveRequests;
   }
 
-  private PartitionLocationGroup locationGroup(int shuffleId, int partitionId) {
+  // Package-private: ReviveManager's synchronous revive path reads the group through this.
+  PartitionLocationGroup locationGroup(int shuffleId, int partitionId) {
     ConcurrentHashMap<Integer, PartitionLocationGroup> partitionMap =
         reducePartitionMap.get(shuffleId);
     return partitionMap == null ? null : partitionMap.get(partitionId);
@@ -1316,24 +1288,26 @@ public class ShuffleClientImpl extends ShuffleClient {
     PartitionLocationGroup group = map.get(partitionId);
     PartitionLocation currentLoc = group == null ? null : group.currentFor(mapId);
     if (currentLoc == null && group != null && adaptivePartitionWriteParallelismEnabled) {
-      // All known locations are locally retired. Revive synchronously (bypasses the 100ms
-      // batching): the LM retires the max epoch, allocates a replacement and replies the
-      // full active set, so the re-read below normally finds a writable location.
+      // All known locations are locally retired. Blocking revive (single-flight per partition,
+      // carrying every outstanding retire report): the LM digests the reports, replenishes the
+      // whole active set in one round and replies it, so the re-read normally finds a writable
+      // location. A single request without the reports would leave the LM's gap-based
+      // allocation at gap == 0 and re-reply already-retired epochs.
       logger.info(
-          "Shuffle {} partition {}: all {} location(s) unusable from epoch {}, reviving synchronously.",
+          "Shuffle {} partition {}: all {} location(s) unusable from epoch {}, blocking revive.",
           shuffleId,
           partitionId,
           group.activeCount(),
           group.maxEpoch());
-      revive(
-          shuffleId,
-          mapId,
-          attemptId,
-          partitionId,
-          group.maxEpoch(),
-          group.latest(),
-          StatusCode.PUSH_DATA_FAIL_NON_CRITICAL_CAUSE_PRIMARY);
-      currentLoc = group.currentFor(mapId);
+      currentLoc = reviveManager.reviveUntilWritable(shuffleId, mapId, attemptId, partitionId);
+      if (currentLoc != null) {
+        logger.info(
+            "Shuffle {} partition {}: blocking revive succeeded, writing to epoch {}@{}.",
+            shuffleId,
+            partitionId,
+            currentLoc.getEpoch(),
+            currentLoc.hostAndPushPort());
+      }
     }
     final PartitionLocation loc = currentLoc;
     if (loc == null) {
