@@ -74,10 +74,9 @@ class ReviveManager {
               // Insert request that is not MapperEnded and with the max epoch
               // into requestsToSend
               Iterator<ReviveRequest> iter = requests.iterator();
-              // Adaptive parallelism only: every retire report must reach the LifecycleManager
-              // (its active-set bookkeeping depends on it), even when already satisfied locally.
-              // Deduped per (partitionId, epoch), keeping the hardest cause.
-              Map<Long, ReviveRequest> retireReports = new HashMap<>();
+              // Adaptive parallelism only: one representative request per partition, used as the
+              // mapId/attemptId donor when rebuilding retire reports below.
+              Map<Integer, ReviveRequest> representativeRequests = new HashMap<>();
               while (iter.hasNext()) {
                 ReviveRequest req = iter.next();
                 if (shuffleClient.mapperEnded(shuffleId, req.mapId)
@@ -89,45 +88,59 @@ class ReviveManager {
                   req.reviveStatus = StatusCode.SUCCESS.getValue();
                   if (adaptivePartitionWriteParallelismEnabled) {
                     mapIds.add(req.mapId);
-                    retireReports.merge(
-                        ((long) req.partitionId << 32) | (req.epoch & 0xffffffffL),
-                        req,
-                        (a, b) -> a.cause == StatusCode.SOFT_SPLIT ? b : a);
+                    representativeRequests.putIfAbsent(req.partitionId, req);
                   }
                 } else {
                   filteredRequests.add(req);
                   mapIds.add(req.mapId);
+                  if (adaptivePartitionWriteParallelismEnabled) {
+                    representativeRequests.putIfAbsent(req.partitionId, req);
+                  }
                   ReviveRequest current = requestsToSend.get(req.partitionId);
                   if (current == null || current.epoch < req.epoch) {
-                    if (current != null && adaptivePartitionWriteParallelismEnabled) {
-                      // The displaced lower-epoch request rides on the max-epoch request's
-                      // response, but its retirement still has to be reported.
-                      retireReports.merge(
-                          ((long) current.partitionId << 32) | (current.epoch & 0xffffffffL),
-                          current,
-                          (a, b) -> a.cause == StatusCode.SOFT_SPLIT ? b : a);
-                    }
                     requestsToSend.put(req.partitionId, req);
-                  } else if (current.epoch > req.epoch
-                      && adaptivePartitionWriteParallelismEnabled) {
-                    retireReports.merge(
-                        ((long) req.partitionId << 32) | (req.epoch & 0xffffffffL),
-                        req,
-                        (a, b) -> a.cause == StatusCode.SOFT_SPLIT ? b : a);
                   }
                 }
               }
-              // An epoch covered by a waiting (non-satisfied) request is reported by it.
-              retireReports
-                  .values()
-                  .removeIf(
-                      req -> {
-                        ReviveRequest waiting = requestsToSend.get(req.partitionId);
-                        return waiting != null && waiting.epoch == req.epoch;
-                      });
 
               ArrayList<ReviveRequest> allToSend = new ArrayList<>(requestsToSend.values());
-              allToSend.addAll(retireReports.values());
+              if (adaptivePartitionWriteParallelismEnabled) {
+                // Every retire report must reach the LifecycleManager (its active-set bookkeeping
+                // depends on it), even when already satisfied locally. Reports are rebuilt from
+                // the groups' outstanding sets at send time instead of being collected from the
+                // queue: the queue version let a stuck scheduler pile every distinct retired
+                // epoch of the backlog (thousands for one hot partition) into a single Revive
+                // message, while the group view only holds retired epochs the LM has not
+                // digested yet (still in the active list) — bounded by the active set size,
+                // dropping stale reports, and automatically re-sending ones lost to an RPC
+                // timeout (they stay outstanding until the LM's full-set reply evicts them).
+                for (Map.Entry<Integer, ReviveRequest> entry : representativeRequests.entrySet()) {
+                  int partitionId = entry.getKey();
+                  ReviveRequest representative = entry.getValue();
+                  PartitionLocationGroup group =
+                      partitionMap == null ? null : partitionMap.get(partitionId);
+                  if (group == null) {
+                    continue;
+                  }
+                  // An epoch covered by a waiting (non-satisfied) request is reported by it.
+                  ReviveRequest waiting = requestsToSend.get(partitionId);
+                  int coveredEpoch = waiting == null ? -1 : waiting.epoch;
+                  for (PartitionLocationGroup.OutstandingRetire retire :
+                      group.outstandingRetires()) {
+                    if (retire.location.getEpoch() != coveredEpoch) {
+                      allToSend.add(
+                          new ReviveRequest(
+                              shuffleId,
+                              representative.mapId,
+                              representative.attemptId,
+                              partitionId,
+                              retire.location.getEpoch(),
+                              retire.location,
+                              retire.cause));
+                    }
+                  }
+                }
+              }
               if (!allToSend.isEmpty()) {
                 // Call reviveBatch. Return null means Exception caught or
                 // SHUFFLE_NOT_REGISTERED

@@ -24,8 +24,10 @@ import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -37,15 +39,19 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Collectors;
 
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 
 import org.apache.celeborn.common.CelebornConf;
+import org.apache.celeborn.common.identity.UserIdentifier;
 import org.apache.celeborn.common.protocol.PartitionLocation;
 import org.apache.celeborn.common.protocol.ReviveRequest;
 import org.apache.celeborn.common.protocol.message.StatusCode;
@@ -218,6 +224,63 @@ public class ReviveManagerSuiteJ {
         assertSame(revived, task.get(10, TimeUnit.SECONDS));
       }
       assertEquals(1, rpcCalls.get());
+    } finally {
+      manager.close();
+    }
+  }
+
+  @Test
+  public void testBatchRetireReportsRebuiltFromOutstandingRetires() throws Exception {
+    // Group: epochs 0 and 1 hard-retired, epoch 2 writable — every queued request below is
+    // locally satisfied, so the batch should carry retire reports only, rebuilt from the
+    // group's outstanding set: deduped, and free of stale epochs the group no longer holds.
+    ShuffleClientImpl client =
+        spy(
+            new ShuffleClientImpl(
+                "app-revive-manager-test", new CelebornConf(), new UserIdentifier("mock", "mock")));
+    PartitionLocationGroup group = new PartitionLocationGroup(loc(0, "w1"));
+    group.mergeActiveLocations(Arrays.asList(loc(0, "w1"), loc(1, "w2"), loc(2, "w3")), true);
+    group.retire(0, StatusCode.HARD_SPLIT);
+    group.retire(1, StatusCode.HARD_SPLIT);
+    ConcurrentHashMap<Integer, PartitionLocationGroup> partitionMap = new ConcurrentHashMap<>();
+    partitionMap.put(PARTITION_ID, group);
+    client.reducePartitionMap.put(SHUFFLE_ID, partitionMap);
+
+    CountDownLatch sent = new CountDownLatch(1);
+    AtomicReference<List<ReviveRequest>> sentRequests = new AtomicReference<>();
+    doAnswer(
+            invocation -> {
+              sentRequests.set(new ArrayList<>(invocation.getArgument(2)));
+              sent.countDown();
+              return new java.util.HashMap<>(SUCCESS);
+            })
+        .when(client)
+        .reviveBatch(anyInt(), any(), any());
+
+    ReviveManager manager = newManager(client);
+    try {
+      // Duplicate reports of epoch 0 from three mappers, one report of epoch 1, and one report
+      // of epoch 99 which the group has never seen (digested and evicted long ago).
+      for (int mapId : Arrays.asList(1, 2, 3)) {
+        manager.addRequest(
+            new ReviveRequest(
+                SHUFFLE_ID, mapId, 0, PARTITION_ID, 0, loc(0, "w1"), StatusCode.HARD_SPLIT));
+      }
+      manager.addRequest(
+          new ReviveRequest(
+              SHUFFLE_ID, 4, 0, PARTITION_ID, 1, loc(1, "w2"), StatusCode.HARD_SPLIT));
+      manager.addRequest(
+          new ReviveRequest(
+              SHUFFLE_ID, 5, 0, PARTITION_ID, 99, loc(99, "wX"), StatusCode.HARD_SPLIT));
+
+      assertTrue(sent.await(10, TimeUnit.SECONDS));
+      Set<Integer> epochs =
+          sentRequests.get().stream().map(r -> r.epoch).collect(Collectors.toSet());
+      // Exactly the outstanding set {0, 1}: queue duplicates deduped, stale epoch 99 dropped.
+      assertEquals(new HashSet<>(Arrays.asList(0, 1)), epochs);
+      for (ReviveRequest req : sentRequests.get()) {
+        assertEquals(StatusCode.HARD_SPLIT, req.cause);
+      }
     } finally {
       manager.close();
     }

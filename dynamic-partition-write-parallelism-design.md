@@ -55,7 +55,7 @@ LM (ChangePartitionManager → PartitionHotnessTracker):
 1. **fillTime 实测,不用速率估算**:fillTime = 某 epoch 的首个 split 上报时刻 − 该 epoch 真实分配时刻,per-epoch 独立对照,一次事件即可判定。对比 CIP-20/PR#3260 的"split 事件计数 × 假定字节数 + `expectedWorkerSpeed=10MB/s` 静态魔数"(社区评审的主要质疑):无需任何速度假设,hotWindow 即 SLO——"单 location 写满应慢于窗口"。
 2. **比例步进含 K 因子**:测得的 fillTime 是当前并行度 K 下的单 location 写满时间,聚合写满速率 = K/fillTime,故目标 = `ceil(K × window / fillTime)`。不乘 K 则目标被低估 K 倍,desired 冻结在早期 K≈1 时的一次判定。判定一次直达目标,desired 单调递增 + per-epoch 首报去重 + 上限截断,无需去抖窗口。
 3. **全集回复保证 executor 一致性**:每次 revive 响应携带该 partition 的完整活跃集(max epoch 为主回复 + `additionalPartitions`),按 epoch 有序插入,所有 executor 一次 revive 即收敛到**相同顺序**的活跃列表,`mapId % K` 分派全局一致。对比 PR#3260 的 50ms 轮询收敛:无收敛延迟、无中间态路由分歧。
-4. **SOFT_SPLIT location 是一等路由目标,退休上报一条不丢**:soft 文件在 2G 硬上限前持续可写,把它排除出新写路由会使稳态下所有槽位都处于 soft 态、写压塌缩到最新的 1~2 个 location(线上实证过)。配套地,LM 的活跃集记账依赖每个 (partition, epoch) 的退休 cause 到达——包括"本地已满足"的上报;丢弃任何一条会让 LM 活跃集被死 epoch 撑大、gap 分配归零,最终 executor 无可写 location(线上 `Partition location ... is NULL!` 事故的根因)。
+4. **SOFT_SPLIT location 是一等路由目标,退休上报一条不丢**:soft 文件在 2G 硬上限前持续可写,把它排除出新写路由会使稳态下所有槽位都处于 soft 态、写压塌缩到最新的 1~2 个 location(线上实证过)。配套地,LM 的活跃集记账依赖每个 (partition, epoch) 的退休 cause 到达——包括"本地已满足"的上报;丢弃任何一条会让 LM 活跃集被死 epoch 撑大、gap 分配归零,最终 executor 无可写 location(线上 `Partition location ... is NULL!` 事故的根因)。批量路径的上报**发送时从 `group.outstandingRetires()` 现取**而不是从队列收集:队列方式在调度器被超时堵住时会积压出单 partition 上千条上报(线上实证),group 视图只含 LM 未消化的退休 epoch——有界(≤ 活跃集大小)、自动去陈旧、RPC 超时丢失的自动重发。
 5. **全部不可写时的阻塞 revive:携带退休上报 + 有界重试 + single-flight,三者都是承重结构**。LM 补差分配按 `gap = desired − LM 簿记活跃数`;只发一条 max-epoch 请求时 LM 只消化 1 个退休,gap≈0,响应回几乎全已退休的旧集合,executor 无可写 location 抛错致 task 失败(线上事故)。携带全部未消化退休上报后 LM 一轮补满 K 个 location;否则每次只补 1 个 → 全 executor 的 mapper 投影到唯一可写 location → 秒级再次 HARD_SPLIT → churn 正反馈(线上实测 epoch 6 分钟冲到 3371,旧实现同期 ~400)。single-flight(per-partition 锁 + 拿锁后复查可写性)把 mass-retire 唤醒的 pusher 线程收敛到每 executor 每 partition 至多 1 个在飞 RPC,避免 herd 打挂 LM(60s `requestPartition.askTimeout` 超时)。两次回归实证:纯异步 fallback 版本(不阻塞,靠 worker 拒收重触发)性能严重变差;单发同步 revive(无上报、无重试)版本直接 task 失败。
 
 ## 4. 协议改动
@@ -138,7 +138,7 @@ allocTime 来源:新 epoch 由分配登记;epoch 0 用 registerShuffle 时刻(�
 | 套件 | 例数 | 覆盖 |
 |---|---|---|
 | `PartitionLocationGroupSuiteJ` | 10 | 快路径、soft 参与路由/hard 排除、cause 升级、全集收敛与清理、乱序 epoch、并发 pick×merge、epoch 快照视图、outstandingRetires 视图 |
-| `ReviveManagerSuiteJ` | 5 | 同步 revive:可写快速路径零 RPC、重试收敛且每轮携带全部退休上报、SUCCESS 无可写/RPC 失败有界放弃(3 次)、single-flight 并发去重(2 线程 1 RPC) |
+| `ReviveManagerSuiteJ` | 6 | 同步 revive:可写快速路径零 RPC、重试收敛且每轮携带全部退休上报、SUCCESS 无可写/RPC 失败有界放弃(3 次)、single-flight 并发去重(2 线程 1 RPC);批量路径:退休上报发送时从 outstandingRetires 现取(去重、丢弃陈旧 epoch) |
 | `PartitionHotnessTrackerSuite` | 12 | 计量守卫(不可用 worker/push 失败)、K 因子缩放、fillTime 下限与 -1=mapper 数上限、显式上限优先、单调不降、soft 保留/移除、迟到 SOFT 不复活 |
 | `ChangePartitionManagerAdaptiveParallelismSuite` | 10 | 升档+补差分配、超窗不升、allocTime 未知保守、首报去重、比例步进、epoch 乱序、gap=0 仍回全集、并发 revive 收敛、一条 Revive 的同 partition 多条目分组(上报只记账、max-epoch 驱动请求、commit 注册不丢) |
 | `RequestLocationCallContextSuite` | 1 | 同 partition 重复回复忽略、按 distinct 数完成响应 |
