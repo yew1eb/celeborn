@@ -20,7 +20,7 @@ Celeborn reduce partition 的写路径是**单活跃 location**:一个 partition
 repeated PbPartitionLocation additionalPartitions = 5;
 ```
 
-- `ReviveRequest` 无新增字段;一条 Revive 消息可携带同 partition 的多个退休 epoch 条目,LM 按 distinct partition 计数完成响应、同 partition 首条回复生效;
+- `ReviveRequest` 无新增字段(退休上报复用既有字段,一条 Revive 可携带多条目的语义见 Proposed Changes);
 - worker / master / Flink / cpp 协议面零改动。
 
 **新增配置**(均在 client 侧,`celeborn.client.shuffle.adaptivePartitionWriteParallelism.*`):
@@ -131,6 +131,7 @@ allocTime 来源:新 epoch 由分配登记;epoch 0 用 registerShuffle 时刻(�
 - 登记用 **reserve 成功后的实际 epoch**(`reserveSlotsWithRetry` 失败重试会换 epoch,事前计划会与实际分叉,泄漏槽位);
 - 活跃集中位于不可用 worker 的 epoch 被过滤并终态退休(死 worker 永远等不到退休上报);
 - 全集回复:max epoch 为主 + 其余(含 soft)为 additionals;分配 0 个也回全集。
+- 一条 Revive 可携带同 partition 的多个退休 epoch 条目:按 distinct partition 计数完成响应、同 partition 由 max-epoch 条目的首条回复生效(覆盖见 Test Plan · `RequestLocationCallContextSuite`)。
 
 ### 性能验证(生产)
 
@@ -146,7 +147,7 @@ allocTime 来源:新 epoch 由分配登记;epoch 0 用 registerShuffle 时刻(�
 
 ## Compatibility, Deprecation, and Migration Plan
 
-- **纯 additive,默认关闭**:`enabled=false` 时所有路径与现状等价;proto 仅新增 optional/repeated 字段,无字段复用、无语义变更。
+- **纯 additive,默认关闭**:`enabled=false` 时所有路径与现状等价;proto 仅新增一个 repeated 字段,无字段复用、无语义变更。
 - **新 client → 老 LM**:拿不到 additionals,退化为单 location 写,无异常;
 - **老 client → 新 LM**:忽略未知字段;LM 热点判定照常(老 client 的原生 revive 就是判定输入),只是老 client 不使用多 location;
 - **Rollout**:先升级全部 LM(driver 侧随作业提交,与 executor 同包,天然同版本),再开启开关;LM 滚动升级期间新老 executor 混布即上述两条矩阵,均安全。**Rollback**:开关置回 false 即恢复单 location 写,已产生的多 location 文件读侧天然兼容(fileGroups Set + 串流 + 去重,读路径未改)。
