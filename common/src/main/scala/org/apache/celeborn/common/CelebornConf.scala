@@ -1161,8 +1161,8 @@ class CelebornConf(loadDefaults: Boolean) extends Cloneable with Logging with Se
     get(CLIENT_SHUFFLE_ADAPTIVE_PARTITION_WRITE_PARALLELISM_ENABLED)
   def clientShuffleAdaptivePartitionWriteParallelismMaxLocations: Int =
     get(CLIENT_SHUFFLE_ADAPTIVE_PARTITION_WRITE_PARALLELISM_MAX_LOCATIONS)
-  def clientShuffleAdaptivePartitionWriteParallelismHotWindowMs: Long =
-    get(CLIENT_SHUFFLE_ADAPTIVE_PARTITION_WRITE_PARALLELISM_HOT_WINDOW)
+  def clientShuffleAdaptivePartitionWriteParallelismMinSplitIntervalMs: Long =
+    get(CLIENT_SHUFFLE_ADAPTIVE_PARTITION_WRITE_PARALLELISM_MIN_SPLIT_INTERVAL)
   def batchHandleChangePartitionEnabled: Boolean = get(CLIENT_BATCH_HANDLE_CHANGE_PARTITION_ENABLED)
   def batchHandleChangePartitionBuckets: Int =
     get(CLIENT_BATCH_HANDLE_CHANGE_PARTITION_BUCKETS)
@@ -5386,13 +5386,13 @@ object CelebornConf extends Logging {
       .checkValue(v => v == -1 || v > 0, "Must be -1 or positive.")
       .createWithDefault(-1)
 
-  val CLIENT_SHUFFLE_ADAPTIVE_PARTITION_WRITE_PARALLELISM_HOT_WINDOW: ConfigEntry[Long] =
-    buildConf("celeborn.client.shuffle.adaptivePartitionWriteParallelism.hotWindow")
+  val CLIENT_SHUFFLE_ADAPTIVE_PARTITION_WRITE_PARALLELISM_MIN_SPLIT_INTERVAL: ConfigEntry[Long] =
+    buildConf("celeborn.client.shuffle.adaptivePartitionWriteParallelism.minSplitInterval")
       .categories("client")
-      .doc("The window to judge whether a partition is hot. The target is that the " +
-        "time for a single location to fill 1G should be slower than this window; " +
-        "the new target parallelism is ceil(current parallelism * window / measured " +
-        "fill time).")
+      .doc("The minimum interval between two splits of a single partition location. " +
+        "A location filled (split) faster than this interval marks the partition hot, and " +
+        "the target parallelism is raised to ceil(current parallelism * interval / measured " +
+        "fill time) so that the per-location split interval converges to this value.")
       .version("0.7.0")
       .timeConf(TimeUnit.MILLISECONDS)
       .createWithDefaultString("60s")

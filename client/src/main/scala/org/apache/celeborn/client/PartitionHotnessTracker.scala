@@ -61,8 +61,8 @@ private[client] class PartitionHotnessTracker(
 
   private val adaptivePartitionWriteParallelismMaxLocations =
     conf.clientShuffleAdaptivePartitionWriteParallelismMaxLocations
-  private val adaptivePartitionWriteParallelismHotWindowMs =
-    conf.clientShuffleAdaptivePartitionWriteParallelismHotWindowMs
+  private val adaptivePartitionWriteParallelismMinSplitIntervalMs =
+    conf.clientShuffleAdaptivePartitionWriteParallelismMinSplitIntervalMs
 
   // shuffleId -> (partitionId -> hot state). Sparse: only partitions revived in
   // adaptive-parallelism mode get an entry (see currentActiveEpochs).
@@ -90,9 +90,9 @@ private[client] class PartitionHotnessTracker(
    *
    * Hotness judgment: a retire is measured when the cause is SOFT_SPLIT or HARD_SPLIT and the
    * worker is still available; push failure causes and unavailable workers only retire. A fill
-   * faster than the hot window raises desired to ceil(K * window / fillTime): the measured
-   * fillTime is the single-location fill time under parallelism K, so the target must be
-   * scaled by K. Desired is monotone and capped, so no debounce is needed.
+   * faster than the minimum split interval raises desired to ceil(K * interval / fillTime):
+   * the measured fillTime is the single-location fill time under parallelism K, so the target
+   * must be scaled by K. Desired is monotone and capped, so no debounce is needed.
    */
   private[client] def onEpochRetired(
       shuffleId: Int,
@@ -140,7 +140,7 @@ private[client] class PartitionHotnessTracker(
         null
       }
     }
-    if (allocTime == null || nowMs - allocTime >= adaptivePartitionWriteParallelismHotWindowMs) {
+    if (allocTime == null || nowMs - allocTime >= adaptivePartitionWriteParallelismMinSplitIntervalMs) {
       hotState.synchronized {
         hotState.splitReported.add(Integer.valueOf(epoch))
       }
@@ -149,14 +149,14 @@ private[client] class PartitionHotnessTracker(
     hotState.synchronized {
       if (hotState.splitReported.add(Integer.valueOf(epoch))) {
         // Floor fillTime at 1ms: a report in the same millisecond as the allocation would
-        // otherwise compute ceil(window / 0) = Infinity and pin desired to Int.MaxValue.
+        // otherwise compute ceil(interval / 0) = Infinity and pin desired to Int.MaxValue.
         val fillTimeMs = math.max(1L, nowMs - allocTime)
         // K = locations active while this one filled: the post-report set size, plus the
         // retired epoch itself when the report removed it.
         val parallelismDuringFill =
           math.max(1, activeCountAfterRetire + (if (epochWasActive && !epochRetained) 1 else 0))
         val target = math.ceil(
-          parallelismDuringFill * adaptivePartitionWriteParallelismHotWindowMs.toDouble / fillTimeMs).toInt
+          parallelismDuringFill * adaptivePartitionWriteParallelismMinSplitIntervalMs.toDouble / fillTimeMs).toInt
         // Unregistered shuffle defaults to 1 (unreachable in practice: registerShuffle
         // precedes any revive).
         val cap = shuffleParallelismCap.getOrDefault(shuffleId, 1).intValue()

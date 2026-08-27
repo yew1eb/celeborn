@@ -29,7 +29,7 @@ repeated PbPartitionLocation additionalPartitions = 5;
 |---|---|---|
 | `...adaptivePartitionWriteParallelism.enabled` | false | 总开关;关闭时所有路径与现状等价 |
 | `...adaptivePartitionWriteParallelism.maxLocations` | -1 | 活跃 location 上限 = min(配置值, 该 shuffle 的 mapper 数);-1 = 仅按 mapper 数(路由 mapId % K,超过 mapper 数必空转,天然上限) |
-| `...adaptivePartitionWriteParallelism.hotWindow` | 60s | 热点判定窗口;语义 = 让单 location 写满 threshold 的周期 ≥ window(升档目标 = ceil(K × 窗口 / 写满耗时))。window 越大并行度越高、单点写压越薄,代价是热点 partition 占用的 worker 越多(见 性能验证(生产个例)) |
+| `...adaptivePartitionWriteParallelism.minSplitInterval` | 60s | 单 location 两次 split 的最小间隔:写满 threshold 快于该间隔即判热,升档目标 = ceil(K × 间隔 / 写满耗时),稳态下单 location 的 split 间隔收敛到该值。间隔越大并行度越高、单点写压越薄,代价是热点 partition 的并发文件与磁盘占用按 K 倍放大(见 性能验证(生产个例)) |
 
 **观测点**(均一次性,无重复刷屏):LM 侧升档判定 / 补差分配 / 分配不足(INFO/WARN);executor 侧并行激活 / SOFT 首报退休(含换路去向)/ 全不可用触发阻塞 revive 及其成功后的新目标(INFO);per-batch 重推成功(DEBUG)。
 
@@ -65,8 +65,8 @@ LM (ChangePartitionManager → PartitionHotnessTracker):
   收到带 cause 的 revive → 活跃集维护:SOFT_SPLIT 且 worker 可用 → epoch 保留;
     其余(HARD_SPLIT / push 失败 / worker 不可用)→ epoch 移出活跃集(终态,迟到 SOFT 不复活)
   热点判定(cause ∈ {SOFT, HARD} 且 worker 可用):
-    fillTime = 首报时刻 - allocTime(epoch) < hotWindow ?
-    desired = ceil(K × window / fillTime)   (K = 测量时活跃数;单调递增、封顶)
+    fillTime = 首报时刻 - allocTime(epoch) < minSplitInterval ?
+    desired = ceil(K × minSplitInterval / fillTime)   (K = 测量时活跃数;单调递增、封顶)
   补差分配 gap = desired - 活跃数(互不相同 worker、epoch 递增)
   revive 响应返回活跃 location 全集(max epoch 为主,其余为 additionals)
     → 所有 executor 收敛到同一 epoch 有序集合
@@ -80,7 +80,7 @@ LM (ChangePartitionManager → PartitionHotnessTracker):
 
 1. **split 事件驱动 + fillTime 实测,不做速度假设**。不猜磁盘有多快,直接量:split 阈值是固定字节数(默认 1G),在任何磁盘上含义相同;一个 location 从分配到写满 1G 用了多久(fillTime),换算过来就是它的真实写速。HDD/SSD/NVMe/混插集群各自自校准,无需任何先验速度参数。一次 split 事件即可判定,per-epoch 独立对照。与速率统计等信号源的完整对比见 Rejected Alternatives。
 
-2. **升档目标含 K 因子:`target = ceil(K × window / fillTime)`**。一句话:**目标路数 = 当前路数 × 需要放慢的倍数**。数字走一遍:window=60s(希望一个文件至少写 60 秒才满,切换不匆忙);实测当前 K=5 路并行、每路 10 秒写满 1G,即整体每 2 秒就写满一份——太赶。要让每路放慢到 60 秒才满,每路写速需降到 1/6,路数就要 ×6:`5 × 60/10 = 30`。为什么必须带 K:fillTime=10s 这个测量值本身已是 5 路分摊后的结果;公式若不带 K(window/fillTime=6),目标只会从 5 升到 6——把已有的并行度忘了。收敛性质:一次判定直达目标;desired 单调递增、每 epoch 仅首报判定一次、上限截断,无需去抖窗口。
+2. **升档目标含 K 因子:`target = ceil(K × minSplitInterval / fillTime)`**。一句话:**目标路数 = 当前路数 × 需要放慢的倍数**。数字走一遍:minSplitInterval=60s(一个 location 至少写 60 秒才 split,切换不匆忙);实测当前 K=5 路并行、每路 10 秒写满 1G,即整体每 2 秒就写满一份——太赶。要让每路放慢到 60 秒才满,每路写速需降到 1/6,路数就要 ×6:`5 × 60/10 = 30`。为什么必须带 K:fillTime=10s 这个测量值本身已是 5 路分摊后的结果;公式若不带 K(60/10=6),目标只会从 5 升到 6——把已有的并行度忘了。收敛性质:一次判定直达目标;desired 单调递增、每 epoch 仅首报判定一次、上限截断,无需去抖。
 
 3. **全集回复保证 executor 一致性**。每次 revive 响应携带该 partition 的完整活跃集(max epoch 为主回复 + `additionalPartitions`),按 epoch 有序插入,所有 executor 一次 revive 即收敛到**相同顺序**的活跃列表,`mapId % K` 分派全局一致。否则(PR#3260 的 50ms 轮询收敛)收敛期各 executor 路由不一致,同一 mapId 在不同 executor 写向不同 location。
 
@@ -125,7 +125,7 @@ per (shuffleId, partitionId) 的稀疏 HotState:`activeEpochs`(可写 epoch,soft
 
 `onEpochRetired`(每个退休上报到达时):
 - 活跃集维护:SOFT 且 worker 可用 → 保留;其余 → 移除(终态);
-- 计量(SOFT/HARD 且 worker 可用):`fillTime = max(1ms, now − allocTime)`,若 < hotWindow 则 `desired = min(cap, ceil(K × window / fillTime))`,K = 报告时活跃数(soft 保留的已计入,被移除的补回 1);
+- 计量(SOFT/HARD 且 worker 可用):`fillTime = max(1ms, now − allocTime)`,若 < minSplitInterval 则 `desired = min(cap, ceil(K × minSplitInterval / fillTime))`,K = 报告时活跃数(soft 保留的已计入,被移除的补回 1);
 - push 失败类 cause 原则性不计量(与热度无关)。
 
 allocTime 来源:新 epoch 由分配登记;epoch 0 用 registerShuffle 时刻(偏保守,方向安全);未知的保守不升档。
@@ -148,11 +148,11 @@ allocTime 来源:新 epoch 由分配登记;epoch 0 用 registerShuffle 时刻(�
 | 运行 | 写吞吐 (MB/s) | Shuffle 写线程总耗时 | Executor 运行总耗时 | vcore·h | 作业耗时 |
 |---|---|---|---|---|---|
 | 未开启 | 6.33 | 431h20m | 546.1h | 1128.7 | 40m47s |
-| hotWindow=10s | 391.75 | 6h58m | 177.8h | 433.9 | 7m23s |
-| hotWindow=30s | 552.66 | 4h56m | 170.9h | 504.6 | 8m08s |
-| hotWindow=60s(默认) | 648.97 | 4h12m | 167.5h | 403.3 | 6m34s |
+| minSplitInterval=10s | 391.75 | 6h58m | 177.8h | 433.9 | 7m23s |
+| minSplitInterval=30s | 552.66 | 4h56m | 170.9h | 504.6 | 8m08s |
+| minSplitInterval=60s(默认) | 648.97 | 4h12m | 167.5h | 403.3 | 6m34s |
 
-**hotWindow 怎么起作用**:window 定义稳态均衡点——升档公式的不动点是"单 location 写满 1G 的周期 = window",即单 location 写速均衡在 threshold/window,10s/30s/60s 分别对应约 100/34/17 MB/s。聚合速率固定,window 越大 → 目标并行度越高,收益来自三处:(1) SOFT→HARD 安全窗 = 1G/单路速率,恰等于 window——60s 均衡下几乎总能在 SOFT 态平滑退休,零重推零阻塞;10s 均衡下重推频繁,而重推是重复写,这是 Shuffle 写线程总耗时阶梯(6h58m → 4h56m → 4h12m)的主因;(2) 写压分摊到更多 worker,push RTT 与排队下降;(3) 热点判定要求 fillTime < window,小窗口下写得稍慢的 partition 不触发升档,且 fillTime ≥ window 后升档冻结——小窗口目标低、封顶早。代价是热点 partition 占用更多 worker(由 `maxLocations`/mapper 数上限兜底)。
+**minSplitInterval 怎么起作用**:它定义稳态均衡点——升档公式的不动点是"单 location 两次 split 的间隔 = minSplitInterval",即单 location 写速均衡在 threshold/间隔,10s/30s/60s 分别对应约 100/34/17 MB/s。聚合速率固定,间隔越大 → 目标并行度越高,收益来自三处:(1) SOFT→HARD 安全窗 = 1G/单路速率,恰等于该间隔——60s 均衡下几乎总能在 SOFT 态平滑退休,零重推零阻塞;10s 均衡下重推频繁,而重推是重复写,这是 Shuffle 写线程总耗时阶梯(6h58m → 4h56m → 4h12m)的主因;(2) 写压分摊到 shuffle 既有 worker 集合内的更多 location,push RTT 与排队下降;(3) 热点判定要求 fillTime < minSplitInterval,间隔越小,写得稍慢的 partition 越不触发升档,且 fillTime ≥ 间隔后升档冻结——小间隔目标低、封顶早。代价:热点 partition 的并发 location 变多,槽位与磁盘占用按 K 倍放大(K × 2 × partitionSplitMaximumSize),分摊在 shuffle 既有 worker 集合内(补差分配不新增 worker),并由 `maxLocations`/mapper 数上限封顶。
 
 (注:基线写吞吐 6.33 MB/s 反映的是严重反压下 mapper 大部分时间阻塞,而非磁盘上限;30s 组 vcore·h 略高于 10s 组为集群调度波动。)
 
@@ -178,16 +178,16 @@ allocTime 来源:新 epoch 由分配登记;epoch 0 用 registerShuffle 时刻(�
 
 ## Rejected Alternatives
 
-- **worker/client 侧速率统计(替代 split 事件驱动)**:client 侧单 mapper 只见自己的流,聚合速率只有 LM 能算,需要新上报通道;且 push 字节/时间含排队、网络、flush 周期,瞬时噪声大,需要平滑窗口,而平滑会重新引入本欲消除的检测延迟。worker 侧按 partition 速率仪表化 + 上报协议 + LM 聚合,补丁面从 1 个 additive proto 字段扩到 worker/protocol/LM 三层;Celeborn 目前没有任何 per-partition 吞吐度量可复用。无论哪侧,判定"热"仍需一个 SLO 阈值(聚合速率 > X),其量纲恰等于 阈值/hotWindow——本方案已内嵌同一 SLO,且零测量基础设施。净收益只有两条:检测延迟可低于"写满一个阈值";与 threshold 配置解耦。收益不足以抵消补丁面扩张,故列为 Future Work 的**信号源替换**(fillTime→目标换算、全集收敛、活跃集记账全部复用)。
+- **worker/client 侧速率统计(替代 split 事件驱动)**:client 侧单 mapper 只见自己的流,聚合速率只有 LM 能算,需要新上报通道;且 push 字节/时间含排队、网络、flush 周期,瞬时噪声大,需要平滑窗口,而平滑会重新引入本欲消除的检测延迟。worker 侧按 partition 速率仪表化 + 上报协议 + LM 聚合,补丁面从 1 个 additive proto 字段扩到 worker/protocol/LM 三层;Celeborn 目前没有任何 per-partition 吞吐度量可复用。无论哪侧,判定"热"仍需一个 SLO 阈值(聚合速率 > X),其量纲恰等于 阈值/minSplitInterval——本方案已内嵌同一 SLO,且零测量基础设施。净收益只有两条:检测延迟可低于"写满一个阈值";与 threshold 配置解耦。收益不足以抵消补丁面扩张,故列为 Future Work 的**信号源替换**(fillTime→目标换算、全集收敛、活跃集记账全部复用)。
 - **PR#3260(CIP-20):split 计数 × 静态速率魔数**:用 split 事件频率乘假定字节数,再除以 `expectedWorkerSpeed=10MB/s` 推算所需并行度。10MB/s 对 NVMe 严重低估、对拥塞 HDD 严重高估,静态魔数在异构集群不可能正确——这是其社区评审的主要质疑,本方案的 fillTime 实测正是该质疑的直接答案。其 50ms 轮询收敛存在中间态路由分歧(决策 3)。协议上它把 `partition` 单值改 repeated,多元素对旧 client 有 merge 畸形风险;本方案只加 additive 的 `additionalPartitions`。
 - **业务侧 salting / repartition**:把倾斜 key 打散到多个 reduce partition。有效但要求改作业、且读侧/下游语义变化;对"单 partition 承接全部 mapper"的极端场景(所需并行度超过集群 worker 数)仍是唯一根治手段。本特性与它互补:特性解决"检测与并行写"的系统侧自动化,salting 解决超出集群物理上限的倾斜(见 Risks and Limitations 第 3 条)。
 
 ## Risks and Limitations
 
-1. **检测延迟 = 写满一个 threshold**:事件驱动的固有限制(默认 1G 阈值下,热 partition 约 60s 边界,越热越快);滞后期间等价于现状,不会更差。进一步降低延迟需换信号源(速率统计,成本收益见 Rejected Alternatives,列入 Future Work);
+1. **检测延迟 = 写满一个 threshold**:事件驱动的固有限制——首次判定要等某个 location 写满一个 split 阈值,越热的 partition 触发越快;滞后期间等价于现状,不会更差。进一步降低延迟需换信号源(速率统计,成本收益见 Rejected Alternatives,列入 Future Work);
 2. **desired 只升不降**:一次误判(如极短 fillTime)在整个 shuffle 生命周期不可回退,后果由上限封顶;epoch 0 判定偏保守(方向安全);
 3. **split 事件率与并行度无关**:事件率 = 聚合吞吐 / split 阈值。所需并行度远超集群 worker 数的作业(如单 partition 承接全部 mapper)超出本特性能力范围,应业务侧 salting/repartition;
-4. **worker 占用放大**:热点 partition 占 K 台 worker,K × 2 × partitionSplitMaximumSize 磁盘;replicate 模式 slot 翻倍;
+4. **资源占用放大**:热点 partition 的并发 location 为 K 个——槽位与磁盘占用按 K 倍放大(K ×(replicate 则 ×2)× partitionSplitMaximumSize),分摊在该 shuffle **既有** worker 集合内:补差分配的候选集来自该 shuffle 已占用的 worker(`workerSnapshots`),不新增 worker,集合大小本身由 `celeborn.client.slot.assign.maxWorkers`(默认 10000)约束;文件数增多也使 commit 体量与读侧文件流相应增加;
 5. **AQE skew read / StageEnd commit 变长**:理论兼容,上线前 IT 回归。
 
 ## Future Work
