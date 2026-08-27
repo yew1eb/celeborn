@@ -78,9 +78,12 @@ class ReviveManager {
               Map<Long, ReviveRequest> retireReports = new HashMap<>();
               while (iter.hasNext()) {
                 ReviveRequest req = iter.next();
-                if (shuffleClient.newerPartitionLocationExists(
-                        partitionMap, req.partitionId, req.epoch, false)
-                    || shuffleClient.mapperEnded(shuffleId, req.mapId)) {
+                if (shuffleClient.mapperEnded(shuffleId, req.mapId)
+                    || (adaptivePartitionWriteParallelismEnabled
+                        ? shuffleClient.hasWritableLocation(
+                            partitionMap, req.partitionId, req.mapId)
+                        : shuffleClient.newerPartitionLocationExists(
+                            partitionMap, req.partitionId, req.epoch, false))) {
                   req.reviveStatus = StatusCode.SUCCESS.getValue();
                   if (adaptivePartitionWriteParallelismEnabled) {
                     mapIds.add(req.mapId);

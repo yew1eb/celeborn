@@ -362,11 +362,39 @@ public class ShuffleClientImpl extends ShuffleClient {
       PartitionLocationGroup newLocGroup = locationGroup(shuffleId, partitionId);
       PartitionLocation newLoc = newLocGroup == null ? null : newLocGroup.currentFor(mapId);
       if (newLoc == null && newLocGroup != null && adaptivePartitionWriteParallelismEnabled) {
-        // Every known location is locally retired while the LM's active set lags. Push to the
-        // latest known location instead of failing the task: the rejection re-triggers an async
-        // revive (which forwards the retire reports), and a later retry routes to the freshly
-        // allocated epoch.
-        newLoc = newLocGroup.latest();
+        // Revive reported SUCCESS but nothing is writable (TOCTOU: the picked location was
+        // retired concurrently, or the reply carried only locally retired epochs). Re-revive
+        // for the current max epoch instead of pushing to a known-retired location: with the
+        // writability-aware satisfaction in ReviveManager this request reaches the LM, which
+        // allocates a replacement. Bounded by the remaining revive budget, mirroring the
+        // merged-data path's re-revive.
+        if (remainReviveTimes > 0) {
+          ReviveRequest reReviveRequest =
+              new ReviveRequest(
+                  shuffleId,
+                  mapId,
+                  attemptId,
+                  partitionId,
+                  newLocGroup.maxEpoch(),
+                  newLocGroup.latest(),
+                  StatusCode.PUSH_DATA_FAIL_NON_CRITICAL_CAUSE_PRIMARY);
+          reviveManager.addRequest(reReviveRequest);
+          long reReviveDueTime =
+              System.currentTimeMillis()
+                  + conf.clientRpcRequestPartitionLocationAskTimeout().duration().toMillis();
+          pushDataRetryPool.submit(
+              () ->
+                  submitRetryPushData(
+                      shuffleId,
+                      body,
+                      batchId,
+                      pushDataRpcResponseCallback,
+                      pushState,
+                      reReviveRequest,
+                      remainReviveTimes - 1,
+                      reReviveDueTime));
+          return;
+        }
       }
       if (newLoc == null) {
         pushDataRpcResponseCallback.onFailure(
@@ -1035,6 +1063,19 @@ public class ShuffleClientImpl extends ShuffleClient {
     }
   }
 
+  /**
+   * Whether the partition currently has a writable location for {@code mapId} (non-retired or
+   * soft-split). Adaptive parallelism only: a revive request is locally satisfied only when this is
+   * true — a newer but already-retired epoch must not short-circuit the request, otherwise the
+   * retry loop spins on a stale local view and the LifecycleManager never learns it must allocate a
+   * replacement.
+   */
+  boolean hasWritableLocation(
+      Map<Integer, PartitionLocationGroup> shuffleMap, int partitionId, int mapId) {
+    PartitionLocationGroup group = shuffleMap == null ? null : shuffleMap.get(partitionId);
+    return group != null && group.currentFor(mapId) != null;
+  }
+
   void excludeWorkerByCause(StatusCode cause, PartitionLocation oldLocation) {
     if (pushExcludeWorkerOnFailureEnabled && oldLocation != null) {
       switch (cause) {
@@ -1275,16 +1316,24 @@ public class ShuffleClientImpl extends ShuffleClient {
     PartitionLocationGroup group = map.get(partitionId);
     PartitionLocation currentLoc = group == null ? null : group.currentFor(mapId);
     if (currentLoc == null && group != null && adaptivePartitionWriteParallelismEnabled) {
-      // All known locations are locally retired (the LM's active set lags). Fall back to the
-      // latest known location: the worker's rejection re-triggers an async revive carrying the
-      // retire reports, and a later push routes to the freshly allocated epoch.
+      // All known locations are locally retired. Revive synchronously (bypasses the 100ms
+      // batching): the LM retires the max epoch, allocates a replacement and replies the
+      // full active set, so the re-read below normally finds a writable location.
       logger.info(
-          "Shuffle {} partition {}: all {} location(s) unusable from epoch {}, falling back to the latest location.",
+          "Shuffle {} partition {}: all {} location(s) unusable from epoch {}, reviving synchronously.",
           shuffleId,
           partitionId,
           group.activeCount(),
           group.maxEpoch());
-      currentLoc = group.latest();
+      revive(
+          shuffleId,
+          mapId,
+          attemptId,
+          partitionId,
+          group.maxEpoch(),
+          group.latest(),
+          StatusCode.PUSH_DATA_FAIL_NON_CRITICAL_CAUSE_PRIMARY);
+      currentLoc = group.currentFor(mapId);
     }
     final PartitionLocation loc = currentLoc;
     if (loc == null) {

@@ -22,8 +22,11 @@ mapper pushData(partitionId)
              ├─ SOFT_SPLIT → retire(epoch, SOFT)(保持可写,不阻塞),首次退休上报 LM
              ├─ HARD_SPLIT / push 失败 → retire + 预置 SUCCESS:
              │     有另一可写 location 时重推线程立即换目标(不等 LM 响应)
-             └─ 全部不可写 → fallback 到 latest()(已知最新 location):拒收重新触发异步
-                  revive(携带退休上报),LM 分配新 location 后下一批复位——与基线自愈同形
+             └─ 全部不可写 → 入口一次性同步 revive(maxEpoch;LM 收缩活跃集并补差分配);
+                  重推路径预算化重 revive——ReviveManager 的"本地已满足"判定要求
+                  当前有可写 location,不可写则请求必到 LM,杜绝空转
+
+关键不变量:revive SUCCESS ⟺ 该 partition 当前存在可写 location。
 
 LM (ChangePartitionManager → PartitionHotnessTracker):
   收到带 cause 的 revive → 活跃集维护:SOFT_SPLIT 且 worker 可用 → epoch 保留;
@@ -79,7 +82,7 @@ repeated PbPartitionLocation additionalPartitions = 5;
 |---|---|
 | SOFT_SPLIT 回调 | `retire(epoch, SOFT)`(保持可写),首报且 mapper 未结束时上报;数据已落盘,零阻塞 |
 | HARD_SPLIT / push 失败 | `retire` + 若有另一可写 location 则预置 `reviveStatus=SUCCESS`,重推线程立即换路不等 LM |
-| 全部不可用 | fallback 到 `latest()`(已知最新 location):worker 拒收重新触发异步 revive(ReviveManager 携带退休上报,LM 据此收缩活跃集、分配新 location),后续批次路由到新 epoch;与基线"推旧 location 直到 LM 给新的"自愈同形;HARD_SPLIT 拒收的重推不消耗 revive 预算 |
+| 全部不可用 | 入口:一次性同步 revive(maxEpoch),LM 收缩活跃集并补差分配后重读选路;重推路径:预算化重 revive(对齐 mergeData)。前提是不变量"revive SUCCESS ⟺ 存在可写 location"——ReviveManager 的满足判定要求 `currentFor(mapId) != null`,不可写则请求必到 LM,不会空转 |
 
 ### 并发要点
 
@@ -120,7 +123,7 @@ allocTime 来源:新 epoch 由分配登记;epoch 0 用 registerShuffle 时刻(�
 | `...adaptivePartitionWriteParallelism.maxLocations` | -1 | 活跃 location 上限 = min(配置值, 该 shuffle 的 mapper 数);-1 = 仅按 mapper 数(路由 mapId % K,超过 mapper 数必空转,天然上限) |
 | `...adaptivePartitionWriteParallelism.hotWindow` | 60s | 热点判定窗口;升档目标 = ceil(K × 窗口 / 写满耗时) |
 
-观测点(均一次性,无重复刷屏):LM 侧升档判定 / 补差分配 / 分配不足(INFO/WARN);executor 侧并行激活 / SOFT 首报退休(含换路去向)/ 全不可用 fallback(INFO);per-batch 重推成功(DEBUG)。
+观测点(均一次性,无重复刷屏):LM 侧升档判定 / 补差分配 / 分配不足(INFO/WARN);executor 侧并行激活 / SOFT 首报退休(含换路去向)/ 全不可用触发同步 revive(INFO);per-batch 重推成功(DEBUG)。
 
 ## 8. 测试
 
