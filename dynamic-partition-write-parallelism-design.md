@@ -52,13 +52,40 @@ LM (ChangePartitionManager → PartitionHotnessTracker):
 
 ## 3. 关键设计决策
 
-1. **fillTime 实测,不用速率估算**:fillTime = 某 epoch 的首个 split 上报时刻 − 该 epoch 真实分配时刻,per-epoch 独立对照,一次事件即可判定。对比 CIP-20/PR#3260 的"split 事件计数 × 假定字节数 + `expectedWorkerSpeed=10MB/s` 静态魔数"(社区评审的主要质疑):无需任何速度假设,hotWindow 即 SLO——"单 location 写满应慢于窗口"。
+1. **split 事件驱动 + fillTime 实测,不做速度假设**:fillTime = 某 epoch 的首个 split 上报时刻 − 该 epoch 真实分配时刻,per-epoch 独立对照,一次事件即可判定。split 阈值是**字节尺子**(`partitionSplit.threshold` 默认 1G,worker 侧仅有 min 1m / max 2g 硬边界),与磁盘介质无关;fillTime 把它换算成该 location 的**实测**写速,HDD/SSD/NVMe/混插集群各自自校准。对比 CIP-20/PR#3260 的"split 事件计数 × 假定字节数 + `expectedWorkerSpeed=10MB/s` 静态魔数"(社区评审的主要质疑):无需任何速度假设,hotWindow 即 SLO——"单 location 写满应慢于窗口"。与其他备选方案的完整对比见 §4。
 2. **比例步进含 K 因子**:测得的 fillTime 是当前并行度 K 下的单 location 写满时间,聚合写满速率 = K/fillTime,故目标 = `ceil(K × window / fillTime)`。不乘 K 则目标被低估 K 倍,desired 冻结在早期 K≈1 时的一次判定。判定一次直达目标,desired 单调递增 + per-epoch 首报去重 + 上限截断,无需去抖窗口。
 3. **全集回复保证 executor 一致性**:每次 revive 响应携带该 partition 的完整活跃集(max epoch 为主回复 + `additionalPartitions`),按 epoch 有序插入,所有 executor 一次 revive 即收敛到**相同顺序**的活跃列表,`mapId % K` 分派全局一致。对比 PR#3260 的 50ms 轮询收敛:无收敛延迟、无中间态路由分歧。
 4. **SOFT_SPLIT location 是一等路由目标,退休上报一条不丢**:soft 文件在 2G 硬上限前持续可写,把它排除出新写路由会使稳态下所有槽位都处于 soft 态、写压塌缩到最新的 1~2 个 location(线上实证过)。配套地,LM 的活跃集记账依赖每个 (partition, epoch) 的退休 cause 到达——包括"本地已满足"的上报;丢弃任何一条会让 LM 活跃集被死 epoch 撑大、gap 分配归零,最终 executor 无可写 location(线上 `Partition location ... is NULL!` 事故的根因)。批量路径的上报**发送时从 `group.outstandingRetires()` 现取**而不是从队列收集:队列方式在调度器被超时堵住时会积压出单 partition 上千条上报(线上实证),group 视图只含 LM 未消化的退休 epoch——有界(≤ 活跃集大小)、自动去陈旧、RPC 超时丢失的自动重发。
 5. **全部不可写时的阻塞 revive:携带退休上报 + 有界重试 + single-flight,三者都是承重结构**。LM 补差分配按 `gap = desired − LM 簿记活跃数`;只发一条 max-epoch 请求时 LM 只消化 1 个退休,gap≈0,响应回几乎全已退休的旧集合,executor 无可写 location 抛错致 task 失败(线上事故)。携带全部未消化退休上报后 LM 一轮补满 K 个 location;否则每次只补 1 个 → 全 executor 的 mapper 投影到唯一可写 location → 秒级再次 HARD_SPLIT → churn 正反馈(线上实测 epoch 6 分钟冲到 3371,旧实现同期 ~400)。single-flight(per-partition 锁 + 拿锁后复查可写性)把 mass-retire 唤醒的 pusher 线程收敛到每 executor 每 partition 至多 1 个在飞 RPC,避免 herd 打挂 LM(60s `requestPartition.askTimeout` 超时)。两次回归实证:纯异步 fallback 版本(不阻塞,靠 worker 拒收重触发)性能严重变差;单发同步 revive(无上报、无重试)版本直接 task 失败。
 
-## 4. 协议改动
+## 4. 备选方案对比
+
+热点检测本质上需要一个"partition 聚合写速超过预期"的信号。诚实的选项有三个:
+
+### 4.1 split 事件驱动 + fillTime 实测(本方案)
+
+- 信号:`partitionSplit.threshold`(默认 1G)是**字节尺子而非速度假设**——任何介质上"写满 1G"的含义一致;fillTime = 阈值 ÷ 实测单 location 速率,天然跨 HDD/SSD/NVMe/混插自校准,慢盘快盘各自测各自。
+- 检测延迟 = 阈值 ÷ 聚合速率,**与热度成反比、方向自适应**:越热触发越快,冷 partition 零开销。
+- 补丁面最小:1 个 additive proto 字段,worker/master/读侧零改动。
+- 代价:冷启动需先写满一个阈值才有首次判定(滞后期间等价于现状,不会更差);与 threshold 配置耦合(threshold 1G→4G 则检测慢 4 倍,量纲上是同一个 SLO 的两种写法)。
+
+### 4.2 worker/client 侧速率统计(未来工作,见 §11)
+
+- client 侧:单 mapper 只见自己的流,聚合速率只有 LM 能算 → 需要新上报通道;且 push 字节/时间含排队、网络、flush 周期,瞬时噪声大,需平滑窗口——把想消除的检测延迟又请了回来。
+- worker 侧:按 partition 速率仪表化 + 上报协议 + LM 聚合,补丁面扩到 worker/protocol/LM 三层;Celeborn 目前没有任何 per-partition 吞吐度量可复用。
+- 无论哪侧,判定"热"仍需一个 SLO 阈值(聚合速率 > X),其量纲恰等于 阈值/hotWindow——本方案已内嵌同一 SLO,且零测量基础设施。
+- 净收益只有两条:检测延迟可低于"写满一个阈值";与 threshold 配置解耦。值得做,但不值得为它推翻事件驱动机制——它是对本方案的**信号源替换**,其余设计(fillTime→目标换算、全集收敛、活跃集记账)全部原样复用。
+
+### 4.3 PR#3260(CIP-20):split 计数 × 静态速率魔数
+
+- 用 split 事件频率乘假定字节数,再除以 `expectedWorkerSpeed=10MB/s` 推算所需并行度。10MB/s 对 NVMe 严重低估、对拥塞 HDD 严重高估,静态魔数在异构集群不可能正确——这是其社区评审的主要质疑,本方案的 fillTime 实测正是该质疑的直接答案。
+- 50ms 轮询收敛存在中间态路由分歧(决策 3)。
+
+### 4.4 业务侧 salting / repartition
+
+- 把倾斜 key 打散到多个 reduce partition。有效但要求改作业、且读侧/下游语义变化;对"单 partition 承接全部 mapper"的极端场景(所需并行度超过集群 worker 数)仍是唯一根治手段。本特性与它互补:特性解决"检测与并行写"的系统侧自动化,salting 解决超出集群物理上限的倾斜(见 §10 风险 3)。
+
+## 5. 协议改动
 
 `PbChangeLocationPartitionInfo` 新增一个 additive 字段(proto3 向后兼容):
 
@@ -73,7 +100,7 @@ repeated PbPartitionLocation additionalPartitions = 5;
 
 不采用 PR#3260 把 `partition` 单值改 repeated 的做法(多元素对旧 client 有 merge 畸形风险)。
 
-## 5. Executor 侧实现
+## 6. Executor 侧实现
 
 ### PartitionLocationGroup(薄包装,懒膨胀)
 
@@ -102,7 +129,7 @@ Group 被四类线程并发访问(push 线程、push 回调、ReviveManager 调�
 - soft 续写:SOFT_SPLIT 语义下 worker 持续接收该文件写直到 2G,`partitionSplitMaximumSize` 是硬上限;
 - speculation / rerun / stageEnd 后重跑:既有路径不变。
 
-## 6. LM 侧实现
+## 7. LM 侧实现
 
 ### PartitionHotnessTracker(独立可单测)
 
@@ -123,7 +150,7 @@ allocTime 来源:新 epoch 由分配登记;epoch 0 用 registerShuffle 时刻(�
 - 活跃集中位于不可用 worker 的 epoch 被过滤并终态退休(死 worker 永远等不到退休上报);
 - 全集回复:max epoch 为主 + 其余(含 soft)为 additionals;分配 0 个也回全集。
 
-## 7. 配置与可观测性
+## 8. 配置与可观测性
 
 | 配置 | 默认 | 说明 |
 |---|---|---|
@@ -133,7 +160,7 @@ allocTime 来源:新 epoch 由分配登记;epoch 0 用 registerShuffle 时刻(�
 
 观测点(均一次性,无重复刷屏):LM 侧升档判定 / 补差分配 / 分配不足(INFO/WARN);executor 侧并行激活 / SOFT 首报退休(含换路去向)/ 全不可用触发阻塞 revive 及其成功后的新目标(INFO);per-batch 重推成功(DEBUG)。
 
-## 8. 测试
+## 9. 测试
 
 | 套件 | 例数 | 覆盖 |
 |---|---|---|
@@ -143,7 +170,7 @@ allocTime 来源:新 epoch 由分配登记;epoch 0 用 registerShuffle 时刻(�
 | `ChangePartitionManagerAdaptiveParallelismSuite` | 10 | 升档+补差分配、超窗不升、allocTime 未知保守、首报去重、比例步进、epoch 乱序、gap=0 仍回全集、并发 revive 收敛、一条 Revive 的同 partition 多条目分组(上报只记账、max-epoch 驱动请求、commit 注册不丢) |
 | `RequestLocationCallContextSuite` | 1 | 同 partition 重复回复忽略、按 distinct 数完成响应 |
 
-## 9. 性能验证(生产)
+## 10. 性能验证(生产)
 
 单 reduce partition 承接全部 26090 mapper 的极端倾斜作业(9.4TB shuffle 写):
 
@@ -155,16 +182,16 @@ allocTime 来源:新 epoch 由分配登记;epoch 0 用 registerShuffle 时刻(�
 | 每 GB 写线程耗时 | 361s/GB | 2.3s/GB | 157× |
 | shuffle read 聚合吞吐 | 17.6GB/s | 26.3GB/s | +49%(fetchWait/GB 持平) |
 
-## 10. 风险与限制
+## 11. 风险与限制
 
-1. **检测延迟 = 写满一个 threshold**:仍由 split 事件驱动(1G 阈值约 60s 边界);滞后期间等价于现状,不会更差。根治需 worker/client 速率统计(未来工作);
+1. **检测延迟 = 写满一个 threshold**:事件驱动的固有限制(默认 1G 阈值下,热 partition 约 60s 边界,越热越快);滞后期间等价于现状,不会更差。进一步降低延迟需换信号源(worker/client 速率统计,成本收益见 §4.2,未来工作);
 2. **desired 只升不降**:一次误判(如极短 fillTime)在整个 shuffle 生命周期不可回退,后果由上限封顶;epoch 0 判定偏保守(方向安全);
-3. **split 事件率与并行度无关**:事件率 = 聚合吞吐 / split 阈值。所需并行度远超集群 worker 数的作业(如单 partition 承接全部 mapper)超出本特性能力范围,应业务侧 salting/repartition;
+3. **split 事件率与并行度无关**:事件率 = 聚合吞吐 / split 阈值。所需并行度远超集群 worker 数的作业(如单 partition 承接全部 mapper)超出本特性能力范围,应业务侧 salting/repartition(§4.4);
 4. **worker 占用放大**:热点 partition 占 K 台 worker,K × 2 × partitionSplitMaximumSize 磁盘;replicate 模式 slot 翻倍;
 5. **AQE skew read / StageEnd commit 变长**:理论兼容,上线前 IT 回归。
 
-## 11. 未来工作
+## 12. 未来工作
 
-- worker/client 侧速率统计替代 split 事件驱动(检测延迟降到 10~20s,与 split 阈值解耦);
+- worker/client 侧速率统计作为**信号源替换**(检测延迟降到 10~20s,与 split 阈值解耦;成本收益账见 §4.2,fillTime→目标换算、全集收敛、活跃集记账全部复用);
 - 并行度降档与热点消散回收;
 - worker 过载主动上报(SOFT_SPLIT_OVERLOAD)。
