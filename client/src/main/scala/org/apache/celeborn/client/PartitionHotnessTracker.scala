@@ -64,23 +64,6 @@ private[client] class PartitionHotnessTracker(
   private val adaptivePartitionWriteParallelismHotWindowMs =
     conf.clientShuffleAdaptivePartitionWriteParallelismHotWindowMs
 
-  /**
-   * The cap on a partition's desired location count: min of the configured maxLocations (when
-   * positive) and the shuffle's number of mappers registered at registerShuffle (routing is
-   * mapId % activeCount, so more locations than mappers can never be utilized). Falls back to 1
-   * when neither is known.
-   */
-  private def locationCap(shuffleId: Int): Int = {
-    val mappers = shuffleNumMappers.getOrDefault(shuffleId, 0).intValue()
-    val mapperCap = if (mappers > 0) mappers else Int.MaxValue
-    val configCap =
-      if (adaptivePartitionWriteParallelismMaxLocations > 0)
-        adaptivePartitionWriteParallelismMaxLocations
-      else Int.MaxValue
-    val cap = math.min(configCap, mapperCap)
-    if (cap == Int.MaxValue) 1 else cap
-  }
-
   // shuffleId -> (partitionId -> hot state). Sparse: only partitions revived in
   // adaptive-parallelism mode get an entry (see currentActiveEpochs).
   private val partitionHotStates =
@@ -90,8 +73,11 @@ private[client] class PartitionHotnessTracker(
   private val shuffleInitialAllocTimeMs =
     JavaUtils.newConcurrentHashMap[Int, java.lang.Long]()
 
-  // shuffleId -> its number of mappers, registered at registerShuffle; used as the routing cap.
-  private val shuffleNumMappers =
+  // shuffleId -> cap on any partition's desired location count. Stable per shuffle (numMappers
+  // is fixed at registerShuffle and the configured maxLocations is static), so it is computed
+  // once in recordInitialAllocTime: min(configured maxLocations when positive, numMappers).
+  // Routing is mapId % activeCount, so more locations than mappers can never be utilized.
+  private val shuffleParallelismCap =
     JavaUtils.newConcurrentHashMap[Int, java.lang.Integer]()
 
   /**
@@ -171,7 +157,10 @@ private[client] class PartitionHotnessTracker(
           math.max(1, activeCountAfterRetire + (if (epochWasActive && !epochRetained) 1 else 0))
         val target = math.ceil(
           parallelismDuringFill * adaptivePartitionWriteParallelismHotWindowMs.toDouble / fillTimeMs).toInt
-        val newDesired = math.min(locationCap(shuffleId), target)
+        // Unregistered shuffle defaults to 1 (unreachable in practice: registerShuffle
+        // precedes any revive).
+        val cap = shuffleParallelismCap.getOrDefault(shuffleId, 1).intValue()
+        val newDesired = math.min(cap, target)
         if (newDesired > hotState.desired) {
           hotState.desired = newDesired
           logInfo(s"Partition $shuffleId-$partitionId: fillTime ${fillTimeMs}ms under " +
@@ -183,9 +172,9 @@ private[client] class PartitionHotnessTracker(
 
   /**
    * Record when the initial (epoch 0) locations of a shuffle were allocated at
-   * registerShuffle, so the fill time of epoch 0 can be measured, and the shuffle's number of
-   * mappers, which caps the desired location count. putIfAbsent semantics: a repeated
-   * registration does not overwrite.
+   * registerShuffle, so the fill time of epoch 0 can be measured, and compute the shuffle's
+   * parallelism cap from its (fixed) number of mappers. A repeated registration does not
+   * overwrite.
    */
   private[client] def recordInitialAllocTime(
       shuffleId: Int,
@@ -194,7 +183,16 @@ private[client] class PartitionHotnessTracker(
       nowMs: Long): Unit = {
     if (partitionLocations != null && partitionLocations.nonEmpty) {
       shuffleInitialAllocTimeMs.putIfAbsent(shuffleId, nowMs)
-      shuffleNumMappers.putIfAbsent(shuffleId, numMappers)
+      shuffleParallelismCap.computeIfAbsent(
+        shuffleId,
+        new util.function.Function[Int, java.lang.Integer]() {
+          override def apply(s: Int): java.lang.Integer =
+            if (adaptivePartitionWriteParallelismMaxLocations > 0) {
+              math.max(1, math.min(adaptivePartitionWriteParallelismMaxLocations, numMappers))
+            } else {
+              math.max(1, numMappers)
+            }
+        })
     }
   }
 
@@ -284,6 +282,6 @@ private[client] class PartitionHotnessTracker(
   private[client] def removeShuffle(shuffleId: Int): Unit = {
     partitionHotStates.remove(shuffleId)
     shuffleInitialAllocTimeMs.remove(shuffleId)
-    shuffleNumMappers.remove(shuffleId)
+    shuffleParallelismCap.remove(shuffleId)
   }
 }
