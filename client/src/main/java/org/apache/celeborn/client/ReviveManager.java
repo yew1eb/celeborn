@@ -35,6 +35,7 @@ class ReviveManager {
 
   LinkedBlockingQueue<ReviveRequest> requestQueue = new LinkedBlockingQueue<>();
   private final int batchSize;
+  private final boolean adaptivePartitionWriteParallelismEnabled;
   ShuffleClientImpl shuffleClient;
   private final ScheduledExecutorService batchReviveRequestScheduler =
       ThreadUtils.newDaemonSingleThreadScheduledExecutor(
@@ -43,6 +44,8 @@ class ReviveManager {
   public ReviveManager(ShuffleClientImpl shuffleClient, CelebornConf conf) {
     this.shuffleClient = shuffleClient;
     this.batchSize = conf.clientPushReviveBatchSize();
+    this.adaptivePartitionWriteParallelismEnabled =
+        conf.clientShuffleAdaptivePartitionWriteParallelismEnabled();
 
     long interval = conf.clientPushReviveInterval();
     batchReviveRequestScheduler.scheduleWithFixedDelay(
@@ -79,7 +82,7 @@ class ReviveManager {
                         partitionMap, req.partitionId, req.epoch, false)
                     || shuffleClient.mapperEnded(shuffleId, req.mapId)) {
                   req.reviveStatus = StatusCode.SUCCESS.getValue();
-                  if (shuffleClient.adaptivePartitionWriteParallelismEnabled) {
+                  if (adaptivePartitionWriteParallelismEnabled) {
                     mapIds.add(req.mapId);
                     retireReports.merge(
                         ((long) req.partitionId << 32) | (req.epoch & 0xffffffffL),
@@ -91,7 +94,7 @@ class ReviveManager {
                   mapIds.add(req.mapId);
                   ReviveRequest current = requestsToSend.get(req.partitionId);
                   if (current == null || current.epoch < req.epoch) {
-                    if (current != null && shuffleClient.adaptivePartitionWriteParallelismEnabled) {
+                    if (current != null && adaptivePartitionWriteParallelismEnabled) {
                       // The displaced lower-epoch request rides on the max-epoch request's
                       // response, but its retirement still has to be reported.
                       retireReports.merge(
@@ -101,7 +104,7 @@ class ReviveManager {
                     }
                     requestsToSend.put(req.partitionId, req);
                   } else if (current.epoch > req.epoch
-                      && shuffleClient.adaptivePartitionWriteParallelismEnabled) {
+                      && adaptivePartitionWriteParallelismEnabled) {
                     retireReports.merge(
                         ((long) req.partitionId << 32) | (req.epoch & 0xffffffffL),
                         req,

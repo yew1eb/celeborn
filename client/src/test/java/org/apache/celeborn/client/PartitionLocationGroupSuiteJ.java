@@ -274,33 +274,6 @@ public class PartitionLocationGroupSuiteJ {
   }
 
   @Test
-  public void testOutstandingRetires() {
-    // The view covers exactly the locally retired epochs still held in the active list
-    // (LM not yet digested), epoch ascending, with the upgraded cause.
-    PartitionLocationGroup group = new PartitionLocationGroup(loc(0, "w1"));
-    assertTrue(group.outstandingRetires().isEmpty());
-
-    group.mergeActiveLocations(Arrays.asList(loc(0, "w1"), loc(1, "w2"), loc(2, "w3")), true);
-    assertTrue(group.retire(0, StatusCode.SOFT_SPLIT));
-    assertFalse(group.retire(0, StatusCode.HARD_SPLIT)); // soft upgraded to hard
-    assertTrue(group.retire(2, StatusCode.HARD_SPLIT));
-    List<PartitionLocationGroup.OutstandingRetire> retires = group.outstandingRetires();
-    assertEquals(2, retires.size());
-    assertEquals(0, retires.get(0).location.getEpoch());
-    assertEquals(StatusCode.HARD_SPLIT, retires.get(0).cause);
-    assertEquals(2, retires.get(1).location.getEpoch());
-    assertEquals(StatusCode.HARD_SPLIT, retires.get(1).cause);
-    // Epoch 1 is the only writable location: every mapId routes to it.
-    assertEquals(1, group.currentFor(0).getEpoch());
-
-    // After the LM digests both retires (full set reports only epoch 1), they are evicted from
-    // the active list and no longer outstanding.
-    group.mergeActiveLocations(Collections.singletonList(loc(1, "w2")), true);
-    assertTrue(group.outstandingRetires().isEmpty());
-    assertEquals(1, group.activeCount());
-  }
-
-  @Test
   public void testEpochsSnapshots() {
     PartitionLocationGroup group = new PartitionLocationGroup(loc(0, "w1"));
     assertEquals(Collections.singletonList(0), group.activeEpochsSnapshot());

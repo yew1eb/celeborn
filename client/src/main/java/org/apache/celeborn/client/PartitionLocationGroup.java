@@ -125,36 +125,6 @@ public class PartitionLocationGroup {
     return pick(mapId, excludeEpoch);
   }
 
-  /** A retire report for a locally retired location the LifecycleManager may not have digested. */
-  public static final class OutstandingRetire {
-    public final PartitionLocation location;
-    public final StatusCode cause;
-
-    OutstandingRetire(PartitionLocation location, StatusCode cause) {
-      this.location = location;
-      this.cause = cause;
-    }
-  }
-
-  /**
-   * Snapshot of {@link OutstandingRetire}s, epoch ascending. Only epochs still in the active list
-   * are included — an evicted epoch has already been digested by the LM.
-   */
-  public List<OutstandingRetire> outstandingRetires() {
-    ParallelState p = parallel;
-    if (p == null) {
-      return new ArrayList<>(0);
-    }
-    List<OutstandingRetire> retires = new ArrayList<>();
-    for (PartitionLocation loc : p.active.toArray(new PartitionLocation[0])) {
-      StatusCode cause = p.retired.get(loc.getEpoch());
-      if (cause != null) {
-        retires.add(new OutstandingRetire(loc, cause));
-      }
-    }
-    return retires;
-  }
-
   /**
    * Mark {@code epoch} as retired with {@code cause}; soft-retired locations stay writable, hard
    * ones are skipped by routing. A non-soft cause upgrades a previous SOFT_SPLIT retire and is

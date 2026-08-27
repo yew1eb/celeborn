@@ -22,7 +22,8 @@ mapper pushData(partitionId)
              ├─ SOFT_SPLIT → retire(epoch, SOFT)(保持可写,不阻塞),首次退休上报 LM
              ├─ HARD_SPLIT / push 失败 → retire + 预置 SUCCESS:
              │     有另一可写 location 时重推线程立即换目标(不等 LM 响应)
-             └─ 全部不可写 → 同步 revive(携带全部未消化退休上报,有限重试)
+             └─ 全部不可写 → fallback 到 latest()(已知最新 location):拒收重新触发异步
+                  revive(携带退休上报),LM 分配新 location 后下一批复位——与基线自愈同形
 
 LM (ChangePartitionManager → PartitionHotnessTracker):
   收到带 cause 的 revive → 活跃集维护:SOFT_SPLIT 且 worker 可用 → epoch 保留;
@@ -70,7 +71,7 @@ repeated PbPartitionLocation additionalPartitions = 5;
 - **路由**:`currentFor(mapId)` / `anotherUsableFor` 委托 `pick(mapId, excludeEpoch)`——快照 active 列表单遍收集可写子集(非退休 + soft),`floorMod(mapId, size)` 均匀分派;同一 map task 稳定写同一 location(保住 PushState 按 host 聚合)。
 - **退休**:`retire(epoch, cause)` CHM compute 原子,返回是否首次(每 epoch 只上报一次);cause 可升级(SOFT→HARD)不可降级;与全集 merge 同 monitor,防墓碑写与清理交错。
 - **全集收敛**:`mergeActiveLocations(locations, fullSet)` 按 epoch 有序插入、跳过本地已退休 epoch;`fullSet=true` 时清理 LM 已消化(全集中不再出现)的退休条目。仅携带 additionals 的响应才视为全集——单元素响应(老 LM / 冷 partition)不当全集,避免误清 soft-retired 条目。
-- **诊断视图**:`outstandingRetires()`(活跃集中已退休、LM 未消化的 epoch)供阻塞 revive 全量上报;`activeEpochsSnapshot()`/`retiredEpochsSnapshot()` 供失败信息。
+- **诊断视图**:`activeEpochsSnapshot()`/`retiredEpochsSnapshot()` 供失败信息。
 
 ### ShuffleClientImpl 接入
 
@@ -78,7 +79,7 @@ repeated PbPartitionLocation additionalPartitions = 5;
 |---|---|
 | SOFT_SPLIT 回调 | `retire(epoch, SOFT)`(保持可写),首报且 mapper 未结束时上报;数据已落盘,零阻塞 |
 | HARD_SPLIT / push 失败 | `retire` + 若有另一可写 location 则预置 `reviveStatus=SUCCESS`,重推线程立即换路不等 LM |
-| 全部不可用 | 同步 revive 携带全部 outstanding retire(LM 据此收缩活跃集、分配新 location);SUCCESS 但无可写时有限重试 3 次;仍失败则异常信息附 active/retired epoch 快照 |
+| 全部不可用 | fallback 到 `latest()`(已知最新 location):worker 拒收重新触发异步 revive(ReviveManager 携带退休上报,LM 据此收缩活跃集、分配新 location),后续批次路由到新 epoch;与基线"推旧 location 直到 LM 给新的"自愈同形;HARD_SPLIT 拒收的重推不消耗 revive 预算 |
 
 ### 并发要点
 
@@ -119,13 +120,13 @@ allocTime 来源:新 epoch 由分配登记;epoch 0 用 registerShuffle 时刻(�
 | `...adaptivePartitionWriteParallelism.maxLocations` | -1 | 活跃 location 上限;-1 = 该 shuffle 的 mapper 数(天然上限);正数 = 显式上限 |
 | `...adaptivePartitionWriteParallelism.hotWindow` | 60s | 热点判定窗口;升档目标 = ceil(K × 窗口 / 写满耗时) |
 
-观测点(均一次性,无重复刷屏):LM 侧升档判定 / 补差分配 / stage-end 摘要(INFO);executor 侧并行激活 / 立即换路 / SOFT 首报退休 / 阻塞 revive(INFO);重复退休上报与 per-batch 重推成功(DEBUG)。
+观测点(均一次性,无重复刷屏):LM 侧升档判定 / 补差分配 / 分配不足(INFO/WARN);executor 侧并行激活 / SOFT 首报退休(含换路去向)/ 全不可用 fallback(INFO);per-batch 重推成功(DEBUG)。
 
 ## 8. 测试
 
 | 套件 | 例数 | 覆盖 |
 |---|---|---|
-| `PartitionLocationGroupSuiteJ` | 10 | 快路径、soft 参与路由/hard 排除/cause 升级、全集收敛与清理、乱序 epoch、并发 pick×merge、outstandingRetires 视图 |
+| `PartitionLocationGroupSuiteJ` | 9 | 快路径、soft 参与路由/hard 排除、cause 升级、全集收敛与清理、乱序 epoch、并发 pick×merge、epoch 快照视图 |
 | `PartitionHotnessTrackerSuite` | 12 | 计量守卫(不可用 worker/push 失败)、K 因子缩放、fillTime 下限与 -1=mapper 数上限、显式上限优先、单调不降、soft 保留/移除、迟到 SOFT 不复活 |
 | `ChangePartitionManagerAdaptiveParallelismSuite` | 9 | 升档+补差分配、超窗不升、allocTime 未知保守、首报去重、比例步进、epoch 乱序、gap=0 仍回全集、并发 revive 收敛 |
 | `RequestLocationCallContextSuite` | 1 | 同 partition 重复回复忽略、按 distinct 数完成响应 |
