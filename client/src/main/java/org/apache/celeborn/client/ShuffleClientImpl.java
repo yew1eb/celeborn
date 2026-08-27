@@ -152,6 +152,9 @@ public class ShuffleClientImpl extends ShuffleClient {
 
   private final boolean dataPushFailureTrackingEnabled;
 
+  // Bounded attempts for the blocking revive when all known locations of a partition are unusable.
+  private static final int BLOCKING_REVIVE_MAX_ATTEMPTS = 3;
+
   // Package-private: ReviveManager reads it to decide whether satisfied retire reports
   // still have to be forwarded to the LifecycleManager.
   final boolean adaptivePartitionWriteParallelismEnabled;
@@ -348,19 +351,6 @@ public class ShuffleClientImpl extends ShuffleClient {
           loc);
       pushState.removeBatch(batchId, loc.hostAndPushPort());
     } else if (request.reviveStatus != StatusCode.SUCCESS.getValue()) {
-      logger.warn(
-          "Revive for push data failed after waiting {} ms for shuffle {} map {} attempt {} partition {} batch {}: "
-              + "cause {}, revive status {}({}), old location {}.",
-          accumulatedTime,
-          shuffleId,
-          mapId,
-          attemptId,
-          partitionId,
-          batchId,
-          cause,
-          request.reviveStatus,
-          StatusCode.fromValue(request.reviveStatus),
-          request.loc);
       pushDataRpcResponseCallback.onFailure(
           new CelebornIOException(
               cause
@@ -382,7 +372,12 @@ public class ShuffleClientImpl extends ShuffleClient {
         // with all outstanding retire reports attached instead of failing the task.
         newLoc =
             reviveUntilUsable(
-                shuffleId, mapId, attemptId, partitionId, newLocGroup, /* maxAttempts= */ 3);
+                shuffleId,
+                mapId,
+                attemptId,
+                partitionId,
+                newLocGroup,
+                BLOCKING_REVIVE_MAX_ATTEMPTS);
       }
       if (newLoc == null) {
         pushDataRpcResponseCallback.onFailure(
@@ -398,10 +393,8 @@ public class ShuffleClientImpl extends ShuffleClient {
                             + newLocGroup.retiredEpochsSnapshot())));
         return;
       }
-      // Logged per re-pushed batch; keep at DEBUG to avoid log flooding on churny partitions.
-      logger.debug(
-          "Revive for push data success after waiting {} ms, new location for shuffle {} map {} attempt {} partition {} batch {} is location {}.",
-          accumulatedTime,
+      logger.info(
+          "Revive for push data success, new location for shuffle {} map {} attempt {} partition {} batch {} is location {}.",
           shuffleId,
           mapId,
           attemptId,
@@ -508,28 +501,45 @@ public class ShuffleClientImpl extends ShuffleClient {
       // the revive response. The retry thread reads the preset SUCCESS and picks the other
       // active location.
       request.reviveStatus = StatusCode.SUCCESS.getValue();
-      // Log only on the first retire of the epoch: every batch that gets the split response
-      // lands here, so logging unconditionally floods the executor log.
-      if (firstRetire) {
-        logger.info(
-            "Shuffle {} partition {}: location epoch {} retired (cause {}), "
-                + "re-push immediately to epoch {}@{} without waiting for revive.",
-            shuffleId,
-            request.partitionId,
-            epoch,
-            cause,
-            fallback.getEpoch(),
-            fallback.hostAndPushPort());
-      }
-    } else if (firstRetire) {
+    }
+    // Log only on the first retire of the epoch: every batch that gets the split response
+    // lands here, so logging unconditionally floods the executor log.
+    if (firstRetire) {
       logger.info(
-          "Shuffle {} partition {}: location epoch {} retired (cause {}), "
-              + "no other usable location, waiting for revive.",
+          "Shuffle {} partition {}: epoch {} retired ({}), {}.",
           shuffleId,
           request.partitionId,
           epoch,
-          cause);
+          cause,
+          fallback != null
+              ? "re-push to epoch " + fallback.getEpoch() + "@" + fallback.hostAndPushPort()
+              : "waiting for revive");
     }
+  }
+
+  /**
+   * Submit a revive request and, for adaptive parallel write, retire the failed epoch locally and
+   * preset the request status to SUCCESS when another active location is usable for immediate
+   * re-push. Returns the submitted request.
+   */
+  private ReviveRequest submitReviveAndRetire(
+      int shuffleId,
+      int mapId,
+      int attemptId,
+      int partitionId,
+      PartitionLocation latest,
+      StatusCode cause) {
+    ReviveRequest req =
+        new ReviveRequest(
+            shuffleId, mapId, attemptId, partitionId, latest.getEpoch(), latest, cause);
+    reviveManager.addRequest(req);
+    if (adaptivePartitionWriteParallelismEnabled) {
+      PartitionLocationGroup g = locationGroup(shuffleId, partitionId);
+      if (g != null) {
+        retireAndPresetIfAnotherUsable(shuffleId, mapId, g, latest.getEpoch(), cause, req);
+      }
+    }
+    return req;
   }
 
   /**
@@ -686,19 +696,6 @@ public class ShuffleClientImpl extends ShuffleClient {
                         + ")")));
         return;
       }
-    }
-
-    if (accumulatedTime > 0) {
-      // Churny partitions (frequent split/retire) hit this per merged batch group; keep the
-      // executor log readable by demoting the per-group wait summary to DEBUG.
-      logger.debug(
-          "Waited {} ms for revive results of {} batches for shuffle {} map {} attempt {} groupedBatch {}.",
-          accumulatedTime,
-          reviveRequests.length,
-          shuffleId,
-          mapId,
-          attemptId,
-          oldGroupedBatchId);
     }
 
     for (Map.Entry<Pair<String, String>, DataBatches> entry : newDataBatchesMap.entrySet()) {
@@ -1124,7 +1121,6 @@ public class ShuffleClientImpl extends ShuffleClient {
       if (mapperEnded(shuffleId, mapId)) {
         return null;
       }
-      long reviveStartMs = System.currentTimeMillis();
       Map<Integer, Integer> results =
           reviveWithRetires(
               shuffleId,
@@ -1135,33 +1131,26 @@ public class ShuffleClientImpl extends ShuffleClient {
               group.latest(),
               StatusCode.PUSH_DATA_FAIL_NON_CRITICAL_CAUSE_PRIMARY,
               group);
-      long elapsedMs = System.currentTimeMillis() - reviveStartMs;
       boolean success =
           results != null
               && results.containsKey(partitionId)
               && results.get(partitionId) == StatusCode.SUCCESS.getValue();
-      logger.info(
-          "Blocking revive for shuffle {} map {} attempt {} partition {} epoch {} attempt {}/{} {} after {} ms.",
+      logger.debug(
+          "Blocking revive for shuffle {} partition {}: attempt {}/{} {}.",
           shuffleId,
-          mapId,
-          attemptId,
           partitionId,
-          group.maxEpoch(),
           attempt,
           maxAttempts,
-          success ? "succeeded" : "failed",
-          elapsedMs);
+          success ? "succeeded" : "failed");
       if (success) {
         PartitionLocation loc = group.currentFor(mapId);
         if (loc != null) {
           return loc;
         }
-        // SUCCESS but nothing writable: the response carried only epochs this executor has
-        // already retired (stale active set on the LM side). Fall through and retry — the
-        // next attempt forwards the retire reports of those very epochs.
-        logger.warn(
-            "Shuffle {} partition {}: blocking revive returned SUCCESS but no writable location "
-                + "(attempt {}/{}); retrying with outstanding retire reports.",
+        // SUCCESS but nothing writable: retry; the next attempt forwards the retire reports
+        // of those epochs (the LM's active set lags this executor's retires).
+        logger.debug(
+            "Shuffle {} partition {}: blocking revive SUCCESS but no writable location (attempt {}/{}).",
             shuffleId,
             partitionId,
             attempt,
@@ -1187,9 +1176,7 @@ public class ShuffleClientImpl extends ShuffleClient {
     ReviveRequest req =
         new ReviveRequest(shuffleId, mapId, attemptId, partitionId, epoch, oldLocation, cause);
     requests.add(req);
-    long reviveStartMs = System.currentTimeMillis();
     Map<Integer, Integer> results = reviveBatch(shuffleId, mapIds, requests);
-    long reviveElapsedMs = System.currentTimeMillis() - reviveStartMs;
 
     if (mapperEnded(shuffleId, mapId)) {
       logger.debug(
@@ -1200,22 +1187,9 @@ public class ShuffleClientImpl extends ShuffleClient {
           partitionId);
       return true;
     } else {
-      boolean success =
-          results != null
-              && results.containsKey(partitionId)
-              && results.get(partitionId) == StatusCode.SUCCESS.getValue();
-      // Map tasks block here waiting for the new location; record how long the wait took.
-      logger.info(
-          "Blocking revive for shuffle {} map {} attempt {} partition {} epoch {} (cause {}) {} after {} ms.",
-          shuffleId,
-          mapId,
-          attemptId,
-          partitionId,
-          epoch,
-          cause,
-          success ? "succeeded" : "failed",
-          reviveElapsedMs);
-      return success;
+      return results != null
+          && results.containsKey(partitionId)
+          && results.get(partitionId) == StatusCode.SUCCESS.getValue();
     }
   }
 
@@ -1280,11 +1254,8 @@ public class ShuffleClientImpl extends ShuffleClient {
             if (fullSet) {
               allActive.addAll(additionals);
             }
-            int beforeActive = group.activeCount();
-            int beforeRetired = group.retiredCount();
             group.mergeActiveLocations(allActive, fullSet);
-            int afterActive = group.activeCount();
-            if (afterActive > beforeActive && afterActive > 1) {
+            if (fullSet && allActive.size() > 1) {
               StringBuilder sb = new StringBuilder();
               for (PartitionLocation l : allActive) {
                 if (sb.length() > 0) {
@@ -1296,17 +1267,8 @@ public class ShuffleClientImpl extends ShuffleClient {
                   "Shuffle {} partition {}: parallel write active, now writing to {} locations: {}.",
                   shuffleId,
                   partitionId,
-                  afterActive,
+                  allActive.size(),
                   sb);
-            }
-            int evicted = beforeRetired - group.retiredCount();
-            if (evicted > 0) {
-              logger.info(
-                  "Shuffle {} partition {}: evicted {} retired location(s) no longer reported "
-                      + "by LifecycleManager.",
-                  shuffleId,
-                  partitionId,
-                  evicted);
             }
           } else if (loc != null) {
             group.updateLatest(loc);
@@ -1420,11 +1382,7 @@ public class ShuffleClientImpl extends ShuffleClient {
     PartitionLocationGroup group = map.get(partitionId);
     PartitionLocation currentLoc = group == null ? null : group.currentFor(mapId);
     if (currentLoc == null && group != null && adaptivePartitionWriteParallelismEnabled) {
-      // All known locations of this partition are unusable. Revive with every outstanding
-      // retire report attached, then retry a bounded number of times: a single response may
-      // still carry only epochs this executor has already retired (the LM digests retire
-      // reports with a delay), so one revive is not guaranteed to yield a writable location.
-      // Retrying beats failing the task with a NULL location on a transiently stale active set.
+      // All known locations unusable: blocking revive with outstanding retire reports attached.
       logger.info(
           "Shuffle {} partition {}: all {} location(s) unusable, blocking revive from epoch {}.",
           shuffleId,
@@ -1432,7 +1390,8 @@ public class ShuffleClientImpl extends ShuffleClient {
           group.activeCount(),
           group.maxEpoch());
       currentLoc =
-          reviveUntilUsable(shuffleId, mapId, attemptId, partitionId, group, /* maxAttempts= */ 3);
+          reviveUntilUsable(
+              shuffleId, mapId, attemptId, partitionId, group, BLOCKING_REVIVE_MAX_ATTEMPTS);
       if (currentLoc != null) {
         logger.info(
             "Shuffle {} partition {}: blocking revive succeeded, writing to epoch {}@{}.",
@@ -1578,27 +1537,8 @@ public class ShuffleClientImpl extends ShuffleClient {
                         latest.getUniqueId(), mapId, attemptId, nextBatchId);
                   }
                   ReviveRequest reviveRequest =
-                      new ReviveRequest(
-                          shuffleId,
-                          mapId,
-                          attemptId,
-                          partitionId,
-                          latest.getEpoch(),
-                          latest,
-                          StatusCode.HARD_SPLIT);
-                  reviveManager.addRequest(reviveRequest);
-                  if (adaptivePartitionWriteParallelismEnabled) {
-                    PartitionLocationGroup latestGroup = locationGroup(shuffleId, partitionId);
-                    if (latestGroup != null) {
-                      retireAndPresetIfAnotherUsable(
-                          shuffleId,
-                          mapId,
-                          latestGroup,
-                          latest.getEpoch(),
-                          StatusCode.HARD_SPLIT,
-                          reviveRequest);
-                    }
-                  }
+                      submitReviveAndRetire(
+                          shuffleId, mapId, attemptId, partitionId, latest, StatusCode.HARD_SPLIT);
                   long dueTime =
                       System.currentTimeMillis()
                           + conf.clientRpcRequestPartitionLocationAskTimeout()
@@ -1690,16 +1630,7 @@ public class ShuffleClientImpl extends ShuffleClient {
               if (!mapperEnded(shuffleId, mapId)) {
                 remainReviveTimes = remainReviveTimes - 1;
                 ReviveRequest reviveRequest =
-                    new ReviveRequest(
-                        shuffleId, mapId, attemptId, partitionId, latest.getEpoch(), latest, cause);
-                reviveManager.addRequest(reviveRequest);
-                if (adaptivePartitionWriteParallelismEnabled) {
-                  PartitionLocationGroup latestGroup = locationGroup(shuffleId, partitionId);
-                  if (latestGroup != null) {
-                    retireAndPresetIfAnotherUsable(
-                        shuffleId, mapId, latestGroup, latest.getEpoch(), cause, reviveRequest);
-                  }
-                }
+                    submitReviveAndRetire(shuffleId, mapId, attemptId, partitionId, latest, cause);
                 long dueTime =
                     System.currentTimeMillis()
                         + conf.clientRpcRequestPartitionLocationAskTimeout().duration().toMillis();
@@ -2608,11 +2539,6 @@ public class ShuffleClientImpl extends ShuffleClient {
         && fetchExcludeWorkerOnFailureEnabled
         && Utils.isCriticalCauseForFetch(e)) {
       fetchExcludedWorkers.put(hostAndFetchPort, System.currentTimeMillis());
-      logger.info(
-          "Excluded fetch location {} due to fetch failure, {} excluded fetch locations in total.",
-          hostAndFetchPort,
-          fetchExcludedWorkers.size(),
-          e);
     }
   }
 }

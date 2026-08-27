@@ -33,23 +33,17 @@ import org.apache.celeborn.common.protocol.message.StatusCode;
  * A thin wrapper of the writable PartitionLocation(s) of one (shuffleId, partitionId).
  *
  * <p>In the common case (the partition never splits) it only holds a single volatile {@link
- * PartitionLocation} reference, so the fast path costs exactly one extra object header compared to
- * storing the location directly. The parallel state (active location list and retired epochs) is
+ * PartitionLocation} reference; the parallel state (active location list and retired epochs) is
  * inflated lazily on the first SOFT_SPLIT/HARD_SPLIT/push failure, or when a revive response
- * delivers more than one active location.
- *
- * <p>Selection policy: uniform over the writable subset — non-retired and SOFT_SPLIT locations (a
- * soft-split file stays writable until it hard-splits) — via {@code mapId % writableCount}.
- * Hard-retired (HARD_SPLIT / push failure) locations are skipped; writes to them are re-pushed to
- * another writable location.
+ * delivers more than one active location. Selection is uniform over the writable subset —
+ * non-retired and soft-split locations, which stay writable until they hard-split — via {@code
+ * mapId % writableCount}.
  */
 public class PartitionLocationGroup {
 
   /**
-   * The only location of this partition before inflation. Only read on the non-inflated fast path
-   * (and as {@link #latest()}'s fallback when the inflated active list is empty); it is
-   * intentionally NOT kept in sync after inflation — the inflated {@link ParallelState#active} list
-   * is the source of truth.
+   * The only location before inflation; intentionally NOT kept in sync after inflation — the
+   * inflated {@link ParallelState#active} list is the source of truth.
    */
   private volatile PartitionLocation single;
 
@@ -66,12 +60,9 @@ public class PartitionLocationGroup {
   }
 
   /**
-   * Pick a writable location for {@code mapId}, skipping {@code excludeEpoch} (-1 = skip nothing).
-   * Writable means non-retired or soft-split: a SOFT_SPLIT file stays writable until it grows to
-   * partitionSplitMaximumSize and hard-splits, so soft-split locations remain first-class routing
-   * targets — this keeps the write load truly spread over all writable locations instead of
-   * collapsing onto the few non-retired ones. Traffic is spread uniformly over the writable subset
-   * via {@code mapId % writableCount}. Returns null when nothing is writable.
+   * Pick a writable location for {@code mapId}, skipping {@code excludeEpoch} (-1 = skip nothing);
+   * null when nothing is writable. The active list is snapshotted because a concurrent full-set
+   * merge may shrink it.
    */
   private PartitionLocation pick(int mapId, int excludeEpoch) {
     ParallelState p = parallel;
@@ -125,21 +116,6 @@ public class PartitionLocationGroup {
     return p.maxEpoch;
   }
 
-  /** Whether at least one location can still accept writes (active or soft-split). For tests. */
-  boolean hasUsable() {
-    ParallelState p = parallel;
-    if (p == null) {
-      return single != null;
-    }
-    for (PartitionLocation loc : p.active) {
-      StatusCode cause = p.retired.get(loc.getEpoch());
-      if (cause == null || cause == StatusCode.SOFT_SPLIT) {
-        return true;
-      }
-    }
-    return false;
-  }
-
   /**
    * Pick a usable location other than {@code excludeEpoch} for {@code mapId}, used to re-push
    * batches without waiting for revive when the partition has more than one usable location.
@@ -149,12 +125,7 @@ public class PartitionLocationGroup {
     return pick(mapId, excludeEpoch);
   }
 
-  /**
-   * A retire report for a locally retired location that the LifecycleManager may not have digested
-   * yet — the LM still counts its epoch as surviving until the report arrives. Forwarding these
-   * reports with a revive lets the LM shrink its active set so gap allocation produces a fresh
-   * location instead of re-replying already-retired epochs.
-   */
+  /** A retire report for a locally retired location the LifecycleManager may not have digested. */
   public static final class OutstandingRetire {
     public final PartitionLocation location;
     public final StatusCode cause;
@@ -166,9 +137,8 @@ public class PartitionLocationGroup {
   }
 
   /**
-   * Snapshot of {@link OutstandingRetire}s, epoch ascending. Only epochs still present in the
-   * active list are included: an evicted epoch (no longer reported by the LM) has already been
-   * digested, and its location object is gone, so there is nothing left to report.
+   * Snapshot of {@link OutstandingRetire}s, epoch ascending. Only epochs still in the active list
+   * are included — an evicted epoch has already been digested by the LM.
    */
   public List<OutstandingRetire> outstandingRetires() {
     ParallelState p = parallel;
@@ -186,14 +156,12 @@ public class PartitionLocationGroup {
   }
 
   /**
-   * Mark {@code epoch} as retired with {@code cause}. Soft-retired locations stay writable and
-   * remain routing targets; hard-retired ones are skipped by {@link #currentFor(int)}. A later
-   * non-soft cause upgrades a previous SOFT_SPLIT retire; a harder cause is never downgraded back
-   * to SOFT_SPLIT. Synchronized on the group monitor so the tombstone write cannot interleave with
-   * the full-set cleanup inside {@link #mergeActiveLocations}.
+   * Mark {@code epoch} as retired with {@code cause}; soft-retired locations stay writable, hard
+   * ones are skipped by routing. A non-soft cause upgrades a previous SOFT_SPLIT retire and is
+   * never downgraded back. Synchronized so the tombstone write cannot interleave with the full-set
+   * cleanup in {@link #mergeActiveLocations}.
    *
-   * @return true if this is the first time the epoch is retired (dedupe signal for the caller to
-   *     send at most one revive per epoch).
+   * @return true if this is the first time the epoch is retired (dedupe signal for the caller).
    */
   public synchronized boolean retire(int epoch, StatusCode cause) {
     ParallelState p = inflateIfNeeded();
@@ -214,11 +182,9 @@ public class PartitionLocationGroup {
 
   /**
    * Converge to the active set delivered by the LifecycleManager: add locally missing epochs, never
-   * re-add locally retired ones. When {@code fullSet} is true the list is the LM's full active set,
-   * so retired epochs that the LM no longer reports (it has processed the retirement and allocated
-   * replacements) are dropped from both the active list and the retired map — this bounds the list
-   * size and keeps {@code mapId}-based routing uniform among live locations. Synchronized because
-   * the check-then-add of {@link #insertActive} is not atomic across concurrent revive responses.
+   * re-add retired ones. With {@code fullSet}, retired epochs the LM no longer reports are dropped
+   * from both the active list and the retired map. Synchronized for atomic check-then-add across
+   * concurrent revive responses.
    */
   public synchronized void mergeActiveLocations(
       List<PartitionLocation> locations, boolean fullSet) {
@@ -273,20 +239,10 @@ public class PartitionLocationGroup {
     }
   }
 
-  public boolean hasParallelState() {
-    return parallel != null;
-  }
-
   /** Visible for testing and observability logging. */
   int activeCount() {
     ParallelState p = parallel;
     return p == null ? (single == null ? 0 : 1) : p.active.size();
-  }
-
-  /** Visible for testing and observability logging. */
-  int retiredCount() {
-    ParallelState p = parallel;
-    return p == null ? 0 : p.retired.size();
   }
 
   /** Epochs of the active list, ascending — for diagnostics in failure messages. */

@@ -49,19 +49,19 @@ public class PartitionLocationGroupSuiteJ {
   public void testFastPathSingleLocation() {
     PartitionLocation loc = loc(0, "w1");
     PartitionLocationGroup group = new PartitionLocationGroup(loc);
-    assertFalse(group.hasParallelState());
+    assertEquals(1, group.activeCount());
     assertSame(loc, group.currentFor(0));
     assertSame(loc, group.currentFor(7));
     assertSame(loc, group.latest());
     assertEquals(0, group.maxEpoch());
-    assertTrue(group.hasUsable());
+    assertTrue(group.currentFor(0) != null);
     assertSame(loc, group.anotherUsableFor(0, 3));
     assertNull(group.anotherUsableFor(0, 0));
 
     // Single-location revive update keeps thin-wrapper mode.
     PartitionLocation loc1 = loc(1, "w2");
     group.mergeActiveLocations(Collections.singletonList(loc1), true);
-    assertFalse(group.hasParallelState());
+    assertEquals(1, group.activeCount());
     assertSame(loc1, group.currentFor(0));
     assertEquals(1, group.maxEpoch());
   }
@@ -71,10 +71,12 @@ public class PartitionLocationGroupSuiteJ {
     PartitionLocationGroup group = new PartitionLocationGroup(loc(0, "w1"));
     assertTrue(group.retire(0, StatusCode.SOFT_SPLIT));
     assertFalse(group.retire(0, StatusCode.SOFT_SPLIT));
-    assertTrue(group.hasParallelState());
+    // Retire inflated the parallel state even though there is still only one active location.
+    assertEquals(
+        Collections.singletonList("0=" + StatusCode.SOFT_SPLIT), group.retiredEpochsSnapshot());
     // Soft-split location stays writable and keeps its routing share.
     assertEquals(0, group.currentFor(0).getEpoch());
-    assertTrue(group.hasUsable());
+    assertTrue(group.currentFor(0) != null);
 
     group.mergeActiveLocations(Arrays.asList(loc(0, "w1"), loc(1, "w2"), loc(2, "w3")), true);
     assertEquals(2, group.maxEpoch());
@@ -91,7 +93,7 @@ public class PartitionLocationGroupSuiteJ {
     assertEquals(0, group.currentFor(0).getEpoch());
     assertEquals(2, group.currentFor(1).getEpoch());
     assertEquals(0, group.currentFor(2).getEpoch());
-    assertTrue(group.hasUsable());
+    assertTrue(group.currentFor(0) != null);
   }
 
   @Test
@@ -122,9 +124,8 @@ public class PartitionLocationGroupSuiteJ {
     PartitionLocationGroup group = new PartitionLocationGroup(loc(0, "w1"));
     group.mergeActiveLocations(Arrays.asList(loc(0, "w1"), loc(1, "w2")), true);
     group.retire(0, StatusCode.HARD_SPLIT);
-    assertTrue(group.hasUsable());
+    assertTrue(group.currentFor(0) != null);
     group.retire(1, StatusCode.HARD_SPLIT);
-    assertFalse(group.hasUsable());
     assertNull(group.currentFor(0));
     assertNull(group.anotherUsableFor(0, 1));
   }
@@ -164,7 +165,7 @@ public class PartitionLocationGroupSuiteJ {
     // A harder cause is never downgraded back to soft.
     assertTrue(group.retire(1, StatusCode.HARD_SPLIT));
     assertFalse(group.retire(1, StatusCode.SOFT_SPLIT));
-    assertFalse(group.hasUsable());
+    assertNull(group.currentFor(0));
   }
 
   @Test

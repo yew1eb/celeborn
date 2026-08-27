@@ -58,15 +58,6 @@ class ChangePartitionManager(
   private val inBatchPartitions =
     JavaUtils.newConcurrentHashMap[Int, ConcurrentHashMap.KeySetView[Int, java.lang.Boolean]]()
 
-  // shuffleId -> (partitionId -> revive times, i.e. the max epoch ever allocated,
-  // as the epoch starts from 0 and increases by 1 for each successful revive)
-  private val partitionReviveCounts =
-    JavaUtils.newConcurrentHashMap[Int, ConcurrentHashMap[Integer, Integer]]()
-
-  // shuffleId -> (revive cause -> times)
-  private val reviveCauseCounts =
-    JavaUtils.newConcurrentHashMap[Int, ConcurrentHashMap[StatusCode, java.lang.Long]]()
-
   private val batchHandleChangePartitionEnabled = conf.batchHandleChangePartitionEnabled
   private val batchHandleChangePartitionExecutors = ThreadUtils.newDaemonCachedThreadPool(
     "celeborn-client-lifecycle-manager-change-partition-executor",
@@ -90,15 +81,13 @@ class ChangePartitionManager(
 
   private val adaptivePartitionWriteParallelismEnabled =
     conf.clientShuffleAdaptivePartitionWriteParallelismEnabled
-  private val adaptivePartitionWriteParallelismMaxLocations =
-    conf.clientShuffleAdaptivePartitionWriteParallelismMaxLocations
 
   // Injectable clock for testing.
   private[client] var nowMs: () => Long = () => System.currentTimeMillis()
 
   // Per-partition hot state behind adaptive partition write parallelism: how many writable locations each
   // partition should have. All hot state handling is delegated to this tracker.
-  private val hotnessTracker = new PartitionHotnessTracker(
+  private[client] val hotnessTracker = new PartitionHotnessTracker(
     conf,
     latestEpoch,
     loc => lifecycleManager.workerStatusTracker.workerAvailableByLocation(loc),
@@ -114,41 +103,11 @@ class ChangePartitionManager(
     if (attempts == null) 0 else attempts.length
   }
 
-  /** The cap on desired locations: configured maxLocations, or the mapper count when -1. */
-  private[client] def adaptiveLocationCap(shuffleId: Int): Int =
-    if (adaptivePartitionWriteParallelismMaxLocations > 0) {
-      adaptivePartitionWriteParallelismMaxLocations
-    } else {
-      math.max(1, numMappersOf(shuffleId))
-    }
-
-  private[client] def onEpochRetired(
-      shuffleId: Int,
-      partitionId: Int,
-      epoch: Int,
-      oldPartition: PartitionLocation,
-      cause: Option[StatusCode],
-      nowMs: Long): Unit =
-    hotnessTracker.onEpochRetired(shuffleId, partitionId, epoch, oldPartition, cause, nowMs)
-
   private[client] def recordInitialAllocTime(
       shuffleId: Int,
       partitionLocations: Array[PartitionLocation],
       nowMs: Long): Unit =
     hotnessTracker.recordInitialAllocTime(shuffleId, partitionLocations, nowMs)
-
-  private[client] def registerAllocation(
-      shuffleId: Int,
-      partitionId: Int,
-      epochs: Set[Int],
-      nowMs: Long): Unit =
-    hotnessTracker.registerAllocation(shuffleId, partitionId, epochs, nowMs)
-
-  private[client] def desiredLocationCount(shuffleId: Int, partitionId: Int): Int =
-    hotnessTracker.desiredLocationCount(shuffleId, partitionId)
-
-  private def currentActiveEpochs(shuffleId: Int, partitionId: Int): Set[Int] =
-    hotnessTracker.currentActiveEpochs(shuffleId, partitionId)
 
   def start(): Unit = {
     batchHandleChangePartition = batchHandleChangePartitionSchedulerThread.map {
@@ -225,29 +184,6 @@ class ChangePartitionManager(
     }
   }
 
-  private val reviveCountsRegisterFunc =
-    new util.function.Function[Int, ConcurrentHashMap[Integer, Integer]]() {
-      override def apply(s: Int): ConcurrentHashMap[Integer, Integer] =
-        JavaUtils.newConcurrentHashMap()
-    }
-
-  private val reviveCausesRegisterFunc =
-    new util.function.Function[Int, ConcurrentHashMap[StatusCode, java.lang.Long]]() {
-      override def apply(s: Int): ConcurrentHashMap[StatusCode, java.lang.Long] =
-        JavaUtils.newConcurrentHashMap()
-    }
-
-  private val maxEpochMergeFunc = new util.function.BiFunction[Integer, Integer, Integer] {
-    override def apply(oldEpoch: Integer, newEpoch: Integer): Integer =
-      math.max(oldEpoch, newEpoch)
-  }
-
-  private val countMergeFunc =
-    new util.function.BiFunction[java.lang.Long, java.lang.Long, java.lang.Long] {
-      override def apply(oldCount: java.lang.Long, newCount: java.lang.Long): java.lang.Long =
-        oldCount + newCount
-    }
-
   def handleRequestPartitionLocation(
       context: RequestLocationCallContext,
       shuffleId: Int,
@@ -278,7 +214,7 @@ class ChangePartitionManager(
     // and, when the retire is measure-eligible, judge whether the partition is hot and needs
     // more locations.
     if (adaptivePartitionWriteParallelismEnabled && oldEpoch >= 0) {
-      onEpochRetired(shuffleId, partitionId, oldEpoch, oldPartition, cause, nowMs())
+      hotnessTracker.onEpochRetired(shuffleId, partitionId, oldEpoch, oldPartition, cause, nowMs())
     }
 
     val locksForShuffle = locks.computeIfAbsent(shuffleId, locksRegisterFunc)
@@ -337,7 +273,7 @@ class ChangePartitionManager(
   private def currentActiveLocations(
       shuffleId: Int,
       partitionId: Int): List[PartitionLocation] = {
-    val epochs = currentActiveEpochs(shuffleId, partitionId)
+    val epochs = hotnessTracker.currentActiveEpochs(shuffleId, partitionId)
     val fromSnapshots = lifecycleManager
       .workerSnapshots(shuffleId)
       .asScala
@@ -592,18 +528,12 @@ class ChangePartitionManager(
 
     if (newPrimaryLocations.nonEmpty) {
       // newPrimaryLocations may contain both the primary and the replica peer of one
-      // partition, dedupe by partition id before recording stats and logging.
+      // partition, dedupe by partition id before logging.
       val distinctPartitions = newPrimaryLocations.groupBy(_.getId).map(_._2.head)
       val requestCauses = changePartitions.map(c => c.partitionId -> c.causes).toMap
-      val reviveCounts =
-        partitionReviveCounts.computeIfAbsent(shuffleId, reviveCountsRegisterFunc)
-      val causeCounts = reviveCauseCounts.computeIfAbsent(shuffleId, reviveCausesRegisterFunc)
       val changes = distinctPartitions.map { partition =>
         val partitionId = partition.getId
-        // The epoch of the new location equals the revive times of the partition.
-        reviveCounts.merge(partitionId, partition.getEpoch, maxEpochMergeFunc)
         val cause = requestCauses.get(partitionId).flatten
-        cause.foreach(c => causeCounts.merge(c, 1L, countMergeFunc))
         s"(partition $partitionId epoch from ${partition.getEpoch - 1} to ${partition.getEpoch}" +
           s", cause ${cause.map(_.name()).getOrElse("NONE")})"
       }.mkString("[", ", ", "]")
@@ -623,7 +553,7 @@ class ChangePartitionManager(
       }.map { case (partitionId, locs) => partitionId -> locs.map(_.getEpoch).toSet }
       val allocTimeMs = nowMs()
       reservedEpochsByPartition.foreach { case (partitionId, epochs) =>
-        registerAllocation(shuffleId, partitionId, epochs, allocTimeMs)
+        hotnessTracker.registerAllocation(shuffleId, partitionId, epochs, allocTimeMs)
       }
     }
 
@@ -648,32 +578,18 @@ class ChangePartitionManager(
     val slots = new WorkerResource()
     changePartitions.foreach { change =>
       val partitionId = change.partitionId
-      val desired = math.min(
-        desiredLocationCount(shuffleId, partitionId),
-        adaptiveLocationCap(shuffleId))
+      // The tracker already caps desired at the configured maxLocations (or mapper count).
+      val desired = hotnessTracker.desiredLocationCount(shuffleId, partitionId)
       // The active epoch set is already up to date: it was maintained when the request
       // arrived (soft-split epochs of available workers are retained as still writable;
       // hard/failed epochs were removed). No need to subtract the requested epoch here.
-      val surviving = currentActiveEpochs(shuffleId, partitionId)
+      val surviving = hotnessTracker.currentActiveEpochs(shuffleId, partitionId)
       val gap = math.max(0, desired - surviving.size)
       if (gap > 0) {
         val baseEpoch = math.max(
           latestEpoch(shuffleId, partitionId).getOrElse(change.epoch),
           (surviving + change.epoch).max)
         val newEpochs = allocateGapLocations(partitionId, baseEpoch, gap, candidates, slots)
-        if (newEpochs.nonEmpty) {
-          val hosts = slots.asScala.flatMap { case (worker, (primaries, replicas)) =>
-            val hit = primaries.asScala.exists(loc =>
-              loc.getId == partitionId && newEpochs.contains(loc.getEpoch)) ||
-              replicas.asScala.exists(loc =>
-                loc.getId == partitionId && newEpochs.contains(loc.getEpoch))
-            if (hit) Some(worker.host) else None
-          }.toSet
-          logInfo(s"[adaptiveParallelism] Shuffle $shuffleId partition $partitionId: " +
-            s"allocated ${newEpochs.size} additional location(s) (desired $desired, " +
-            s"surviving ${surviving.size}), epochs ${newEpochs.toSeq.sorted.mkString(",")} " +
-            s"on workers ${hosts.mkString(",")}.")
-        }
         if (newEpochs.size < gap) {
           logWarning(s"[adaptiveParallelism] Shuffle $shuffleId partition $partitionId: " +
             s"wanted $gap additional location(s) but allocated ${newEpochs.size} " +
@@ -728,37 +644,10 @@ class ChangePartitionManager(
     slots
   }
 
-  def logReviveSummary(shuffleId: Int): Unit = {
-    val reviveCounts = partitionReviveCounts.get(shuffleId)
-    if (reviveCounts == null || reviveCounts.isEmpty) {
-      return
-    }
-
-    val totalReviveTimes = reviveCounts.values().asScala.map(_.toInt).sum
-    val causeCounts = reviveCauseCounts.get(shuffleId)
-    val causes =
-      if (causeCounts == null || causeCounts.isEmpty) {
-        "NONE"
-      } else {
-        causeCounts.asScala.map { case (cause, count) => s"${cause.name()}=$count" }
-          .mkString(", ")
-      }
-    val topRevivedPartitions = reviveCounts.asScala.toSeq
-      .sortBy(-_._2.toInt)
-      .take(20)
-      .map { case (partitionId, times) => s"(partition $partitionId, revive times $times)" }
-      .mkString("[", ", ", "]")
-    logInfo(s"Shuffle $shuffleId partition revive summary: total revive times " +
-      s"$totalReviveTimes, revived partition num ${reviveCounts.size()}, " +
-      s"causes: [$causes], top revived partitions: $topRevivedPartitions.")
-  }
-
   def removeExpiredShuffle(shuffleId: Int): Unit = {
     changePartitionRequests.remove(shuffleId)
     inBatchPartitions.remove(shuffleId)
     locks.remove(shuffleId)
-    partitionReviveCounts.remove(shuffleId)
-    reviveCauseCounts.remove(shuffleId)
     hotnessTracker.removeShuffle(shuffleId)
   }
 }

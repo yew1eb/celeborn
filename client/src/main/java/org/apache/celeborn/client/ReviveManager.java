@@ -81,7 +81,10 @@ class ReviveManager {
                   req.reviveStatus = StatusCode.SUCCESS.getValue();
                   if (shuffleClient.adaptivePartitionWriteParallelismEnabled) {
                     mapIds.add(req.mapId);
-                    putReport(retireReports, req);
+                    retireReports.merge(
+                        ((long) req.partitionId << 32) | (req.epoch & 0xffffffffL),
+                        req,
+                        (a, b) -> a.cause == StatusCode.SOFT_SPLIT ? b : a);
                   }
                 } else {
                   filteredRequests.add(req);
@@ -91,12 +94,18 @@ class ReviveManager {
                     if (current != null && shuffleClient.adaptivePartitionWriteParallelismEnabled) {
                       // The displaced lower-epoch request rides on the max-epoch request's
                       // response, but its retirement still has to be reported.
-                      putReport(retireReports, current);
+                      retireReports.merge(
+                          ((long) current.partitionId << 32) | (current.epoch & 0xffffffffL),
+                          current,
+                          (a, b) -> a.cause == StatusCode.SOFT_SPLIT ? b : a);
                     }
                     requestsToSend.put(req.partitionId, req);
                   } else if (current.epoch > req.epoch
                       && shuffleClient.adaptivePartitionWriteParallelismEnabled) {
-                    putReport(retireReports, req);
+                    retireReports.merge(
+                        ((long) req.partitionId << 32) | (req.epoch & 0xffffffffL),
+                        req,
+                        (a, b) -> a.cause == StatusCode.SOFT_SPLIT ? b : a);
                   }
                 }
               }
@@ -147,19 +156,6 @@ class ReviveManager {
       requestQueue.put(request);
     } catch (InterruptedException e) {
       logger.error("Exception when put into requests!", e);
-    }
-  }
-
-  private static long reportKey(int partitionId, int epoch) {
-    return ((long) partitionId << 32) | (epoch & 0xffffffffL);
-  }
-
-  /** Dedupe per (partitionId, epoch), keeping the hardest cause (non-SOFT_SPLIT wins). */
-  private static void putReport(Map<Long, ReviveRequest> reports, ReviveRequest req) {
-    long key = reportKey(req.partitionId, req.epoch);
-    ReviveRequest existing = reports.get(key);
-    if (existing == null || existing.cause == StatusCode.SOFT_SPLIT) {
-      reports.put(key, req);
     }
   }
 

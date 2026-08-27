@@ -84,7 +84,7 @@ class PartitionHotnessTrackerSuite extends CelebornFunSuite {
 
       // Slow fill of epoch 1 (70s > window): neither cause boosts.
       val loc1 = makeLoc(partitionId, 1, "host1")
-      tracker.recordAllocTime(shuffleId, partitionId, 1, 70000L)
+      tracker.registerAllocation(shuffleId, partitionId, Set(1), 70000L)
       tracker.onEpochRetired(shuffleId, partitionId, 1, loc1, Some(cause), 140000L)
       assert(tracker.desiredLocationCount(shuffleId, partitionId) == 2)
     }
@@ -102,7 +102,7 @@ class PartitionHotnessTrackerSuite extends CelebornFunSuite {
 
     // fillTime 25s measured under K=2 ({epoch 0 soft-retained, epoch 1}):
     // target ceil(2*60/25) = 5, capped at the configured max 4.
-    tracker.recordAllocTime(shuffleId, partitionId, 1, 30000L)
+    tracker.registerAllocation(shuffleId, partitionId, Set(1), 30000L)
     tracker.onEpochRetired(
       shuffleId,
       partitionId,
@@ -114,7 +114,7 @@ class PartitionHotnessTrackerSuite extends CelebornFunSuite {
 
     // fillTime 10s under K=3 -> target 18, still the cap: a very hot partition reaches the
     // cap after its first fast split report, without any debounce window.
-    tracker.recordAllocTime(shuffleId, partitionId, 2, 55000L)
+    tracker.registerAllocation(shuffleId, partitionId, Set(2), 55000L)
     tracker.onEpochRetired(
       shuffleId,
       partitionId,
@@ -139,7 +139,7 @@ class PartitionHotnessTrackerSuite extends CelebornFunSuite {
 
     // Epochs 0 (soft-retained) and 1 active. Epoch 1 fills in 10s under K = 2:
     // target ceil(2 * 60 / 10) = 12 — NOT the K-blind ceil(60/10) = 6.
-    tracker.recordAllocTime(shuffleId, partitionId, 1, 30000L)
+    tracker.registerAllocation(shuffleId, partitionId, Set(1), 30000L)
     tracker.onEpochRetired(
       shuffleId,
       partitionId,
@@ -195,7 +195,7 @@ class PartitionHotnessTrackerSuite extends CelebornFunSuite {
     assert(tracker.desiredLocationCount(shuffleId, partitionId) == 4)
 
     // After the fan-out the next location fills slower (30s, target 3): desired stays 4.
-    tracker.recordAllocTime(shuffleId, partitionId, 1, 10000L)
+    tracker.registerAllocation(shuffleId, partitionId, Set(1), 10000L)
     tracker.onEpochRetired(
       shuffleId,
       partitionId,

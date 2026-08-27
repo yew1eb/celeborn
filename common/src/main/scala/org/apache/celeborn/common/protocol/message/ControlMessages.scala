@@ -724,12 +724,10 @@ object ControlMessages extends Logging {
         if (loc != null) {
           pbChangeLocationPartitionInfoBuilder.setPartition(PbSerDeUtils.toPbPartitionLocation(loc))
         }
-        Option(additionalLocs).flatMap(m => Option(m.get(partitionId))).foreach { additionals =>
-          additionals.asScala.foreach { additionalLoc =>
-            if (additionalLoc != null) {
-              pbChangeLocationPartitionInfoBuilder.addAdditionalPartitions(
-                PbSerDeUtils.toPbPartitionLocation(additionalLoc))
-            }
+        if (additionalLocs != null && additionalLocs.get(partitionId) != null) {
+          additionalLocs.get(partitionId).asScala.filter(_ != null).foreach { additionalLoc =>
+            pbChangeLocationPartitionInfoBuilder.addAdditionalPartitions(
+              PbSerDeUtils.toPbPartitionLocation(additionalLoc))
           }
         }
         builder.addPartitionInfo(pbChangeLocationPartitionInfoBuilder.build())

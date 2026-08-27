@@ -5369,11 +5369,8 @@ object CelebornConf extends Logging {
   val CLIENT_SHUFFLE_ADAPTIVE_PARTITION_WRITE_PARALLELISM_ENABLED: ConfigEntry[Boolean] =
     buildConf("celeborn.client.shuffle.adaptivePartitionWriteParallelism.enabled")
       .categories("client")
-      .doc("Whether to enable writing one partition to multiple partition locations " +
-        "in parallel. When enabled, a hot partition (whose location is filled up faster " +
-        "than the hot partition window) is gradually assigned more active locations, and " +
-        "mappers are dispatched to active locations by mapId % activeCount. When disabled, " +
-        "the behavior is identical to the legacy single active location per partition.")
+      .doc("Whether to enable adaptive partition write parallelism, i.e. writing " +
+        "one partition to multiple partition locations in parallel. Disabled by default.")
       .version("0.7.0")
       .booleanConf
       .createWithDefault(false)
@@ -5381,11 +5378,8 @@ object CelebornConf extends Logging {
   val CLIENT_SHUFFLE_ADAPTIVE_PARTITION_WRITE_PARALLELISM_MAX_LOCATIONS: ConfigEntry[Int] =
     buildConf("celeborn.client.shuffle.adaptivePartitionWriteParallelism.maxLocations")
       .categories("client")
-      .doc("Max number of active locations one partition can write in parallel when " +
-        "celeborn.client.shuffle.adaptivePartitionWriteParallelism.enabled is true. The LifecycleManager " +
-        "caps the judged desired location count of a partition to this value. If the value is -1 " +
-        "(default), the cap is the shuffle's number of mappers — routing is mapId % activeCount, " +
-        "so more locations than mappers can never be utilized.")
+      .doc("Max number of active locations one partition can write to in parallel. " +
+        "-1 (default) means the shuffle's number of mappers.")
       .version("0.7.0")
       .intConf
       .checkValue(v => v == -1 || v > 0, "Must be -1 or positive.")
@@ -5394,12 +5388,10 @@ object CelebornConf extends Logging {
   val CLIENT_SHUFFLE_ADAPTIVE_PARTITION_WRITE_PARALLELISM_HOT_WINDOW: ConfigEntry[Long] =
     buildConf("celeborn.client.shuffle.adaptivePartitionWriteParallelism.hotWindow")
       .categories("client")
-      .doc("The window to judge whether a partition is hot when " +
-        "celeborn.client.shuffle.adaptivePartitionWriteParallelism.enabled is true. If a partition location " +
-        "is filled up (soft/hard split) faster than this window, the partition is hot " +
-        "and its desired active location count is raised to ceil(window / fillTime), " +
-        "i.e. the location count that would push the per-location fill time above this " +
-        "window, capped by celeborn.client.shuffle.adaptivePartitionWriteParallelism.maxLocations.")
+      .doc("The window to judge whether a partition is hot. The target is that the " +
+        "time for a single location to fill 1G should be slower than this window; " +
+        "the new target parallelism is ceil(current parallelism * window / measured " +
+        "fill time).")
       .version("0.7.0")
       .timeConf(TimeUnit.MILLISECONDS)
       .createWithDefaultString("60s")
