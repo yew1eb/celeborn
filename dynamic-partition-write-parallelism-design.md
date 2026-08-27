@@ -29,7 +29,7 @@ repeated PbPartitionLocation additionalPartitions = 5;
 |---|---|---|
 | `...adaptivePartitionWriteParallelism.enabled` | false | 总开关;关闭时所有路径与现状等价 |
 | `...adaptivePartitionWriteParallelism.maxLocations` | -1 | 活跃 location 上限 = min(配置值, 该 shuffle 的 mapper 数);-1 = 仅按 mapper 数(路由 mapId % K,超过 mapper 数必空转,天然上限) |
-| `...adaptivePartitionWriteParallelism.hotWindow` | 60s | 热点判定窗口;升档目标 = ceil(K × 窗口 / 写满耗时) |
+| `...adaptivePartitionWriteParallelism.hotWindow` | 60s | 热点判定窗口;语义 = 让单 location 写满 threshold 的周期 ≥ window(升档目标 = ceil(K × 窗口 / 写满耗时))。window 越大并行度越高、单点写压越薄,代价是热点 partition 占用的 worker 越多(见 性能验证 · hotWindow 敏感性) |
 
 **观测点**(均一次性,无重复刷屏):LM 侧升档判定 / 补差分配 / 分配不足(INFO/WARN);executor 侧并行激活 / SOFT 首报退休(含换路去向)/ 全不可用触发阻塞 revive 及其成功后的新目标(INFO);per-batch 重推成功(DEBUG)。
 
@@ -78,11 +78,15 @@ LM (ChangePartitionManager → PartitionHotnessTracker):
 
 ### 关键设计决策
 
-1. **split 事件驱动 + fillTime 实测,不做速度假设**:fillTime = 某 epoch 的首个 split 上报时刻 − 该 epoch 真实分配时刻,per-epoch 独立对照,一次事件即可判定。split 阈值是**字节尺子**(`partitionSplit.threshold` 默认 1G,worker 侧仅有 min 1m / max 2g 硬边界),与磁盘介质无关;fillTime 把它换算成该 location 的**实测**写速,HDD/SSD/NVMe/混插集群各自自校准。与速率统计、PR#3260 静态魔数等备选方案的完整对比见 Rejected Alternatives。
-2. **比例步进含 K 因子**:fillTime 是当前并行度 K 下、聚合写压被 K 路分摊后的单 location 写满时间,聚合写满速率 = K/fillTime,故目标 = `ceil(K × window / fillTime)`。目标若不含 K 则被低估 K 倍,升档在 K>1 后即失效。判定一次直达目标,desired 单调递增 + per-epoch 首报去重 + 上限截断,无需去抖窗口。
-3. **全集回复保证 executor 一致性**:每次 revive 响应携带该 partition 的完整活跃集(max epoch 为主回复 + `additionalPartitions`),按 epoch 有序插入,所有 executor 一次 revive 即收敛到**相同顺序**的活跃列表,`mapId % K` 分派全局一致。对比 PR#3260 的 50ms 轮询收敛:无收敛延迟、无中间态路由分歧。
-4. **SOFT_SPLIT location 是一等路由目标,退休上报一条不丢**:soft 文件在 2G 硬上限前持续可写;若把它排除出新写路由,稳态下所有槽位都会处于 soft 态,写压将塌缩到最新的 1~2 个 location,并行写形同虚设。配套地,LM 的活跃集记账依赖每个 (partition, epoch) 的退休 cause 到达——包括"本地已满足"的上报;丢弃任何一条会让 LM 活跃集被死 epoch 撑大、gap 分配归零,executor 最终因无可写 location 而失败。批量路径的上报**发送时从 `group.outstandingRetires()` 现取**而不是从队列收集:队列在调度器被超时堵住时积压无上界(单条 Revive 可膨胀到上千条),group 视图只含 LM 未消化的退休 epoch——有界(≤ 活跃集大小)、自动去陈旧、RPC 超时丢失的自动重发。
-5. **全部不可写时的阻塞 revive:携带退休上报 + 有界重试 + single-flight,三者缺一即破坏活性**。LM 补差分配按 `gap = desired − LM 簿记活跃数`;只发一条 max-epoch 请求时 LM 只消化 1 个退休,gap≈0,响应回几乎全已退休的旧集合,executor 无可写 location 而失败。携带全部未消化退休上报后 LM 一轮补满 K 个 location;否则每次只补 1 个 → 全 executor 的 mapper 投影到唯一可写 location → 秒级再次 HARD_SPLIT → 分配与退休相互加速的正反馈(churn)。single-flight(per-partition 锁 + 拿锁后复查可写性)把 mass-retire 唤醒的 pusher 线程收敛到每 executor 每 partition 至多 1 个在飞 RPC,避免瞬时 RPC 洪峰压垮 LM dispatcher(默认 60s `requestPartition.askTimeout`)。两个更简的变体均不成立:纯异步 fallback(不阻塞,靠 worker 拒收重触发 revive)在 split 密集期路由长期落空,吞吐显著退化;单发同步 revive(不携上报、不重试)则落入上述 gap≈0 陷阱,直接失败。
+1. **split 事件驱动 + fillTime 实测,不做速度假设**。不猜磁盘有多快,直接量:split 阈值是固定字节数(默认 1G),在任何磁盘上含义相同;一个 location 从分配到写满 1G 用了多久(fillTime),换算过来就是它的真实写速。HDD/SSD/NVMe/混插集群各自自校准,无需任何先验速度参数。一次 split 事件即可判定,per-epoch 独立对照。与速率统计等信号源的完整对比见 Rejected Alternatives。
+
+2. **升档目标含 K 因子:`target = ceil(K × window / fillTime)`**。一句话:**目标路数 = 当前路数 × 需要放慢的倍数**。数字走一遍:window=60s(希望一个文件至少写 60 秒才满,切换不匆忙);实测当前 K=5 路并行、每路 10 秒写满 1G,即整体每 2 秒就写满一份——太赶。要让每路放慢到 60 秒才满,每路写速需降到 1/6,路数就要 ×6:`5 × 60/10 = 30`。为什么必须带 K:fillTime=10s 这个测量值本身已是 5 路分摊后的结果;公式若不带 K(window/fillTime=6),目标只会从 5 升到 6——把已有的并行度忘了。收敛性质:一次判定直达目标;desired 单调递增、每 epoch 仅首报判定一次、上限截断,无需去抖窗口。
+
+3. **全集回复保证 executor 一致性**。每次 revive 响应携带该 partition 的完整活跃集(max epoch 为主回复 + `additionalPartitions`),按 epoch 有序插入,所有 executor 一次 revive 即收敛到**相同顺序**的活跃列表,`mapId % K` 分派全局一致。否则(PR#3260 的 50ms 轮询收敛)收敛期各 executor 路由不一致,同一 mapId 在不同 executor 写向不同 location。
+
+4. **SOFT_SPLIT location 是一等路由目标,退休上报一条不丢**。两点直觉:(a) soft 文件在 2G 硬上限前持续可写——若把它排除出路由,稳态下所有槽位都处于 soft 态,写压将塌缩回最新的 1~2 个 location,并行写形同虚设;(b) LM 靠每条退休上报维护活跃集——丢一条,死 epoch 就撑大 LM 的活跃集,补差分配 gap 归零,executor 最终无可写 location 而失败。所以上报必须可靠:批量路径在**发送时**现取未消化退休集合,有界、自动去陈旧、超时丢失自动重发(实现见 Executor 侧实现)。
+
+5. **全部不可写时的阻塞 revive:single-flight + 携带退休上报 + 有界重试,缺一不可**。人话版:与其让每个 pusher 线程各自去问 LM,不如每个 partition 只放一个线程去问;问的时候把整本"退休账"一起带上;最多问 3 次。为什么缺一不可:不带上报,LM 簿记里旧 location 还活着,补差 gap≈0,一轮只补 1 个 → 全部 mapper 挤向唯一可写 location → 秒级再次 HARD_SPLIT → 分配与退休互相加速的恶性循环;不 single-flight,mass-retire 同时唤醒的线程会形成 RPC 洪峰压垮 LM(默认 60s `requestPartition.askTimeout`);不阻塞重试,一次 RPC 超时就直接失败。两个更简的变体因此均不成立:纯异步 fallback(靠 worker 拒收重触发)在 split 密集期路由长期落空,吞吐显著退化;单发同步 revive(不携上报)落入上述 gap≈0 陷阱。
 
 ### Executor 侧实现
 
@@ -93,7 +97,7 @@ LM (ChangePartitionManager → PartitionHotnessTracker):
 - **路由**:`currentFor(mapId)` / `anotherUsableFor` 委托 `pick(mapId, excludeEpoch)`——快照 active 列表单遍收集可写子集(非退休 + soft),`floorMod(mapId, size)` 均匀分派;同一 map task 稳定写同一 location(保住 PushState 按 host 聚合)。
 - **退休**:`retire(epoch, cause)` CHM compute 原子,返回是否首次(每 epoch 只上报一次);cause 可升级(SOFT→HARD)不可降级;与全集 merge 同 monitor,防墓碑写与清理交错。
 - **全集收敛**:`mergeActiveLocations(locations, fullSet)` 按 epoch 有序插入、跳过本地已退休 epoch;`fullSet=true` 时清理 LM 已消化(全集中不再出现)的退休条目。仅携带 additionals 的响应才视为全集——单元素响应(老 LM / 冷 partition)不当全集,避免误清 soft-retired 条目。
-- **诊断视图**:`activeEpochsSnapshot()`/`retiredEpochsSnapshot()` 供失败信息;`outstandingRetires()` 供同步 revive 携带未消化退休上报(仅含仍在 active 列表中的退休 epoch,被全集清理的说明 LM 已消化)。
+- **诊断视图**:`activeEpochsSnapshot()`/`retiredEpochsSnapshot()` 供失败信息;`outstandingRetires()` 供退休上报(仅含仍在 active 列表中的退休 epoch,被全集清理的说明 LM 已消化)。同步 revive 与批量 revive 都在**发送时**从该视图现取未消化退休集合,而不是从队列收集:队列在调度器被超时堵住时积压无上界,group 视图则有界(≤ 活跃集大小)、自动去陈旧、RPC 超时丢失的条目自动随下一次重发。
 
 #### ShuffleClientImpl 接入
 
@@ -146,6 +150,19 @@ allocTime 来源:新 epoch 由分配登记;epoch 0 用 registerShuffle 时刻(�
 | total shuffle write time(全集群线程) | 607.5h | 6.0h | 101× |
 | 每 GB 写线程耗时 | 361s/GB | 2.3s/GB | 157× |
 | shuffle read 聚合吞吐 | 17.6GB/s | 26.3GB/s | +49%(fetchWait/GB 持平) |
+
+#### hotWindow 敏感性(同一作业,四组对照)
+
+| 运行 | 作业耗时 | shuffle write 吞吐 | total shuffle write time |
+|---|---|---|---|
+| 未开启 | 40m47s | 6.33 MB/s | 431h20m |
+| hotWindow=10s | 7m23s | 391.75 MB/s | 6h58m |
+| hotWindow=30s | 8m08s | 552.66 MB/s | 4h56m |
+| hotWindow=60s(默认) | 6m34s | 648.97 MB/s | 4h12m |
+
+window 定义的是稳态均衡点:升档公式的不动点是"单 location 写满 1G 的周期 = window",即单 location 写速均衡在 threshold/window——10s/30s/60s 分别对应约 100/34/17 MB/s。聚合速率固定,window 越大 → 目标并行度越高,收益来自三处:(1) SOFT→HARD 安全窗 = 1G/单路速率,恰等于 window——60s 均衡下几乎总能在 SOFT 态平滑退休,零重推零阻塞;10s 均衡下重推频繁,而重推是重复写,这是 total write time 阶梯(6h58m → 4h56m → 4h12m)的主因;(2) 写压分摊到更多 worker,push RTT 与排队下降;(3) 热点判定要求 fillTime < window,小窗口下写得稍慢的 partition 不触发升档,且 fillTime 一旦 ≥ window 升档即冻结——小窗口目标低、封顶早。代价是热点 partition 占用更多 worker(由 `maxLocations`/mapper 数上限兜底)。30s 组作业耗时略逊于 10s 组是读侧与调度噪声,写侧指标单调改善。
+
+(注:shuffle write 吞吐列为作业级平均口径;基线 6.33 MB/s 反映的是严重反压下 mapper 大部分时间阻塞,而非磁盘上限。)
 
 ## Compatibility, Deprecation, and Migration Plan
 
