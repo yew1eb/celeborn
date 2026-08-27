@@ -484,4 +484,52 @@ class ChangePartitionManagerAdaptiveParallelismSuite extends CelebornFunSuite {
       assert(reply.additionals.asScala.map(_.getEpoch).toSet == Set(0))
     }
   }
+
+  test("one Revive message's many same-partition entries: retire reports get bookkeeping " +
+    "only, the max-epoch entry drives the request") {
+    val conf = makeConf()
+    val shuffleId = 1
+    val partitionId = 0
+    val workers = (1 to 8).map(makeWorker)
+    val loc0 = prepareLifecycleManager(conf, shuffleId, partitionId, workers)
+    val changePartitionManager = new FakeClockManager(conf, lifecycleManager, 100000L)
+    changePartitionManager.recordInitialAllocTime(shuffleId, Array(loc0), 1000, 100000L)
+
+    // A mass-retire event forwarded by a backed-up executor: 5 entries of the same partition
+    // in one Revive message — 4 pure retire reports (epochs 0..3) plus the max-epoch request
+    // (epoch 4). All HARD_SPLIT; fillTime 70s > 60s window, so no boost (desired stays 1).
+    changePartitionManager.advance(70000)
+    val entries = (0 to 4).map { epoch =>
+      (Integer.valueOf(epoch), makeLoc(partitionId, epoch, s"host${epoch + 1}"))
+    }
+    val context = new CapturingContext
+    changePartitionManager.handleReviveRequests(
+      context,
+      shuffleId,
+      util.Arrays.asList(Array.fill(entries.size)(Integer.valueOf(partitionId)): _*),
+      util.Arrays.asList(entries.map(_._1): _*),
+      util.Arrays.asList(entries.map(_._2): _*),
+      util.Arrays.asList(Array.fill(entries.size)(StatusCode.HARD_SPLIT): _*),
+      isSegmentGranularityVisible = false)
+
+    // Every entry was digested by the active-set bookkeeping: epoch 0 (the only active one)
+    // is hard-retired, and every retired location is registered for commit (no data loss).
+    val unhandled = lifecycleManager.commitManager.committedPartitionInfo
+      .get(shuffleId)
+      .unhandledPartitionLocations
+    assert(unhandled.asScala.map(_.getEpoch).toSet == Set(0, 1, 2, 3, 4))
+
+    // desired=1 with an empty surviving set: exactly one replacement (epoch 5) is allocated
+    // and the single reply carries it.
+    val newLocs = primaryLocs(shuffleId, partitionId).filter(_.getEpoch > 4)
+    assert(newLocs.map(_.getEpoch) == List(5))
+    assert(
+      changePartitionManager.hotnessTracker.currentActiveEpochs(shuffleId, partitionId) ==
+        Set(5))
+    assert(context.replies.size() == 1)
+    val reply = context.replies.get(partitionId)
+    assert(reply != null && reply.status == StatusCode.SUCCESS)
+    assert(reply.loc.isDefined && reply.loc.get.getEpoch == 5)
+    assert(reply.additionals.isEmpty)
+  }
 }

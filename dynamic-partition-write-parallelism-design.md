@@ -32,6 +32,10 @@ mapper pushData(partitionId)
 "携带退休上报 + 逐次重查"维持,见决策 5)。
 
 LM (ChangePartitionManager → PartitionHotnessTracker):
+  一条 Revive 先按 partition 分组:每组仅 max-epoch 条目走完整请求/分配路径,
+    其余条目 = 纯退休上报,只做记账(commit 注册 + onEpochRetired)——
+    积压客户端一条 Revive 可携带同 partition 上千条上报,逐条走完整路径曾把
+    LM dispatcher 拖到秒级/条、队列积压 77s(线上实证)
   收到带 cause 的 revive → 活跃集维护:SOFT_SPLIT 且 worker 可用 → epoch 保留;
     其余(HARD_SPLIT / push 失败 / worker 不可用)→ epoch 移出活跃集(终态,迟到 SOFT 不复活)
   热点判定(cause ∈ {SOFT, HARD} 且 worker 可用):
@@ -136,7 +140,7 @@ allocTime 来源:新 epoch 由分配登记;epoch 0 用 registerShuffle 时刻(�
 | `PartitionLocationGroupSuiteJ` | 10 | 快路径、soft 参与路由/hard 排除、cause 升级、全集收敛与清理、乱序 epoch、并发 pick×merge、epoch 快照视图、outstandingRetires 视图 |
 | `ReviveManagerSuiteJ` | 5 | 同步 revive:可写快速路径零 RPC、重试收敛且每轮携带全部退休上报、SUCCESS 无可写/RPC 失败有界放弃(3 次)、single-flight 并发去重(2 线程 1 RPC) |
 | `PartitionHotnessTrackerSuite` | 12 | 计量守卫(不可用 worker/push 失败)、K 因子缩放、fillTime 下限与 -1=mapper 数上限、显式上限优先、单调不降、soft 保留/移除、迟到 SOFT 不复活 |
-| `ChangePartitionManagerAdaptiveParallelismSuite` | 9 | 升档+补差分配、超窗不升、allocTime 未知保守、首报去重、比例步进、epoch 乱序、gap=0 仍回全集、并发 revive 收敛 |
+| `ChangePartitionManagerAdaptiveParallelismSuite` | 10 | 升档+补差分配、超窗不升、allocTime 未知保守、首报去重、比例步进、epoch 乱序、gap=0 仍回全集、并发 revive 收敛、一条 Revive 的同 partition 多条目分组(上报只记账、max-epoch 驱动请求、commit 注册不丢) |
 | `RequestLocationCallContextSuite` | 1 | 同 partition 重复回复忽略、按 distinct 数完成响应 |
 
 ## 9. 性能验证(生产)

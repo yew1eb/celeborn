@@ -174,6 +174,72 @@ class ChangePartitionManager(
     }
   }
 
+  /**
+   * Handle all entries of one Revive message. Adaptive parallelism lets a message carry many
+   * entries of the same partition (every locally retired epoch is forwarded as a retire report;
+   * a backed-up client can pile 1000+ reports of one hot partition into a single Revive). Only
+   * the max-epoch entry can require a new location, so it alone goes through the full request
+   * path — which also completes the message's response (counted by distinct partitions). The
+   * remaining entries are pure retire reports and get bookkeeping only, keeping the per-message
+   * cost proportional to the distinct partition count instead of the entry count.
+   */
+  def handleReviveRequests(
+      context: RequestLocationCallContext,
+      shuffleId: Int,
+      partitionIds: util.List[Integer],
+      oldEpochs: util.List[Integer],
+      oldPartitions: util.List[PartitionLocation],
+      causes: util.List[StatusCode],
+      isSegmentGranularityVisible: Boolean): Unit = {
+    (0 until partitionIds.size()).groupBy(partitionIds.get(_)).foreach {
+      case (partitionId, indices) =>
+        val primaryIdx = indices.maxBy(idx => oldEpochs.get(idx).toInt)
+        indices.foreach { idx =>
+          if (idx != primaryIdx) {
+            noteReviveEntry(
+              shuffleId,
+              partitionId,
+              oldEpochs.get(idx),
+              oldPartitions.get(idx),
+              Some(causes.get(idx)))
+          }
+        }
+        handleRequestPartitionLocation(
+          context,
+          shuffleId,
+          partitionId,
+          oldEpochs.get(primaryIdx),
+          oldPartitions.get(primaryIdx),
+          Some(causes.get(primaryIdx)),
+          isSegmentGranularityVisible)
+    }
+  }
+
+  /**
+   * Bookkeeping every incoming revive entry needs: commit-time registration of hard-split
+   * locations, and (adaptive parallelism) active-set/hotness maintenance. A pure retire report
+   * needs nothing beyond this.
+   */
+  private def noteReviveEntry(
+      shuffleId: Int,
+      partitionId: Int,
+      oldEpoch: Int,
+      oldPartition: PartitionLocation,
+      cause: Option[StatusCode]): Unit = {
+    lifecycleManager.commitManager.registerCommitPartitionRequest(
+      shuffleId,
+      oldPartition,
+      cause)
+
+    // The requested epoch is retiring: update the active epoch set of the partition (soft-split
+    // epochs of available workers stay writable and are retained; hard/failed ones are removed)
+    // and, when the retire is measure-eligible, judge whether the partition is hot and needs
+    // more locations.
+    if (adaptivePartitionWriteParallelismEnabled && oldEpoch >= 0) {
+      hotnessTracker.onEpochRetired(shuffleId, partitionId, oldEpoch, oldPartition, cause, nowMs())
+    }
+  }
+
   def handleRequestPartitionLocation(
       context: RequestLocationCallContext,
       shuffleId: Int,
@@ -194,18 +260,7 @@ class ChangePartitionManager(
     val requests = changePartitionRequests.computeIfAbsent(shuffleId, rpcContextRegisterFunc)
     inBatchPartitions.computeIfAbsent(shuffleId, inBatchShuffleIdRegisterFunc)
 
-    lifecycleManager.commitManager.registerCommitPartitionRequest(
-      shuffleId,
-      oldPartition,
-      cause)
-
-    // The requested epoch is retiring: update the active epoch set of the partition (soft-split
-    // epochs of available workers stay writable and are retained; hard/failed ones are removed)
-    // and, when the retire is measure-eligible, judge whether the partition is hot and needs
-    // more locations.
-    if (adaptivePartitionWriteParallelismEnabled && oldEpoch >= 0) {
-      hotnessTracker.onEpochRetired(shuffleId, partitionId, oldEpoch, oldPartition, cause, nowMs())
-    }
+    noteReviveEntry(shuffleId, partitionId, oldEpoch, oldPartition, cause)
 
     val locksForShuffle = locks.computeIfAbsent(shuffleId, locksRegisterFunc)
     locksForShuffle(partitionId % locksForShuffle.length).synchronized {

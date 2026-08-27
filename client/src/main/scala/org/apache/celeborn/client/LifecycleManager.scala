@@ -941,16 +941,14 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
       }
     }
 
-    (0 until partitionIds.size()).foreach { idx =>
-      changePartitionManager.handleRequestPartitionLocation(
-        contextWrapper,
-        shuffleId,
-        partitionIds.get(idx),
-        oldEpochs.get(idx),
-        oldPartitions.get(idx),
-        Some(causes.get(idx)),
-        commitManager.isSegmentGranularityVisible(shuffleId))
-    }
+    changePartitionManager.handleReviveRequests(
+      contextWrapper,
+      shuffleId,
+      partitionIds,
+      oldEpochs,
+      oldPartitions,
+      causes,
+      commitManager.isSegmentGranularityVisible(shuffleId))
   }
 
   private def handleMapperEnd(
