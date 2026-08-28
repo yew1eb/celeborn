@@ -5389,10 +5389,12 @@ object CelebornConf extends Logging {
   val CLIENT_SHUFFLE_ADAPTIVE_PARTITION_WRITE_PARALLELISM_MIN_SPLIT_INTERVAL: ConfigEntry[Long] =
     buildConf("celeborn.client.shuffle.adaptivePartitionWriteParallelism.minSplitInterval")
       .categories("client")
-      .doc("The minimum interval between two splits of a single partition location. " +
-        "A location filled (split) faster than this interval marks the partition hot, and " +
-        "the target parallelism is raised to ceil(current parallelism * interval / measured " +
-        "fill time) so that the per-location split interval converges to this value.")
+      .doc("The target minimum fill time of a single partition location, i.e. the time " +
+        "from its allocation to its split. A location splits once, so in steady state this " +
+        "is also the partition's split interval. A location filled (split) faster than this " +
+        "marks the partition hot, and the target parallelism is raised to ceil(current " +
+        "parallelism * interval / measured fill time) so that the per-location fill time " +
+        "converges to this value.")
       .version("0.7.0")
       .timeConf(TimeUnit.MILLISECONDS)
       .createWithDefaultString("60s")

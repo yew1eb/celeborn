@@ -10,7 +10,7 @@ Celeborn reduce partition 的写路径是**单活跃 location**:一个 partition
 - **SOFT→HARD 窗口塌缩**:N 个 mapper 并发写同一文件,涨速 = 聚合写速(×N);从 SOFT 阈值(默认 1G)到 HARD 上限(2G)的窗口 = 1G / 聚合写速。写得快则窗口只有亚秒级,revive + 路由切换来不及完成就升 HARD_SPLIT,写该 partition 的所有 map task 同步阻塞等新 location。
 - **单点写瓶颈**:push RTT 升至秒级,per-worker in-flight 饱和,mapper 线程被 push 队列反压顶住。在一个单 reduce partition、26090 mapper 的生产倾斜作业上实测:per-task shuffle writeTime p50 = 27.5s 而 task 总时长 p50 仅 30.6s——90% 的 task 时间在等写。
 
-本特性允许热点 partition **并行写多个活跃 location**:mapper 按 `mapId % activeCount` 散到各 location,由 LifecycleManager 根据实测写满速度自适应升档。N 个 location 并行写时单 location 涨速 ÷N:SOFT→HARD 窗口同比例拉宽、单 worker 写压 ÷N、某 location split 时其余仍可写,写路径不因切换停顿。生产效果见 Proposed Changes · 性能验证(生产个例):shuffle 写线程总耗时 431h → 4h12m,作业耗时 40m47s → 6m34s。
+本特性允许热点 partition **并行写多个活跃 location**:mapper 按 `mapId % activeCount` 散到各 location。并行度不需人工设定，而由唯一目标参数 **`minSplitInterval`**(单 location 写满 split 阈值的目标最短耗时，默认 60s)闭环推出:LifecycleManager 实测每个 location 从分配到 split 的写满耗时 fillTime,fillTime 快于该值即按 `desired = ceil(K × minSplitInterval / fillTime)` 升档——公式的不动点正是"单 location 写满耗时 = minSplitInterval"，并行度因此自动收敛到"刚好把单点写速摊薄到 threshold/minSplitInterval"的最小值：不热的 partition 永不升档，越倾斜的 partition 并行度越高。N 路并行时单 location 涨速 ÷N:SOFT→HARD 窗口同比例拉宽、单 worker 写压 ÷N、某 location split 时其余仍可写,写路径不因切换停顿。
 
 ## Public Interfaces
 
@@ -29,7 +29,7 @@ repeated PbPartitionLocation additionalPartitions = 5;
 |---|---|---|
 | `...adaptivePartitionWriteParallelism.enabled` | false | 总开关;关闭时所有路径与现状等价 |
 | `...adaptivePartitionWriteParallelism.maxLocations` | -1 | 活跃 location 上限 = min(配置值, 该 shuffle 的 mapper 数);-1 = 仅按 mapper 数(路由 mapId % K,超过 mapper 数必空转,天然上限) |
-| `...adaptivePartitionWriteParallelism.minSplitInterval` | 60s | 单 location 两次 split 的最小间隔:写满 threshold 快于该间隔即判热,升档目标 = ceil(K × 间隔 / 写满耗时),稳态下单 location 的 split 间隔收敛到该值。间隔越大并行度越高、单点写压越薄,代价是热点 partition 的并发文件与磁盘占用按 K 倍放大(见 性能验证(生产个例)) |
+| `...adaptivePartitionWriteParallelism.minSplitInterval` | 60s | 单 location 从分配到 split 的目标最短耗时(写满 threshold 的耗时下限;一个 location 只 split 一次,稳态下这也就是 partition 相邻两次 split 的间隔):实测写满快于该值即判热,升档目标 = ceil(K × 该值 / 实测写满耗时),稳态下单 location 的写满耗时收敛到该值。该值越大并行度越高、单点写压越薄,代价是热点 partition 的并发文件与磁盘占用按 K 倍放大(见 性能验证(生产个例)) |
 
 **观测点**(均一次性,无重复刷屏):LM 侧升档判定 / 补差分配 / 分配不足(INFO/WARN);executor 侧并行激活 / SOFT 首报退休(含换路去向)/ 全不可用触发阻塞 revive 及其成功后的新目标(INFO);per-batch 重推成功(DEBUG)。
 
@@ -154,7 +154,7 @@ allocTime 来源:新 epoch 由分配登记;epoch 0 用 registerShuffle 时刻(�
 | minSplitInterval=30s | 552.66 | 4h56m | 170.9h | 504.6 | 8m08s |
 | minSplitInterval=60s(默认) | 648.97 | 4h12m | 167.5h | 403.3 | 6m34s |
 
-**minSplitInterval 怎么起作用**:它定义稳态均衡点——升档公式的不动点是"单 location 两次 split 的间隔 = minSplitInterval",即单 location 写速均衡在 threshold/间隔,10s/30s/60s 分别对应约 100/34/17 MB/s。聚合速率固定,间隔越大 → 目标并行度越高,收益来自三处:(1) SOFT→HARD 安全窗 = 1G/单路速率,恰等于该间隔——60s 均衡下几乎总能在 SOFT 态平滑退休,零重推零阻塞;10s 均衡下重推频繁,而重推是重复写,这是 Shuffle 写线程总耗时阶梯(6h58m → 4h56m → 4h12m)的主因;(2) 写压分摊到 shuffle 既有 worker 集合内的更多 location,push RTT 与排队下降;(3) 热点判定要求 fillTime < minSplitInterval,间隔越小,写得稍慢的 partition 越不触发升档,且 fillTime ≥ 间隔后升档冻结——小间隔目标低、封顶早。代价:热点 partition 的并发 location 变多,槽位与磁盘占用按 K 倍放大(K × 2 × partitionSplitMaximumSize),分摊在 shuffle 既有 worker 集合内(补差分配不新增 worker),并由 `maxLocations`/mapper 数上限封顶。
+**minSplitInterval 怎么起作用**:它定义稳态均衡点——升档公式的不动点是"单 location 的写满耗时(从分配到 split) = minSplitInterval",即单 location 写速均衡在 threshold/该值,10s/30s/60s 分别对应约 100/34/17 MB/s。聚合速率固定,该值越大 → 目标并行度越高,收益来自三处:(1) SOFT→HARD 安全窗 = 1G/单路速率,恰等于该值——60s 均衡下几乎总能在 SOFT 态平滑退休,零重推零阻塞;10s 均衡下重推频繁,而重推是重复写,这是 Shuffle 写线程总耗时阶梯(6h58m → 4h56m → 4h12m)的主因;(2) 写压分摊到 shuffle 既有 worker 集合内的更多 location,push RTT 与排队下降;(3) 热点判定要求 fillTime < minSplitInterval,该值越小,写得稍慢的 partition 越不触发升档,且 fillTime ≥ 该值后升档冻结——小间隔目标低、封顶早。代价:热点 partition 的并发 location 变多,槽位与磁盘占用按 K 倍放大(K × 2 × partitionSplitMaximumSize),分摊在 shuffle 既有 worker 集合内(补差分配不新增 worker),并由 `maxLocations`/mapper 数上限封顶。
 
 (注:基线写吞吐 6.33 MB/s 反映的是严重反压下 mapper 大部分时间阻塞,而非磁盘上限;30s 组 vcore·h 略高于 10s 组为集群调度波动。)
 
