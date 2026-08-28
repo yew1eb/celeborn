@@ -908,16 +908,16 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
       serdeVersion: SerdeVersion): Unit = {
     val adaptivePartitionWriteParallelismEnabled =
       conf.clientShuffleAdaptivePartitionWriteParallelismEnabled
+    // Adaptive parallelism: one Revive message may carry several retire reports of the same
+    // partition (every retired epoch is forwarded, not only the latest one), so the response
+    // completes once every DISTINCT partition has been replied.
     val contextWrapper =
       ChangeLocationsCallContext(
         context,
-        if (!adaptivePartitionWriteParallelismEnabled) {
-          partitionIds.size()
-        } else {
-          // Adaptive parallelism: one Revive message may carry several retire reports of the
-          // same partition (every retired epoch is forwarded, not only the latest one), so the
-          // response completes once every DISTINCT partition has been replied.
+        if (adaptivePartitionWriteParallelismEnabled) {
           partitionIds.asScala.toSet.size
+        } else {
+          partitionIds.size()
         },
         serdeVersion)
     // If shuffle not registered, reply ShuffleNotRegistered and return
@@ -950,7 +950,16 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
       }
     }
 
-    if (!adaptivePartitionWriteParallelismEnabled) {
+    if (adaptivePartitionWriteParallelismEnabled) {
+      changePartitionManager.handleReviveRequests(
+        contextWrapper,
+        shuffleId,
+        partitionIds,
+        oldEpochs,
+        oldPartitions,
+        causes,
+        commitManager.isSegmentGranularityVisible(shuffleId))
+    } else {
       (0 until partitionIds.size()).foreach { idx =>
         changePartitionManager.handleRequestPartitionLocation(
           contextWrapper,
@@ -961,17 +970,7 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
           Some(causes.get(idx)),
           commitManager.isSegmentGranularityVisible(shuffleId))
       }
-      return
     }
-
-    changePartitionManager.handleReviveRequests(
-      contextWrapper,
-      shuffleId,
-      partitionIds,
-      oldEpochs,
-      oldPartitions,
-      causes,
-      commitManager.isSegmentGranularityVisible(shuffleId))
   }
 
   private def handleMapperEnd(
