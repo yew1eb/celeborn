@@ -63,6 +63,8 @@ LM (ChangePartitionManager → PartitionHotnessTracker):
     其余条目 = 纯退休上报,只做记账(commit 注册 + onEpochRetired)——
     批量 revive 可携带同 partition 的大量退休条目;逐条走完整路径时
     每条消息的处理量正比于条目数,分组后正比于 distinct partition 数
+  响应完成计数相应按 distinct partition 计:与分组分发必须同时生效,
+    否则含重复条目的消息响应永不完成(client 60s askTimeout)
   收到带 cause 的 revive → 活跃集维护:SOFT_SPLIT 且 worker 可用 → epoch 保留;
     其余(HARD_SPLIT / push 失败 / worker 不可用)→ epoch 移出活跃集(终态,迟到 SOFT 不复活)
   热点判定(cause ∈ {SOFT, HARD} 且 worker 可用):
