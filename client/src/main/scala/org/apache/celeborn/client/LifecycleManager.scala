@@ -153,18 +153,22 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
       shuffleId: Int,
       locations: util.List[PartitionLocation]): Unit = {
     val map = latestPartitionLocation.computeIfAbsent(shuffleId, newMapFunc)
-    // latest = the location with the max epoch; keep this semantic when one call carries
-    // multiple active locations of the same partition (adaptive parallelism).
-    locations.asScala.foreach(location =>
-      map.merge(
-        location.getId,
-        location,
-        new util.function.BiFunction[PartitionLocation, PartitionLocation, PartitionLocation] {
-          override def apply(
-              oldLoc: PartitionLocation,
-              newLoc: PartitionLocation): PartitionLocation =
-            if (newLoc.getEpoch >= oldLoc.getEpoch) newLoc else oldLoc
-        }))
+    if (!conf.clientShuffleAdaptivePartitionWriteParallelismEnabled) {
+      locations.asScala.foreach(location => map.put(location.getId, location))
+    } else {
+      // Adaptive parallelism: one call may carry multiple active locations of the same
+      // partition (gap allocation), so latest = the location with the max epoch.
+      locations.asScala.foreach(location =>
+        map.merge(
+          location.getId,
+          location,
+          new util.function.BiFunction[PartitionLocation, PartitionLocation, PartitionLocation] {
+            override def apply(
+                oldLoc: PartitionLocation,
+                newLoc: PartitionLocation): PartitionLocation =
+              if (newLoc.getEpoch >= oldLoc.getEpoch) newLoc else oldLoc
+          }))
+    }
     invalidateLatestMaxLocsCache(shuffleId)
   }
 
