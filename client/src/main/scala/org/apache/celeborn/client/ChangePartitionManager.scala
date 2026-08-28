@@ -175,13 +175,14 @@ class ChangePartitionManager(
   }
 
   /**
-   * Handle all entries of one Revive message. Adaptive parallelism lets a message carry many
-   * entries of the same partition (every locally retired epoch is forwarded as a retire report;
-   * a backed-up client can pile 1000+ reports of one hot partition into a single Revive). Only
-   * the max-epoch entry can require a new location, so it alone goes through the full request
-   * path — which also completes the message's response (counted by distinct partitions). The
-   * remaining entries are pure retire reports and get bookkeeping only, keeping the per-message
-   * cost proportional to the distinct partition count instead of the entry count.
+   * Handle all entries of one Revive message; called only when adaptive partition write
+   * parallelism is enabled. Adaptive parallelism lets a message carry many entries of the same
+   * partition (every locally retired epoch is forwarded as a retire report; a backed-up client
+   * can pile 1000+ reports of one hot partition into a single Revive). Only the max-epoch entry
+   * can require a new location, so it alone goes through the full request path — which also
+   * completes the message's response (counted by distinct partitions). The remaining entries
+   * are pure retire reports and get bookkeeping only, keeping the per-message cost proportional
+   * to the distinct partition count instead of the entry count.
    */
   def handleReviveRequests(
       context: RequestLocationCallContext,
