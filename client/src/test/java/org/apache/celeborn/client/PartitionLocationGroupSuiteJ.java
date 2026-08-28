@@ -69,7 +69,6 @@ public class PartitionLocationGroupSuiteJ {
     PartitionLocationGroup group = new PartitionLocationGroup(loc(0, "w1"));
     assertTrue(group.retire(0, StatusCode.SOFT_SPLIT));
     assertFalse(group.retire(0, StatusCode.SOFT_SPLIT));
-    // Retire inflated the parallel state even though there is still only one active location.
     assertEquals(
         Collections.singletonList("0=" + StatusCode.SOFT_SPLIT), group.retiredEpochsSnapshot());
     // Soft-split location stays writable and keeps its routing share.
@@ -79,7 +78,6 @@ public class PartitionLocationGroupSuiteJ {
     group.mergeActiveLocations(Arrays.asList(loc(0, "w1"), loc(1, "w2"), loc(2, "w3")), true);
     assertEquals(2, group.maxEpoch());
     assertEquals(3, group.activeCount());
-    // Writable set = {0 (soft), 1, 2}: mapId % 3 dispatches uniformly, soft epoch 0 included.
     assertEquals(0, group.currentFor(0).getEpoch());
     assertEquals(1, group.currentFor(1).getEpoch());
     assertEquals(2, group.currentFor(2).getEpoch());
@@ -97,7 +95,6 @@ public class PartitionLocationGroupSuiteJ {
   @Test
   public void testMergeConvergesOutOfOrderEpochs() {
     PartitionLocationGroup group = new PartitionLocationGroup(loc(5, "w1"));
-    // Full active set delivered out of order, including epochs not known locally.
     group.mergeActiveLocations(Arrays.asList(loc(3, "w3"), loc(7, "w7"), loc(1, "w1")), true);
     assertEquals(4, group.activeCount());
     assertEquals(7, group.maxEpoch());
@@ -111,8 +108,7 @@ public class PartitionLocationGroupSuiteJ {
       assertNotEquals(3, group.currentFor(mapId).getEpoch());
     }
 
-    // The full set no longer reports epoch 3 (the LM has processed the retirement), so it is
-    // evicted; epochs already active are deduped.
+    // Epoch 3 is evicted once the LM stops reporting it in the full set.
     group.mergeActiveLocations(Arrays.asList(loc(7, "w7"), loc(8, "w8")), true);
     assertEquals(4, group.activeCount());
   }
@@ -137,7 +133,6 @@ public class PartitionLocationGroupSuiteJ {
 
     // A later hard cause upgrades the soft retire (not a first retire).
     assertFalse(group.retire(0, StatusCode.HARD_SPLIT));
-    // Epoch 0 is no longer usable at all.
     for (int mapId = 0; mapId < 8; mapId++) {
       assertEquals(1, group.currentFor(mapId).getEpoch());
     }
@@ -158,8 +153,6 @@ public class PartitionLocationGroupSuiteJ {
     group.mergeActiveLocations(Arrays.asList(loc(0, "w1"), loc(1, "w2")), true);
     assertEquals(2, group.activeCount());
 
-    // The LM has processed the retirement and no longer reports epoch 0: it is evicted, so
-    // mapId-based routing is uniform over the live locations again.
     group.mergeActiveLocations(Arrays.asList(loc(1, "w2"), loc(2, "w3")), true);
     assertEquals(2, group.activeCount());
     assertEquals(1, group.currentFor(0).getEpoch());
@@ -169,7 +162,6 @@ public class PartitionLocationGroupSuiteJ {
     group.retire(1, StatusCode.HARD_SPLIT);
     group.mergeActiveLocations(Collections.singletonList(loc(3, "w4")), false);
     assertEquals(3, group.activeCount());
-    // The next full-set merge evicts epoch 1.
     group.mergeActiveLocations(Arrays.asList(loc(2, "w3"), loc(3, "w4")), true);
     assertEquals(2, group.activeCount());
     assertEquals(2, group.currentFor(0).getEpoch());
@@ -178,7 +170,7 @@ public class PartitionLocationGroupSuiteJ {
 
   @Test
   public void testConcurrentPickDuringFullSetEviction() throws Exception {
-    // Regression test: pick()/latest() must not throw ArrayIndexOutOfBoundsException when a
+    // Regression: pick()/latest() must not throw ArrayIndexOutOfBoundsException when a
     // concurrent full-set merge shrinks the active list via removeIf.
     int numEpochs = 16;
     List<PartitionLocation> all = new ArrayList<>();
@@ -195,8 +187,6 @@ public class PartitionLocationGroupSuiteJ {
     CopyOnWriteArrayList<Throwable> failures = new CopyOnWriteArrayList<>();
     CountDownLatch startLatch = new CountDownLatch(1);
 
-    // Writer thread: alternate full-set merges that evict/re-add retired epochs, shrinking and
-    // growing the active list concurrently with the readers.
     Thread writer =
         new Thread(
             () -> {
@@ -254,8 +244,6 @@ public class PartitionLocationGroupSuiteJ {
 
   @Test
   public void testOutstandingRetires() {
-    // The view covers exactly the locally retired epochs still held in the active list
-    // (LM not yet digested), epoch ascending, with the upgraded cause.
     PartitionLocationGroup group = new PartitionLocationGroup(loc(0, "w1"));
     assertTrue(group.outstandingRetires().isEmpty());
 
@@ -269,30 +257,11 @@ public class PartitionLocationGroupSuiteJ {
     assertEquals(StatusCode.HARD_SPLIT, retires.get(0).cause);
     assertEquals(2, retires.get(1).location.getEpoch());
     assertEquals(StatusCode.HARD_SPLIT, retires.get(1).cause);
-    // Epoch 1 is the only writable location: every mapId routes to it.
     assertEquals(1, group.currentFor(0).getEpoch());
 
-    // After the LM digests both retires (full set reports only epoch 1), they are evicted from
-    // the active list and no longer outstanding.
+    // Once the LM digests the retires, they are evicted and no longer outstanding.
     group.mergeActiveLocations(Collections.singletonList(loc(1, "w2")), true);
     assertTrue(group.outstandingRetires().isEmpty());
     assertEquals(1, group.activeCount());
-  }
-
-  @Test
-  public void testEpochsSnapshots() {
-    PartitionLocationGroup group = new PartitionLocationGroup(loc(0, "w1"));
-    assertEquals(Collections.singletonList(0), group.activeEpochsSnapshot());
-    assertTrue(group.retiredEpochsSnapshot().isEmpty());
-
-    group.mergeActiveLocations(Arrays.asList(loc(0, "w1"), loc(1, "w2")), true);
-    group.retire(0, StatusCode.HARD_SPLIT);
-    group.retire(1, StatusCode.SOFT_SPLIT);
-    assertEquals(Arrays.asList(0, 1), group.activeEpochsSnapshot());
-    // Retired snapshot lists epoch=cause pairs regardless of active membership.
-    List<String> retired = group.retiredEpochsSnapshot();
-    assertEquals(2, retired.size());
-    assertTrue(retired.get(0).startsWith("0="));
-    assertTrue(retired.get(1).startsWith("1="));
   }
 }

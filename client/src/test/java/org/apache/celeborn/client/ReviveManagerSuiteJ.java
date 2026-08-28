@@ -109,9 +109,8 @@ public class ReviveManagerSuiteJ {
 
   @Test
   public void testReviveUntilWritableSatisfiedByBatchRevive() throws Exception {
-    // Both active locations hard-retired: nothing writable for any mapId. The blocking revive
-    // enqueues; the batch scheduler sends (with the retire reports attached) and the reply
-    // brings a new writable location.
+    // Both active locations hard-retired: the blocking revive enqueues and the batch
+    // scheduler sends, its reply bringing a new writable location.
     PartitionLocationGroup group = new PartitionLocationGroup(loc(0, "w1"));
     group.mergeActiveLocations(Arrays.asList(loc(0, "w1"), loc(1, "w2")), true);
     group.retire(0, StatusCode.HARD_SPLIT);
@@ -137,7 +136,6 @@ public class ReviveManagerSuiteJ {
           revived,
           manager.reviveUntilWritable(SHUFFLE_ID, MAP_ID, ATTEMPT_ID, PARTITION_ID, MAX_ATTEMPTS));
       assertTrue(sent.await(10, TimeUnit.SECONDS));
-      // The send carried the max-epoch primary request plus the outstanding retire report.
       Set<Integer> epochs =
           sentRequests.get().stream().map(r -> r.epoch).collect(Collectors.toSet());
       assertEquals(new HashSet<>(Arrays.asList(0, 1)), epochs);
@@ -151,8 +149,7 @@ public class ReviveManagerSuiteJ {
     PartitionLocationGroup group = new PartitionLocationGroup(loc(0, "w1"));
     group.retire(0, StatusCode.HARD_SPLIT);
     ShuffleClientImpl client = spyClient(group);
-    // SUCCESS replies whose locations are all retired locally: retry until the attempt budget
-    // is exhausted, then give up instead of failing immediately.
+    // SUCCESS replies whose locations are all retired locally: retry until the budget is out.
     doAnswer(invocation -> new java.util.HashMap<>(SUCCESS))
         .when(client)
         .reviveBatch(anyInt(), any(), any());
@@ -239,9 +236,7 @@ public class ReviveManagerSuiteJ {
       }
       new Thread(tasks.get(0)).start();
       new Thread(tasks.get(1)).start();
-      // Wait until the batch RPC is in flight, then release it. Both waiters either had their
-      // requests deduped into this one batch, or wake on the writability merge itself — either
-      // way no second RPC is sent.
+      // Both waiters dedupe into the in-flight batch or wake on the merge: no second RPC.
       assertTrue(rpcEntered.await(10, TimeUnit.SECONDS));
       rpcRelease.countDown();
 
@@ -256,9 +251,8 @@ public class ReviveManagerSuiteJ {
 
   @Test
   public void testReviveUntilWritableWakesOnForeignMerge() throws Exception {
-    // The batch RPC is stuck (LM unresponsive), but another thread's revive response merges a
-    // writable location into the group: the wait must wake on writability alone, not on its own
-    // request's status.
+    // A foreign merge of a writable location must wake the wait even while the own batch
+    // RPC is stuck (LM unresponsive).
     PartitionLocationGroup group = new PartitionLocationGroup(loc(0, "w1"));
     group.retire(0, StatusCode.HARD_SPLIT);
     ShuffleClientImpl client = spyClient(group);
@@ -282,7 +276,6 @@ public class ReviveManagerSuiteJ {
                   manager.reviveUntilWritable(
                       SHUFFLE_ID, MAP_ID, ATTEMPT_ID, PARTITION_ID, MAX_ATTEMPTS));
       new Thread(task).start();
-      // The request was sent and the RPC is still blocked.
       assertTrue(rpcEntered.await(10, TimeUnit.SECONDS));
       PartitionLocation revived = loc(1, "w2");
       group.mergeActiveLocations(Collections.singletonList(revived), false);
@@ -296,9 +289,8 @@ public class ReviveManagerSuiteJ {
 
   @Test
   public void testBatchRetireReportsRebuiltFromOutstandingRetires() throws Exception {
-    // Group: epochs 0 and 1 hard-retired, epoch 2 writable — every queued request below is
-    // locally satisfied, so the batch should carry retire reports only, rebuilt from the
-    // group's outstanding set: deduped, and free of stale epochs the group no longer holds.
+    // Every queued request below is locally satisfied, so the batch carries retire reports
+    // only, rebuilt from the group's outstanding set.
     PartitionLocationGroup group = new PartitionLocationGroup(loc(0, "w1"));
     group.mergeActiveLocations(Arrays.asList(loc(0, "w1"), loc(1, "w2"), loc(2, "w3")), true);
     group.retire(0, StatusCode.HARD_SPLIT);
@@ -318,8 +310,8 @@ public class ReviveManagerSuiteJ {
 
     ReviveManager manager = newManager(client);
     try {
-      // Duplicate reports of epoch 0 from three mappers, one report of epoch 1, and one report
-      // of epoch 99 which the group has never seen (digested and evicted long ago).
+      // Duplicate epoch-0 reports from three mappers, one epoch-1 report, and one report of
+      // epoch 99 which the group has never seen (digested and evicted long ago).
       for (int mapId : Arrays.asList(1, 2, 3)) {
         manager.addRequest(
             new ReviveRequest(
@@ -335,7 +327,6 @@ public class ReviveManagerSuiteJ {
       assertTrue(sent.await(10, TimeUnit.SECONDS));
       Set<Integer> epochs =
           sentRequests.get().stream().map(r -> r.epoch).collect(Collectors.toSet());
-      // Exactly the outstanding set {0, 1}: queue duplicates deduped, stale epoch 99 dropped.
       assertEquals(new HashSet<>(Arrays.asList(0, 1)), epochs);
       for (ReviveRequest req : sentRequests.get()) {
         assertEquals(StatusCode.HARD_SPLIT, req.cause);

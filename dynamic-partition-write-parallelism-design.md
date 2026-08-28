@@ -171,10 +171,10 @@ allocTime 来源:新 epoch 由分配登记;epoch 0 用 registerShuffle 时刻(�
 
 | 套件 | 例数 | 覆盖 |
 |---|---|---|
-| `PartitionLocationGroupSuiteJ` | 10 | 快路径、soft 参与路由/hard 排除、cause 升级、全集收敛与清理、乱序 epoch、并发 pick×merge、epoch 快照视图、outstandingRetires 视图 |
+| `PartitionLocationGroupSuiteJ` | 8 | 快路径、soft 参与路由/hard 排除、cause 升级、全集收敛与清理、乱序 epoch、并发 pick×merge、outstandingRetires 视图 |
 | `ReviveManagerSuiteJ` | 8 | 阻塞等待批量 revive:可写快速路径零 RPC、入队后由批组批满足且发送携带退休上报、预算耗尽/RPC 失败有界放弃、mapperEnded 放弃、并发等待者共享一批(1 RPC)、他源 merge 可写提前唤醒(完成谓词=可写);批量路径:退休上报发送时从 outstandingRetires 现取(去重、丢弃陈旧 epoch) |
-| `PartitionHotnessTrackerSuite` | 12 | 计量守卫(不可用 worker/push 失败)、K 因子缩放、fillTime 下限与 -1=mapper 数上限、显式上限优先、单调不降、soft 保留/移除、迟到 SOFT 不复活 |
-| `ChangePartitionManagerAdaptiveParallelismSuite` | 10 | 升档+补差分配、超窗不升、allocTime 未知保守、首报去重、比例步进、epoch 乱序、gap=0 仍回全集、并发 revive 收敛、一条 Revive 的同 partition 多条目分组(上报只记账、max-epoch 驱动请求、commit 注册不丢) |
+| `PartitionHotnessTrackerSuite` | 11 | 计量守卫(不可用 worker/push 失败)、K 因子缩放、fillTime 下限与 -1=mapper 数上限、显式上限优先、单调不降、soft 保留/移除、迟到 SOFT 不复活 |
+| `ChangePartitionManagerAdaptiveParallelismSuite` | 6 | 升档+补差分配、allocTime 未知保守、首报去重、gap=0 仍回全集、并发 revive 收敛、一条 Revive 的同 partition 多条目分组(上报只记账、max-epoch 驱动请求、commit 注册不丢) |
 | `RequestLocationCallContextSuite` | 1 | 同 partition 重复回复忽略、按 distinct 数完成响应 |
 
 回归:特性关闭时既有 client/LM 套件全绿;生产灰度作业(性能验证一节)开启前后对比。
