@@ -217,9 +217,10 @@ class ChangePartitionManager(
   }
 
   /**
-   * Bookkeeping every incoming revive entry needs: commit-time registration of hard-split
-   * locations, and (adaptive parallelism) active-set/hotness maintenance. A pure retire report
-   * needs nothing beyond this.
+   * Bookkeeping every revive entry of an adaptive-parallelism Revive message needs (called only
+   * when adaptive partition write parallelism is enabled): commit-time registration of the
+   * retired location, and active-set/hotness maintenance. A pure retire report needs nothing
+   * beyond this.
    */
   private def noteReviveEntry(
       shuffleId: Int,
@@ -236,7 +237,7 @@ class ChangePartitionManager(
     // epochs of available workers stay writable and are retained; hard/failed ones are removed)
     // and, when the retire is measure-eligible, judge whether the partition is hot and needs
     // more locations.
-    if (adaptivePartitionWriteParallelismEnabled && oldEpoch >= 0) {
+    if (oldEpoch >= 0) {
       hotnessTracker.onEpochRetired(shuffleId, partitionId, oldEpoch, oldPartition, cause, nowMs())
     }
   }
@@ -261,7 +262,14 @@ class ChangePartitionManager(
     val requests = changePartitionRequests.computeIfAbsent(shuffleId, rpcContextRegisterFunc)
     inBatchPartitions.computeIfAbsent(shuffleId, inBatchShuffleIdRegisterFunc)
 
-    noteReviveEntry(shuffleId, partitionId, oldEpoch, oldPartition, cause)
+    if (!adaptivePartitionWriteParallelismEnabled) {
+      lifecycleManager.commitManager.registerCommitPartitionRequest(
+        shuffleId,
+        oldPartition,
+        cause)
+    } else {
+      noteReviveEntry(shuffleId, partitionId, oldEpoch, oldPartition, cause)
+    }
 
     val locksForShuffle = locks.computeIfAbsent(shuffleId, locksRegisterFunc)
     locksForShuffle(partitionId % locksForShuffle.length).synchronized {
