@@ -196,6 +196,6 @@ allocTime 来源:新 epoch 由分配登记;epoch 0 用 registerShuffle 时刻(�
 ## Future Work
 
 - worker/client 侧速率统计作为**信号源替换**(检测延迟降到 10~20s,与 split 阈值解耦;成本收益账见 Rejected Alternatives,fillTime→目标换算、全集收敛、活跃集记账全部复用);
-- 重推换路零延迟:HARD_SPLIT/失败时若另有可写 location,预置 `reviveStatus=SUCCESS` 让重推线程立即换路,省一个 revive tick(≤100ms/批,push 为异步模型,mapper 写线程不受影响——初版省略以缩小补丁面);
+- 重推换路零延迟:HARD_SPLIT/失败时若另有可写 location,预置 `reviveStatus=SUCCESS` 让重推线程立即换路,省一个 revive tick(≤100ms/批,push 为异步模型,mapper 写线程不受影响——初版省略以缩小补丁面,生产灰度对照实测移除前后性能无差异);
 - 并行度降档与热点消散回收;
 - worker 过载主动上报(SOFT_SPLIT_OVERLOAD)。
