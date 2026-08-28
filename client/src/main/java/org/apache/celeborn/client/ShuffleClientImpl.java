@@ -363,9 +363,12 @@ public class ShuffleClientImpl extends ShuffleClient {
       PartitionLocation newLoc = newLocGroup == null ? null : newLocGroup.currentFor(mapId);
       if (newLoc == null && newLocGroup != null && adaptivePartitionWriteParallelismEnabled) {
         // Revive reported SUCCESS but every known location is locally retired — the LM's active
-        // set is stale (its digest of the retire reports lags). Blocking revive with all
-        // outstanding retire reports attached instead of failing the task.
-        newLoc = reviveManager.reviveUntilWritable(shuffleId, mapId, attemptId, partitionId);
+        // set is stale (its digest of the retire reports lags). Blocking revive on the batched
+        // channel (retire reports attached at send time) with the remaining budget, instead of
+        // failing the task.
+        newLoc =
+            reviveManager.reviveUntilWritable(
+                shuffleId, mapId, attemptId, partitionId, remainReviveTimes);
       }
       if (newLoc == null) {
         pushDataRpcResponseCallback.onFailure(
@@ -1288,18 +1291,20 @@ public class ShuffleClientImpl extends ShuffleClient {
     PartitionLocationGroup group = map.get(partitionId);
     PartitionLocation currentLoc = group == null ? null : group.currentFor(mapId);
     if (currentLoc == null && group != null && adaptivePartitionWriteParallelismEnabled) {
-      // All known locations are locally retired. Blocking revive (single-flight per partition,
-      // carrying every outstanding retire report): the LM digests the reports, replenishes the
-      // whole active set in one round and replies it, so the re-read normally finds a writable
-      // location. A single request without the reports would leave the LM's gap-based
-      // allocation at gap == 0 and re-reply already-retired epochs.
+      // All known locations are locally retired. Blocking revive on the standard batched channel:
+      // the batch scheduler attaches every outstanding retire report at send time, so the LM
+      // digests them, replenishes the whole active set in one round and replies it. A request
+      // without the reports would leave the LM's gap-based allocation at gap == 0 and re-reply
+      // already-retired epochs.
       logger.info(
           "Shuffle {} partition {}: all {} location(s) unusable from epoch {}, blocking revive.",
           shuffleId,
           partitionId,
           group.activeCount(),
           group.maxEpoch());
-      currentLoc = reviveManager.reviveUntilWritable(shuffleId, mapId, attemptId, partitionId);
+      currentLoc =
+          reviveManager.reviveUntilWritable(
+              shuffleId, mapId, attemptId, partitionId, maxReviveTimes);
       if (currentLoc != null) {
         logger.info(
             "Shuffle {} partition {}: blocking revive succeeded, writing to epoch {}@{}.",
