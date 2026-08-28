@@ -173,8 +173,10 @@ private[client] class PartitionHotnessTracker(
   /**
    * Record when the initial (epoch 0) locations of a shuffle were allocated at
    * registerShuffle, so the fill time of epoch 0 can be measured, and compute the shuffle's
-   * parallelism cap from its (fixed) number of mappers. A repeated registration does not
-   * overwrite.
+   * parallelism cap from its (fixed) number of mappers. The registerShuffle RPC is sent lazily
+   * by the executor's first pushing mapper, so this timestamp is the write start of the
+   * shuffle — the same semantics as the slot-reservation time recorded for later epochs. A
+   * repeated registration does not overwrite (the earliest writer wins).
    */
   private[client] def recordInitialAllocTime(
       shuffleId: Int,

@@ -131,7 +131,7 @@ per (shuffleId, partitionId) 的稀疏 HotState:`activeEpochs`(可写 epoch,soft
 - 计量(SOFT/HARD 且 worker 可用):`fillTime = max(1ms, now − allocTime)`,若 < minSplitInterval 则 `desired = min(cap, ceil(K × minSplitInterval / fillTime))`,K = 报告时活跃数(soft 保留的已计入,被移除的补回 1);
 - push 失败类 cause 原则性不计量(与热度无关)。
 
-allocTime 来源:新 epoch 由分配登记;epoch 0 用 registerShuffle 时刻(偏保守,方向安全);未知的保守不升档。
+allocTime 来源:新 epoch 由分配登记;epoch 0 用 registerShuffle 时刻——该 RPC 由 executor 首个 mapper 第一次 push 时懒触发(见 `ShuffleClientImpl.getPartitionLocationMap`),即写开始时刻,与后续 epoch 的槽位预留时刻语义一致;未知的保守不升档。
 
 #### 分配与回复(`ChangePartitionManager`)
 
