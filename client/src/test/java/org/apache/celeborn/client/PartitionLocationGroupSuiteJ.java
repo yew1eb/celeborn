@@ -55,8 +55,6 @@ public class PartitionLocationGroupSuiteJ {
     assertSame(loc, group.latest());
     assertEquals(0, group.maxEpoch());
     assertTrue(group.currentFor(0) != null);
-    assertSame(loc, group.anotherUsableFor(0, 3));
-    assertNull(group.anotherUsableFor(0, 0));
 
     // Single-location revive update keeps thin-wrapper mode.
     PartitionLocation loc1 = loc(1, "w2");
@@ -127,23 +125,6 @@ public class PartitionLocationGroupSuiteJ {
     assertTrue(group.currentFor(0) != null);
     group.retire(1, StatusCode.HARD_SPLIT);
     assertNull(group.currentFor(0));
-    assertNull(group.anotherUsableFor(0, 1));
-  }
-
-  @Test
-  public void testAnotherUsableFor() {
-    PartitionLocationGroup group = new PartitionLocationGroup(loc(0, "w1"));
-    group.mergeActiveLocations(Arrays.asList(loc(0, "w1"), loc(1, "w2")), true);
-    assertEquals(1, group.anotherUsableFor(0, 0).getEpoch());
-    assertEquals(0, group.anotherUsableFor(0, 1).getEpoch());
-    // No other usable location when the other one is hard-retired.
-    group.retire(1, StatusCode.HARD_SPLIT);
-    assertNull(group.anotherUsableFor(0, 0));
-    // Soft-retired other location is still usable for re-push.
-    PartitionLocationGroup group2 = new PartitionLocationGroup(loc(0, "w1"));
-    group2.mergeActiveLocations(Arrays.asList(loc(0, "w1"), loc(1, "w2")), true);
-    group2.retire(1, StatusCode.SOFT_SPLIT);
-    assertEquals(1, group2.anotherUsableFor(0, 0).getEpoch());
   }
 
   @Test
@@ -151,13 +132,12 @@ public class PartitionLocationGroupSuiteJ {
     PartitionLocationGroup group = new PartitionLocationGroup(loc(0, "w1"));
     group.mergeActiveLocations(Arrays.asList(loc(0, "w1"), loc(1, "w2")), true);
     assertTrue(group.retire(0, StatusCode.SOFT_SPLIT));
-    // Soft-retired location remains a usable fallback for re-push.
-    assertEquals(0, group.anotherUsableFor(0, 1).getEpoch());
+    // Soft-retired location stays writable and keeps its routing share.
+    assertEquals(0, group.currentFor(0).getEpoch());
 
     // A later hard cause upgrades the soft retire (not a first retire).
     assertFalse(group.retire(0, StatusCode.HARD_SPLIT));
     // Epoch 0 is no longer usable at all.
-    assertNull(group.anotherUsableFor(0, 1));
     for (int mapId = 0; mapId < 8; mapId++) {
       assertEquals(1, group.currentFor(mapId).getEpoch());
     }
@@ -248,7 +228,6 @@ public class PartitionLocationGroupSuiteJ {
                   while (!stop.get()) {
                     group.currentFor(mapIdBase + i);
                     group.latest();
-                    group.anotherUsableFor(mapIdBase + i, 0);
                     i++;
                   }
                 } catch (Throwable t) {

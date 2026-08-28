@@ -457,62 +457,37 @@ public class ShuffleClientImpl extends ShuffleClient {
   }
 
   /**
-   * For adaptive parallel write: retire the failed epochs locally, and for partitions that still
-   * have another active location, preset the revive request status to SUCCESS so that the retry
-   * thread re-pushes to the other active location immediately instead of waiting for revive.
+   * For adaptive parallel write: retire the failed epochs locally so that routing skips them
+   * immediately. The revive requests are satisfied by the batched revive scheduler — locally at its
+   * next tick when the partition still has a writable location, otherwise by the LifecycleManager
+   * response.
    */
-  private void presetSuccessIfAnotherUsable(
-      int shuffleId, int mapId, ReviveRequest[] requests, StatusCode cause) {
+  private void retireLocallyIfAdaptive(int shuffleId, ReviveRequest[] requests, StatusCode cause) {
     if (!adaptivePartitionWriteParallelismEnabled) {
       return;
     }
     for (ReviveRequest request : requests) {
       PartitionLocationGroup group = locationGroup(shuffleId, request.partitionId);
       if (group != null) {
-        retireAndPresetIfAnotherUsable(shuffleId, mapId, group, request.epoch, cause, request);
+        retireEpoch(group, shuffleId, request.partitionId, request.epoch, cause);
       }
     }
   }
 
-  /**
-   * Retire the epoch in the location group and, when the partition still has another active
-   * location for this map, preset the revive request status to SUCCESS so that the retry thread
-   * re-pushes to the other active location immediately instead of waiting for revive.
-   */
-  private void retireAndPresetIfAnotherUsable(
-      int shuffleId,
-      int mapId,
-      PartitionLocationGroup group,
-      int epoch,
-      StatusCode cause,
-      ReviveRequest request) {
-    boolean firstRetire = group.retire(epoch, cause);
-    PartitionLocation fallback = group.anotherUsableFor(mapId, epoch);
-    if (fallback != null) {
-      // Another active location is available: re-push to it immediately without waiting for
-      // the revive response. The retry thread reads the preset SUCCESS and picks the other
-      // active location.
-      request.reviveStatus = StatusCode.SUCCESS.getValue();
-    }
+  /** Retire the epoch in the location group, logging only the first retire of the epoch. */
+  private void retireEpoch(
+      PartitionLocationGroup group, int shuffleId, int partitionId, int epoch, StatusCode cause) {
     // Log only on the first retire of the epoch: every batch that gets the split response
     // lands here, so logging unconditionally floods the executor log.
-    if (firstRetire) {
+    if (group.retire(epoch, cause)) {
       logger.info(
-          "Shuffle {} partition {}: epoch {} retired ({}), {}.",
-          shuffleId,
-          request.partitionId,
-          epoch,
-          cause,
-          fallback != null
-              ? "re-push to epoch " + fallback.getEpoch() + "@" + fallback.hostAndPushPort()
-              : "waiting for revive");
+          "Shuffle {} partition {}: epoch {} retired ({}).", shuffleId, partitionId, epoch, cause);
     }
   }
 
   /**
-   * Submit a revive request and, for adaptive parallel write, retire the failed epoch locally and
-   * preset the request status to SUCCESS when another active location is usable for immediate
-   * re-push. Returns the submitted request.
+   * Submit a revive request and, for adaptive parallel write, retire the failed epoch locally so
+   * that routing skips it immediately. Returns the submitted request.
    */
   private ReviveRequest submitReviveAndRetire(
       int shuffleId,
@@ -528,7 +503,7 @@ public class ShuffleClientImpl extends ShuffleClient {
     if (adaptivePartitionWriteParallelismEnabled) {
       PartitionLocationGroup g = locationGroup(shuffleId, partitionId);
       if (g != null) {
-        retireAndPresetIfAnotherUsable(shuffleId, mapId, g, latest.getEpoch(), cause, req);
+        retireEpoch(g, shuffleId, partitionId, latest.getEpoch(), cause);
       }
     }
     return req;
@@ -1887,7 +1862,7 @@ public class ShuffleClientImpl extends ShuffleClient {
                 ReviveRequest[] requests =
                     addAndGetReviveRequests(
                         shuffleId, mapId, attemptId, batchesNeedResubmit, StatusCode.HARD_SPLIT);
-                presetSuccessIfAnotherUsable(shuffleId, mapId, requests, StatusCode.HARD_SPLIT);
+                retireLocallyIfAdaptive(shuffleId, requests, StatusCode.HARD_SPLIT);
                 pushDataRetryPool.submit(
                     () ->
                         submitRetryPushMergedData(
@@ -1976,7 +1951,7 @@ public class ShuffleClientImpl extends ShuffleClient {
             if (!mapperEnded(shuffleId, mapId)) {
               ReviveRequest[] requests =
                   addAndGetReviveRequests(shuffleId, mapId, attemptId, batches, cause);
-              presetSuccessIfAnotherUsable(shuffleId, mapId, requests, cause);
+              retireLocallyIfAdaptive(shuffleId, requests, cause);
               pushDataRetryPool.submit(
                   () ->
                       submitRetryPushMergedData(

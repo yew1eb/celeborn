@@ -117,15 +117,6 @@ public class PartitionLocationGroup {
   }
 
   /**
-   * Pick a usable location other than {@code excludeEpoch} for {@code mapId}, used to re-push
-   * batches without waiting for revive when the partition has more than one usable location.
-   * Returns null if there is no other usable location.
-   */
-  public PartitionLocation anotherUsableFor(int mapId, int excludeEpoch) {
-    return pick(mapId, excludeEpoch);
-  }
-
-  /**
    * A retired epoch still present in the active list, i.e. not yet confirmed digested by the
    * LifecycleManager. Carried by the synchronous revive so the LM's gap-based allocation sees the
    * real active-set size (see ReviveManager#reviveUntilWritable).
