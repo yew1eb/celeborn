@@ -18,17 +18,11 @@
 package org.apache.celeborn.client;
 
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.doReturn;
-import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -39,9 +33,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
@@ -57,9 +49,6 @@ public class ReviveManagerSuiteJ {
 
   private static final int SHUFFLE_ID = 0;
   private static final int PARTITION_ID = 0;
-  private static final int MAP_ID = 7;
-  private static final int ATTEMPT_ID = 0;
-  private static final int MAX_ATTEMPTS = 2;
   private static final Map<Integer, Integer> SUCCESS =
       Collections.singletonMap(PARTITION_ID, (int) StatusCode.SUCCESS.getValue());
 
@@ -89,202 +78,6 @@ public class ReviveManagerSuiteJ {
     conf.set(
         CelebornConf.CLIENT_SHUFFLE_ADAPTIVE_PARTITION_WRITE_PARALLELISM_ENABLED().key(), "true");
     return new ReviveManager(client, conf);
-  }
-
-  @Test
-  public void testReviveUntilWritableFastPathSkipsQueue() {
-    PartitionLocation writable = loc(0, "w1");
-    ShuffleClientImpl client = spyClient(new PartitionLocationGroup(writable));
-    ReviveManager manager = newManager(client);
-    try {
-      assertSame(
-          writable,
-          manager.reviveUntilWritable(SHUFFLE_ID, MAP_ID, ATTEMPT_ID, PARTITION_ID, MAX_ATTEMPTS));
-      assertTrue(manager.requestQueue.isEmpty());
-      verify(client, never()).reviveBatch(anyInt(), any(), any());
-    } finally {
-      manager.close();
-    }
-  }
-
-  @Test
-  public void testReviveUntilWritableSatisfiedByBatchRevive() throws Exception {
-    // Both active locations hard-retired: the blocking revive enqueues and the batch
-    // scheduler sends, its reply bringing a new writable location.
-    PartitionLocationGroup group = new PartitionLocationGroup(loc(0, "w1"));
-    group.mergeActiveLocations(Arrays.asList(loc(0, "w1"), loc(1, "w2")), true);
-    group.retire(0, StatusCode.HARD_SPLIT);
-    group.retire(1, StatusCode.HARD_SPLIT);
-    ShuffleClientImpl client = spyClient(group);
-
-    CountDownLatch sent = new CountDownLatch(1);
-    AtomicReference<List<ReviveRequest>> sentRequests = new AtomicReference<>();
-    PartitionLocation revived = loc(2, "w3");
-    doAnswer(
-            invocation -> {
-              sentRequests.set(new ArrayList<>(invocation.getArgument(2)));
-              group.mergeActiveLocations(Collections.singletonList(revived), false);
-              sent.countDown();
-              return new java.util.HashMap<>(SUCCESS);
-            })
-        .when(client)
-        .reviveBatch(anyInt(), any(), any());
-
-    ReviveManager manager = newManager(client);
-    try {
-      assertSame(
-          revived,
-          manager.reviveUntilWritable(SHUFFLE_ID, MAP_ID, ATTEMPT_ID, PARTITION_ID, MAX_ATTEMPTS));
-      assertTrue(sent.await(10, TimeUnit.SECONDS));
-      Set<Integer> epochs =
-          sentRequests.get().stream().map(r -> r.epoch).collect(Collectors.toSet());
-      assertEquals(new HashSet<>(Arrays.asList(0, 1)), epochs);
-    } finally {
-      manager.close();
-    }
-  }
-
-  @Test
-  public void testReviveUntilWritableAttemptsExhausted() {
-    PartitionLocationGroup group = new PartitionLocationGroup(loc(0, "w1"));
-    group.retire(0, StatusCode.HARD_SPLIT);
-    ShuffleClientImpl client = spyClient(group);
-    // SUCCESS replies whose locations are all retired locally: retry until the budget is out.
-    doAnswer(invocation -> new java.util.HashMap<>(SUCCESS))
-        .when(client)
-        .reviveBatch(anyInt(), any(), any());
-
-    ReviveManager manager = newManager(client);
-    try {
-      assertNull(
-          manager.reviveUntilWritable(SHUFFLE_ID, MAP_ID, ATTEMPT_ID, PARTITION_ID, MAX_ATTEMPTS));
-      verify(client, times(MAX_ATTEMPTS)).reviveBatch(anyInt(), any(), any());
-    } finally {
-      manager.close();
-    }
-  }
-
-  @Test
-  public void testReviveUntilWritableRpcFailureRetries() {
-    PartitionLocationGroup group = new PartitionLocationGroup(loc(0, "w1"));
-    group.retire(0, StatusCode.HARD_SPLIT);
-    ShuffleClientImpl client = spyClient(group);
-    doReturn(null).when(client).reviveBatch(anyInt(), any(), any());
-
-    ReviveManager manager = newManager(client);
-    try {
-      assertNull(
-          manager.reviveUntilWritable(SHUFFLE_ID, MAP_ID, ATTEMPT_ID, PARTITION_ID, MAX_ATTEMPTS));
-      verify(client, times(MAX_ATTEMPTS)).reviveBatch(anyInt(), any(), any());
-    } finally {
-      manager.close();
-    }
-  }
-
-  @Test
-  public void testReviveUntilWritableMapperEndedSkipsQueue() {
-    PartitionLocationGroup group = new PartitionLocationGroup(loc(0, "w1"));
-    group.retire(0, StatusCode.HARD_SPLIT);
-    ShuffleClientImpl client = spyClient(group);
-    client
-        .mapperEndMap
-        .computeIfAbsent(SHUFFLE_ID, id -> ConcurrentHashMap.newKeySet())
-        .add(MAP_ID);
-
-    ReviveManager manager = newManager(client);
-    try {
-      assertNull(
-          manager.reviveUntilWritable(SHUFFLE_ID, MAP_ID, ATTEMPT_ID, PARTITION_ID, MAX_ATTEMPTS));
-      assertTrue(manager.requestQueue.isEmpty());
-      verify(client, never()).reviveBatch(anyInt(), any(), any());
-    } finally {
-      manager.close();
-    }
-  }
-
-  @Test
-  public void testReviveUntilWritableConcurrentWaitersShareOneBatch() throws Exception {
-    PartitionLocationGroup group = new PartitionLocationGroup(loc(0, "w1"));
-    group.retire(0, StatusCode.HARD_SPLIT);
-    ShuffleClientImpl client = spyClient(group);
-
-    CountDownLatch rpcEntered = new CountDownLatch(1);
-    CountDownLatch rpcRelease = new CountDownLatch(1);
-    AtomicInteger rpcCalls = new AtomicInteger();
-    PartitionLocation revived = loc(1, "w2");
-    doAnswer(
-            invocation -> {
-              rpcCalls.incrementAndGet();
-              rpcEntered.countDown();
-              assertTrue(rpcRelease.await(10, TimeUnit.SECONDS));
-              group.mergeActiveLocations(Collections.singletonList(revived), false);
-              return new java.util.HashMap<>(SUCCESS);
-            })
-        .when(client)
-        .reviveBatch(anyInt(), any(), any());
-
-    ReviveManager manager = newManager(client);
-    try {
-      List<FutureTask<PartitionLocation>> tasks = new ArrayList<>();
-      for (int i = 0; i < 2; i++) {
-        FutureTask<PartitionLocation> task =
-            new FutureTask<>(
-                () ->
-                    manager.reviveUntilWritable(
-                        SHUFFLE_ID, MAP_ID, ATTEMPT_ID, PARTITION_ID, MAX_ATTEMPTS));
-        tasks.add(task);
-      }
-      new Thread(tasks.get(0)).start();
-      new Thread(tasks.get(1)).start();
-      // Both waiters dedupe into the in-flight batch or wake on the merge: no second RPC.
-      assertTrue(rpcEntered.await(10, TimeUnit.SECONDS));
-      rpcRelease.countDown();
-
-      for (FutureTask<PartitionLocation> task : tasks) {
-        assertSame(revived, task.get(10, TimeUnit.SECONDS));
-      }
-      assertEquals(1, rpcCalls.get());
-    } finally {
-      manager.close();
-    }
-  }
-
-  @Test
-  public void testReviveUntilWritableWakesOnForeignMerge() throws Exception {
-    // A foreign merge of a writable location must wake the wait even while the own batch
-    // RPC is stuck (LM unresponsive).
-    PartitionLocationGroup group = new PartitionLocationGroup(loc(0, "w1"));
-    group.retire(0, StatusCode.HARD_SPLIT);
-    ShuffleClientImpl client = spyClient(group);
-
-    CountDownLatch rpcEntered = new CountDownLatch(1);
-    CountDownLatch rpcRelease = new CountDownLatch(1);
-    doAnswer(
-            invocation -> {
-              rpcEntered.countDown();
-              assertTrue(rpcRelease.await(10, TimeUnit.SECONDS));
-              return new java.util.HashMap<>(SUCCESS);
-            })
-        .when(client)
-        .reviveBatch(anyInt(), any(), any());
-
-    ReviveManager manager = newManager(client);
-    try {
-      FutureTask<PartitionLocation> task =
-          new FutureTask<>(
-              () ->
-                  manager.reviveUntilWritable(
-                      SHUFFLE_ID, MAP_ID, ATTEMPT_ID, PARTITION_ID, MAX_ATTEMPTS));
-      new Thread(task).start();
-      assertTrue(rpcEntered.await(10, TimeUnit.SECONDS));
-      PartitionLocation revived = loc(1, "w2");
-      group.mergeActiveLocations(Collections.singletonList(revived), false);
-      // Returns without the RPC ever completing.
-      assertSame(revived, task.get(10, TimeUnit.SECONDS));
-      rpcRelease.countDown();
-    } finally {
-      manager.close();
-    }
   }
 
   @Test

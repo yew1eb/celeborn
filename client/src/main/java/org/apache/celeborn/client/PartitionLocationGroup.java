@@ -118,8 +118,8 @@ public class PartitionLocationGroup {
 
   /**
    * A retired epoch still present in the active list, i.e. not yet confirmed digested by the
-   * LifecycleManager. Carried by the synchronous revive so the LM's gap-based allocation sees the
-   * real active-set size (see ReviveManager#reviveUntilWritable).
+   * LifecycleManager. Attached to the batched revive at send time so the LM's gap-based allocation
+   * sees the real active-set size.
    */
   static final class OutstandingRetire {
     final PartitionLocation location;

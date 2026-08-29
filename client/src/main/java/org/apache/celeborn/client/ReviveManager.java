@@ -26,7 +26,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.celeborn.common.CelebornConf;
-import org.apache.celeborn.common.protocol.PartitionLocation;
 import org.apache.celeborn.common.protocol.ReviveRequest;
 import org.apache.celeborn.common.protocol.message.StatusCode;
 import org.apache.celeborn.common.util.ThreadUtils;
@@ -34,11 +33,8 @@ import org.apache.celeborn.common.util.ThreadUtils;
 class ReviveManager {
   private static final Logger logger = LoggerFactory.getLogger(ReviveManager.class);
 
-  private static final long WAIT_POLL_MS = 50;
-
   LinkedBlockingQueue<ReviveRequest> requestQueue = new LinkedBlockingQueue<>();
   private final int batchSize;
-  private final long reviveWaitTimeMs;
   private final boolean adaptivePartitionWriteParallelismEnabled;
   ShuffleClientImpl shuffleClient;
   private final ScheduledExecutorService batchReviveRequestScheduler =
@@ -48,8 +44,6 @@ class ReviveManager {
   public ReviveManager(ShuffleClientImpl shuffleClient, CelebornConf conf) {
     this.shuffleClient = shuffleClient;
     this.batchSize = conf.clientPushReviveBatchSize();
-    this.reviveWaitTimeMs =
-        conf.clientRpcRequestPartitionLocationAskTimeout().duration().toMillis();
     this.adaptivePartitionWriteParallelismEnabled =
         conf.clientShuffleAdaptivePartitionWriteParallelismEnabled();
 
@@ -182,85 +176,6 @@ class ReviveManager {
     } catch (InterruptedException e) {
       logger.error("Exception when put into requests!", e);
     }
-  }
-
-  /**
-   * Blocking revive for the all-locations-unwritable case of adaptive parallelism. Used only at the
-   * pushOrMergeData entry, where the data thread must synchronously obtain a writable location (the
-   * retry path re-enqueues instead, in the same shape as the merged path). Each round enqueues a
-   * max-epoch request into the standard batched revive and waits until the partition is writable
-   * again: writability is the only completion predicate — the wait wakes as soon as ANY source
-   * makes the partition writable (this request's batch response, another mapper's revive response
-   * merged into the group, or the scheduler's local satisfy), while {@code reviveStatus} only
-   * signals failure/timeout of this round. The batch scheduler attaches the partition's outstanding
-   * retire reports at send time (see {@link PartitionLocationGroup#outstandingRetires()}) and keeps
-   * at most one in-flight request per partition. Bounded by {@code maxAttempts} rounds; each round
-   * waits at most one requestPartition ask timeout.
-   *
-   * @return a writable location for {@code mapId}, or null when the mapper has ended or the
-   *     attempts are exhausted (the LM's active-set bookkeeping keeps lagging this executor's
-   *     retires, or the LM is genuinely unresponsive).
-   */
-  PartitionLocation reviveUntilWritable(
-      int shuffleId, int mapId, int attemptId, int partitionId, int maxAttempts) {
-    PartitionLocationGroup group = shuffleClient.locationGroup(shuffleId, partitionId);
-    if (group == null) {
-      return null;
-    }
-    PartitionLocation loc = group.currentFor(mapId);
-    if (loc != null) {
-      return loc;
-    }
-    for (int attempt = 1; attempt <= maxAttempts; attempt++) {
-      if (shuffleClient.mapperEnded(shuffleId, mapId)) {
-        return null;
-      }
-      ReviveRequest req =
-          new ReviveRequest(
-              shuffleId,
-              mapId,
-              attemptId,
-              partitionId,
-              group.maxEpoch(),
-              group.latest(),
-              StatusCode.PUSH_DATA_FAIL_NON_CRITICAL_CAUSE_PRIMARY);
-      // addRequest also excludes the worker by cause. A timed-out round leaves the request
-      // queued; the scheduler dedups per partition before sending, so a re-enqueue is harmless.
-      addRequest(req);
-      long dueTime = System.currentTimeMillis() + reviveWaitTimeMs;
-      while (req.reviveStatus == StatusCode.REVIVE_INITIALIZED.getValue()
-          && group.currentFor(mapId) == null
-          && System.currentTimeMillis() < dueTime) {
-        try {
-          Thread.sleep(WAIT_POLL_MS);
-        } catch (InterruptedException e) {
-          Thread.currentThread().interrupt();
-          return null;
-        }
-      }
-      loc = group.currentFor(mapId);
-      if (loc != null) {
-        logger.debug(
-            "Blocking revive for shuffle {} partition {} succeeded at attempt {}/{}, writing to epoch {}@{}.",
-            shuffleId,
-            partitionId,
-            attempt,
-            maxAttempts,
-            loc.getEpoch(),
-            loc.hostAndPushPort());
-        return loc;
-      }
-      logger.debug(
-          "Blocking revive for shuffle {} partition {}: attempt {}/{} left nothing writable, {}.",
-          shuffleId,
-          partitionId,
-          attempt,
-          maxAttempts,
-          req.reviveStatus == StatusCode.REVIVE_INITIALIZED.getValue()
-              ? "timed out waiting for the batch revive"
-              : "revive status " + StatusCode.fromValue(req.reviveStatus));
-    }
-    return group.currentFor(mapId);
   }
 
   public void close() {

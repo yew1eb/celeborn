@@ -361,23 +361,17 @@ public class ShuffleClientImpl extends ShuffleClient {
     } else {
       PartitionLocationGroup newLocGroup = locationGroup(shuffleId, partitionId);
       PartitionLocation newLoc = newLocGroup == null ? null : newLocGroup.currentFor(mapId);
-      if (newLoc == null
-          && newLocGroup != null
-          && adaptivePartitionWriteParallelismEnabled
-          && remainReviveTimes > 0) {
+      if (newLoc == null && newLocGroup != null && adaptivePartitionWriteParallelismEnabled) {
         // Revive reported SUCCESS but nothing is writable: the remaining writable locations
         // were retired by concurrent HARD_SPLITs / push failures after this request was
-        // satisfied/answered. A sent revive carries every retire known at send time (the
-        // request's own epoch plus the outstanding reports attached by the batch scheduler),
-        // so the LM's reply always contains a fresh writable replacement — only retires
-        // landing after that point can empty the writable set. Re-enqueue and retry with the
-        // remaining budget, same shape as the merged path: the scheduler attaches the
-        // outstanding retire reports at send time, the LM replenishes the active set, and the
-        // next round re-pushes.
+        // satisfied. Fall back to the latest known (possibly retired) location — the same
+        // behavior as a non-adaptive client: the worker rejects it, and the reject drives
+        // another revive round until the LM's replacement lands in the group.
+        newLoc = newLocGroup.latest();
         logger.warn(
             "Shuffle {} partition {}: revive succeeded but no writable location for map {} "
-                + "attempt {} batch {} (active epochs: {}, retired: {}), re-enqueue revive, "
-                + "remaining budget {}.",
+                + "attempt {} batch {} (active epochs: {}, retired: {}), falling back to latest "
+                + "epoch {}@{}.",
             shuffleId,
             partitionId,
             mapId,
@@ -385,26 +379,8 @@ public class ShuffleClientImpl extends ShuffleClient {
             batchId,
             newLocGroup.activeEpochsSnapshot(),
             newLocGroup.retiredEpochsSnapshot(),
-            remainReviveTimes);
-        ReviveRequest newRequest =
-            new ReviveRequest(
-                shuffleId, mapId, attemptId, partitionId, request.epoch, request.loc, cause);
-        reviveManager.addRequest(newRequest);
-        long newDueTime =
-            System.currentTimeMillis()
-                + conf.clientRpcRequestPartitionLocationAskTimeout().duration().toMillis();
-        pushDataRetryPool.submit(
-            () ->
-                submitRetryPushData(
-                    shuffleId,
-                    body,
-                    batchId,
-                    pushDataRpcResponseCallback,
-                    pushState,
-                    newRequest,
-                    remainReviveTimes - 1,
-                    newDueTime));
-        return;
+            newLoc.getEpoch(),
+            newLoc.hostAndPushPort());
       }
       if (newLoc == null) {
         pushDataRpcResponseCallback.onFailure(
@@ -1231,33 +1207,21 @@ public class ShuffleClientImpl extends ShuffleClient {
       }
       return 0;
     }
-    
 
     PartitionLocationGroup group = map.get(partitionId);
     PartitionLocation currentLoc = group == null ? null : group.currentFor(mapId);
     if (currentLoc == null && group != null && adaptivePartitionWriteParallelismEnabled) {
-      // All known locations are locally retired. Blocking revive on the standard batched channel:
-      // the batch scheduler attaches every outstanding retire report at send time, so the LM
-      // digests them, replenishes the whole active set in one round and replies it. A request
-      // without the reports would leave the LM's gap-based allocation at gap == 0 and re-reply
-      // already-retired epochs.
+      // All known locations are unusable: fall back to the latest (possibly retired) location
+      // and push anyway. This mirrors the pre-existing single-location behavior: the worker
+      // rejects the retired epoch, the reject triggers a revive carrying every outstanding
+      // retire report, and the LM's replenished reply reroutes the retry.
       logger.warn(
-          "Shuffle {} partition {}: all {} location(s) unusable from epoch {}, blocking revive.",
+          "Shuffle {} partition {}: all {} location(s) unusable from epoch {}, fallback to latest.",
           shuffleId,
           partitionId,
           group.activeCount(),
           group.maxEpoch());
-      currentLoc =
-          reviveManager.reviveUntilWritable(
-              shuffleId, mapId, attemptId, partitionId, maxReviveTimes);
-      if (currentLoc != null) {
-        logger.info(
-            "Shuffle {} partition {}: blocking revive succeeded, writing to epoch {}@{}.",
-            shuffleId,
-            partitionId,
-            currentLoc.getEpoch(),
-            currentLoc.hostAndPushPort());
-      }
+      currentLoc = group.latest();
     }
     final PartitionLocation loc = currentLoc;
     if (loc == null) {
