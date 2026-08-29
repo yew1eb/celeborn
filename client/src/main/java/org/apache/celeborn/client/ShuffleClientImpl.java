@@ -360,26 +360,12 @@ public class ShuffleClientImpl extends ShuffleClient {
                   + request.loc));
     } else {
       PartitionLocationGroup newLocGroup = locationGroup(shuffleId, partitionId);
-      PartitionLocation newLoc = newLocGroup == null ? null : newLocGroup.currentFor(mapId);
-      if (newLoc == null && newLocGroup != null) {
-        // All known locations are locally retired: fall back to the latest (possibly retired)
-        // one and let the worker reject it — the same self-heal shape as the non-adaptive path.
-        newLoc = newLocGroup.latest();
-      }
-      if (newLoc == null) {
-        pushDataRpcResponseCallback.onFailure(
-            new CelebornIOException(
-                cause
-                    + " then revive but no usable location for partition "
-                    + partitionId
-                    + (newLocGroup == null
-                        ? ""
-                        : "; active epochs: "
-                            + newLocGroup.activeEpochsSnapshot()
-                            + ", retired: "
-                            + newLocGroup.retiredEpochsSnapshot())));
-        return;
-      }
+      PartitionLocation newLoc =
+          newLocGroup == null
+              ? null
+              : newLocGroup.currentFor(mapId) == null
+                  ? newLocGroup.latest()
+                  : newLocGroup.currentFor(mapId);
       logger.info(
           "Revive for push data success, new location for shuffle {} map {} attempt {} partition {} batch {} is location {}.",
           shuffleId,
@@ -510,27 +496,15 @@ public class ShuffleClientImpl extends ShuffleClient {
               oldGroupedBatchId);
         } else if (request.reviveStatus == StatusCode.SUCCESS.getValue()) {
           PartitionLocationGroup newLocGroup = locationGroup(shuffleId, request.partitionId);
-          PartitionLocation newLoc = newLocGroup == null ? null : newLocGroup.currentFor(mapId);
-          if (newLoc == null && newLocGroup != null) {
-            // Same fallback as submitRetryPushData: push the latest (possibly retired) location
-            // and let the worker-side reject drive the next revive round.
-            newLoc = newLocGroup.latest();
-          }
-          if (newLoc != null) {
-            DataBatches newDataBatches =
-                newDataBatchesMap.computeIfAbsent(genAddressPair(newLoc), (s) -> new DataBatches());
-            newDataBatches.addDataBatch(newLoc, batch.batchId, batch.body);
-          } else if (remainReviveTimes > 0) {
-            // newLoc == null means the location group is gone (concurrent shuffle cleanup).
-            reviveFailedBatchesMap.add(batch);
-          } else {
-            String errorMsg =
-                String.format(
-                    "Revive succeeded but no usable location while pushing merged for shuffle %d map %d attempt %d partition %d batch %d location %s.",
-                    shuffleId, mapId, attemptId, request.partitionId, oldGroupedBatchId, batch.loc);
-            pushState.exception.compareAndSet(null, new CelebornIOException(errorMsg));
-            return;
-          }
+          PartitionLocation newLoc =
+              newLocGroup == null
+                  ? null
+                  : newLocGroup.currentFor(mapId) == null
+                      ? newLocGroup.latest()
+                      : newLocGroup.currentFor(mapId);
+          DataBatches newDataBatches =
+              newDataBatchesMap.computeIfAbsent(genAddressPair(newLoc), (s) -> new DataBatches());
+          newDataBatches.addDataBatch(newLoc, batch.batchId, batch.body);
         } else {
           if (remainReviveTimes > 0) {
             reviveFailedBatchesMap.add(batch);
