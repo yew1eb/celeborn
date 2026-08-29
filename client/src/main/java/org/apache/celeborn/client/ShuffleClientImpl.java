@@ -359,11 +359,7 @@ public class ShuffleClientImpl extends ShuffleClient {
                   + ", old location: "
                   + request.loc));
     } else {
-      PartitionLocationGroup newLocGroup = reducePartitionMap.get(shuffleId).get(partitionId);
-      PartitionLocation newLoc =
-          newLocGroup.currentFor(mapId) == null
-              ? newLocGroup.latest()
-              : newLocGroup.currentFor(mapId);
+      PartitionLocation newLoc = locationGroup(shuffleId, partitionId).currentOrLatest(mapId);
       logger.info(
           "Revive for push data success, new location for shuffle {} map {} attempt {} partition {} batch {} is location {}.",
           shuffleId,
@@ -429,7 +425,8 @@ public class ShuffleClientImpl extends ShuffleClient {
     return reviveRequests;
   }
 
-  // Package-private: ReviveManager's synchronous revive path reads the group through this.
+  // Null only when cleanupShuffle raced with an in-flight async callback; callers on those
+  // paths check for null.
   PartitionLocationGroup locationGroup(int shuffleId, int partitionId) {
     ConcurrentHashMap<Integer, PartitionLocationGroup> partitionMap =
         reducePartitionMap.get(shuffleId);
@@ -493,12 +490,7 @@ public class ShuffleClientImpl extends ShuffleClient {
               request.partitionId,
               oldGroupedBatchId);
         } else if (request.reviveStatus == StatusCode.SUCCESS.getValue()) {
-          PartitionLocationGroup newLocGroup =
-              reducePartitionMap.get(shuffleId).get(request.partitionId);
-          PartitionLocation newLoc =
-              newLocGroup.currentFor(mapId) == null
-                  ? newLocGroup.latest()
-                  : newLocGroup.currentFor(mapId);
+          PartitionLocation newLoc = locationGroup(shuffleId, request.partitionId).currentOrLatest(mapId);
           DataBatches newDataBatches =
               newDataBatchesMap.computeIfAbsent(genAddressPair(newLoc), (s) -> new DataBatches());
           newDataBatches.addDataBatch(newLoc, batch.batchId, batch.body);

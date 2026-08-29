@@ -60,6 +60,17 @@ public class PartitionLocationGroup {
   }
 
   /**
+   * A writable location for {@code mapId}; when every known location is locally retired, falls back
+   * to the latest (possibly retired) one. This mirrors the baseline path, which never retires
+   * locally and keeps pushing the possibly-dead location until the worker rejects it and the reject
+   * drives the next revive round.
+   */
+  public PartitionLocation currentOrLatest(int mapId) {
+    PartitionLocation loc = currentFor(mapId);
+    return loc == null ? latest() : loc;
+  }
+
+  /**
    * Pick a writable location for {@code mapId}, skipping {@code excludeEpoch} (-1 = skip nothing);
    * null when nothing is writable. The active list is snapshotted because a concurrent full-set
    * merge may shrink it.
