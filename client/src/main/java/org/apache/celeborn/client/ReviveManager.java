@@ -185,16 +185,17 @@ class ReviveManager {
   }
 
   /**
-   * Blocking revive for the all-locations-unwritable case of adaptive parallelism. Each round
-   * enqueues a max-epoch request into the standard batched revive and waits until the partition is
-   * writable again: writability is the only completion predicate — the wait wakes as soon as ANY
-   * source makes the partition writable (this request's batch response, another mapper's revive
-   * response merged into the group, or the scheduler's local satisfy), while {@code reviveStatus}
-   * only signals failure/timeout of this round. The batch scheduler attaches the partition's
-   * outstanding retire reports at send time (see {@link
-   * PartitionLocationGroup#outstandingRetires()}) and keeps at most one in-flight request per
-   * partition. Bounded by {@code maxAttempts} rounds; each round waits at most one requestPartition
-   * ask timeout.
+   * Blocking revive for the all-locations-unwritable case of adaptive parallelism. Used only at the
+   * pushOrMergeData entry, where the data thread must synchronously obtain a writable location (the
+   * retry path re-enqueues instead, in the same shape as the merged path). Each round enqueues a
+   * max-epoch request into the standard batched revive and waits until the partition is writable
+   * again: writability is the only completion predicate — the wait wakes as soon as ANY source
+   * makes the partition writable (this request's batch response, another mapper's revive response
+   * merged into the group, or the scheduler's local satisfy), while {@code reviveStatus} only
+   * signals failure/timeout of this round. The batch scheduler attaches the partition's outstanding
+   * retire reports at send time (see {@link PartitionLocationGroup#outstandingRetires()}) and keeps
+   * at most one in-flight request per partition. Bounded by {@code maxAttempts} rounds; each round
+   * waits at most one requestPartition ask timeout.
    *
    * @return a writable location for {@code mapId}, or null when the mapper has ended or the
    *     attempts are exhausted (the LM's active-set bookkeeping keeps lagging this executor's

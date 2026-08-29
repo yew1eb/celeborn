@@ -361,14 +361,34 @@ public class ShuffleClientImpl extends ShuffleClient {
     } else {
       PartitionLocationGroup newLocGroup = locationGroup(shuffleId, partitionId);
       PartitionLocation newLoc = newLocGroup == null ? null : newLocGroup.currentFor(mapId);
-      if (newLoc == null && newLocGroup != null && adaptivePartitionWriteParallelismEnabled) {
-        // Revive reported SUCCESS but every known location is locally retired — the LM's active
-        // set is stale (its digest of the retire reports lags). Blocking revive on the batched
-        // channel (retire reports attached at send time) with the remaining budget, instead of
-        // failing the task.
-        newLoc =
-            reviveManager.reviveUntilWritable(
-                shuffleId, mapId, attemptId, partitionId, remainReviveTimes);
+      if (newLoc == null
+          && newLocGroup != null
+          && adaptivePartitionWriteParallelismEnabled
+          && remainReviveTimes > 0) {
+        // Revive reported SUCCESS but every known location is locally retired — concurrent
+        // HARD_SPLITs retired the rest, or the LM's reply was based on a stale retire snapshot.
+        // Re-enqueue a revive request and retry with the remaining budget, in the same shape as
+        // the merged path: the batch scheduler attaches the outstanding retire reports at send
+        // time, the LM replenishes the active set, and the next round re-pushes.
+        ReviveRequest newRequest =
+            new ReviveRequest(
+                shuffleId, mapId, attemptId, partitionId, request.epoch, request.loc, cause);
+        reviveManager.addRequest(newRequest);
+        long newDueTime =
+            System.currentTimeMillis()
+                + conf.clientRpcRequestPartitionLocationAskTimeout().duration().toMillis();
+        pushDataRetryPool.submit(
+            () ->
+                submitRetryPushData(
+                    shuffleId,
+                    body,
+                    batchId,
+                    pushDataRpcResponseCallback,
+                    pushState,
+                    newRequest,
+                    remainReviveTimes - 1,
+                    newDueTime));
+        return;
       }
       if (newLoc == null) {
         pushDataRpcResponseCallback.onFailure(
@@ -482,80 +502,6 @@ public class ShuffleClientImpl extends ShuffleClient {
     if (group.retire(epoch, cause)) {
       logger.info(
           "Shuffle {} partition {}: epoch {} retired ({}).", shuffleId, partitionId, epoch, cause);
-    }
-  }
-
-  /**
-   * Submit a revive request and, for adaptive parallel write, retire the failed epoch locally so
-   * that routing skips it immediately. Returns the submitted request.
-   */
-  private ReviveRequest submitReviveAndRetire(
-      int shuffleId,
-      int mapId,
-      int attemptId,
-      int partitionId,
-      PartitionLocation latest,
-      StatusCode cause) {
-    ReviveRequest req =
-        new ReviveRequest(
-            shuffleId, mapId, attemptId, partitionId, latest.getEpoch(), latest, cause);
-    reviveManager.addRequest(req);
-    if (adaptivePartitionWriteParallelismEnabled) {
-      PartitionLocationGroup g = locationGroup(shuffleId, partitionId);
-      if (g != null) {
-        retireEpoch(g, shuffleId, partitionId, latest.getEpoch(), cause);
-      }
-    }
-    return req;
-  }
-
-  /**
-   * Handle a SOFT_SPLIT of the given location: mark the epoch soft-split in the location group (it
-   * stays writable and keeps receiving its share of writes until it hard-splits) and, on the first
-   * retire of the epoch, report it to the LifecycleManager for hotness judgment (boosting the
-   * location count when the partition is hot). Data already landed on the worker, so writes are
-   * never blocked.
-   */
-  private void handleSoftSplitRetire(
-      int shuffleId, int mapId, int attemptId, int partitionId, PartitionLocation latest) {
-    if (adaptivePartitionWriteParallelismEnabled) {
-      PartitionLocationGroup latestGroup = locationGroup(shuffleId, partitionId);
-      if (latestGroup != null) {
-        boolean newlyRetired = latestGroup.retire(latest.getEpoch(), StatusCode.SOFT_SPLIT);
-        if (newlyRetired) {
-          logger.info(
-              "Shuffle {} partition {}: location epoch {}@{} soft-split, "
-                  + "remains writable for routing and report to LifecycleManager.",
-              shuffleId,
-              partitionId,
-              latest.getEpoch(),
-              latest.hostAndPushPort());
-        }
-        if (newlyRetired && !mapperEnded(shuffleId, mapId)) {
-          ReviveRequest reviveRequest =
-              new ReviveRequest(
-                  shuffleId,
-                  mapId,
-                  attemptId,
-                  partitionId,
-                  latest.getEpoch(),
-                  latest,
-                  StatusCode.SOFT_SPLIT);
-          reviveManager.addRequest(reviveRequest);
-        }
-      }
-    } else if (!newerPartitionLocationExists(
-        reducePartitionMap.get(shuffleId), partitionId, latest.getEpoch(), false)) {
-      ReviveRequest reviveRequest =
-          new ReviveRequest(
-              shuffleId,
-              mapId,
-              attemptId,
-              partitionId,
-              latest.getEpoch(),
-              latest,
-              StatusCode.SOFT_SPLIT);
-      reviveManager.addRequest(reviveRequest);
     }
   }
 
@@ -1407,7 +1353,43 @@ public class ShuffleClientImpl extends ShuffleClient {
                       attemptId,
                       partitionId,
                       nextBatchId);
-                  handleSoftSplitRetire(shuffleId, mapId, attemptId, partitionId, latest);
+                  if (adaptivePartitionWriteParallelismEnabled) {
+                    // Soft-split location stays writable and keeps receiving its share of writes
+                    // until it hard-splits; report the first retire to the LifecycleManager for
+                    // hotness judgment. Data already landed, so writes are never blocked.
+                    PartitionLocationGroup group = locationGroup(shuffleId, partitionId);
+                    if (group != null && group.retire(latest.getEpoch(), StatusCode.SOFT_SPLIT)) {
+                      logger.info(
+                          "Shuffle {} partition {}: location epoch {}@{} soft-split, "
+                              + "remains writable for routing and report to LifecycleManager.",
+                          shuffleId,
+                          partitionId,
+                          latest.getEpoch(),
+                          latest.hostAndPushPort());
+                      if (!mapperEnded(shuffleId, mapId)) {
+                        reviveManager.addRequest(
+                            new ReviveRequest(
+                                shuffleId,
+                                mapId,
+                                attemptId,
+                                partitionId,
+                                latest.getEpoch(),
+                                latest,
+                                StatusCode.SOFT_SPLIT));
+                      }
+                    }
+                  } else if (!newerPartitionLocationExists(
+                      reducePartitionMap.get(shuffleId), partitionId, latest.getEpoch(), false)) {
+                    reviveManager.addRequest(
+                        new ReviveRequest(
+                            shuffleId,
+                            mapId,
+                            attemptId,
+                            partitionId,
+                            latest.getEpoch(),
+                            latest,
+                            StatusCode.SOFT_SPLIT));
+                  }
                   pushState.onSuccess(latest.hostAndPushPort());
                   pushState.removeBatch(nextBatchId, latest.hostAndPushPort());
                   callback.onSuccess(response);
@@ -1425,8 +1407,23 @@ public class ShuffleClientImpl extends ShuffleClient {
                         latest.getUniqueId(), mapId, attemptId, nextBatchId);
                   }
                   ReviveRequest reviveRequest =
-                      submitReviveAndRetire(
-                          shuffleId, mapId, attemptId, partitionId, latest, StatusCode.HARD_SPLIT);
+                      new ReviveRequest(
+                          shuffleId,
+                          mapId,
+                          attemptId,
+                          partitionId,
+                          latest.getEpoch(),
+                          latest,
+                          StatusCode.HARD_SPLIT);
+                  reviveManager.addRequest(reviveRequest);
+                  if (adaptivePartitionWriteParallelismEnabled) {
+                    // Adaptive: retire the epoch locally so routing skips it immediately.
+                    PartitionLocationGroup group = locationGroup(shuffleId, partitionId);
+                    if (group != null) {
+                      retireEpoch(
+                          group, shuffleId, partitionId, latest.getEpoch(), StatusCode.HARD_SPLIT);
+                    }
+                  }
                   long dueTime =
                       System.currentTimeMillis()
                           + conf.clientRpcRequestPartitionLocationAskTimeout()
@@ -1518,7 +1515,16 @@ public class ShuffleClientImpl extends ShuffleClient {
               if (!mapperEnded(shuffleId, mapId)) {
                 remainReviveTimes = remainReviveTimes - 1;
                 ReviveRequest reviveRequest =
-                    submitReviveAndRetire(shuffleId, mapId, attemptId, partitionId, latest, cause);
+                    new ReviveRequest(
+                        shuffleId, mapId, attemptId, partitionId, latest.getEpoch(), latest, cause);
+                reviveManager.addRequest(reviveRequest);
+                if (adaptivePartitionWriteParallelismEnabled) {
+                  // Adaptive: retire the epoch locally so routing skips it immediately.
+                  PartitionLocationGroup group = locationGroup(shuffleId, partitionId);
+                  if (group != null) {
+                    retireEpoch(group, shuffleId, partitionId, latest.getEpoch(), cause);
+                  }
+                }
                 long dueTime =
                     System.currentTimeMillis()
                         + conf.clientRpcRequestPartitionLocationAskTimeout().duration().toMillis();
@@ -1820,7 +1826,43 @@ public class ShuffleClientImpl extends ShuffleClient {
                           StatusCode.fromValue(statusCodeList.get(i).byteValue())));
                   if (statusCodeList.get(i) == StatusCode.SOFT_SPLIT.getValue()) {
                     PartitionLocation loc = batches.get(partitionIndex).loc;
-                    handleSoftSplitRetire(shuffleId, mapId, attemptId, loc.getId(), loc);
+                    if (adaptivePartitionWriteParallelismEnabled) {
+                      // Soft-split location stays writable until it hard-splits; report the
+                      // first retire to the LifecycleManager for hotness judgment.
+                      PartitionLocationGroup group = locationGroup(shuffleId, loc.getId());
+                      if (group != null && group.retire(loc.getEpoch(), StatusCode.SOFT_SPLIT)) {
+                        logger.info(
+                            "Shuffle {} partition {}: location epoch {}@{} soft-split, "
+                                + "remains writable for routing and report to LifecycleManager.",
+                            shuffleId,
+                            loc.getId(),
+                            loc.getEpoch(),
+                            loc.hostAndPushPort());
+                        if (!mapperEnded(shuffleId, mapId)) {
+                          reviveManager.addRequest(
+                              new ReviveRequest(
+                                  shuffleId,
+                                  mapId,
+                                  attemptId,
+                                  loc.getId(),
+                                  loc.getEpoch(),
+                                  loc,
+                                  StatusCode.SOFT_SPLIT));
+                        }
+                      }
+                    } else if (!newerPartitionLocationExists(
+                        reducePartitionMap.get(shuffleId), loc.getId(), loc.getEpoch(), false)) {
+                      ReviveRequest reviveRequest =
+                          new ReviveRequest(
+                              shuffleId,
+                              mapId,
+                              attemptId,
+                              loc.getId(),
+                              loc.getEpoch(),
+                              loc,
+                              StatusCode.SOFT_SPLIT);
+                      reviveManager.addRequest(reviveRequest);
+                    }
                   } else {
                     batchesNeedResubmit.add(batches.get(partitionIndex));
                   }

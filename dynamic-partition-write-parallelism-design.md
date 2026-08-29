@@ -110,11 +110,12 @@ LM (ChangePartitionManager → PartitionHotnessTracker):
 |---|---|
 | SOFT_SPLIT 回调 | `retire(epoch, SOFT)`(保持可写),首报且 mapper 未结束时上报;数据已落盘,零阻塞 |
 | HARD_SPLIT / push 失败 | `retire` 后走常规批量 revive:还有其他可写 location 时,批调度器下一个 tick 本地满足(≤ `push.revive.interval`,默认 100ms,不发 LM RPC);否则由 LM 响应分配新 location |
-| 全部不可用 | 入口与重推路径统一走 `ReviveManager.reviveUntilWritable`:阻塞等待标准批量 revive(预算 = `push.revive.maxRetries`,重推路径传剩余预算),批调度器发送时携带全部未消化退休上报,LM 消化后一轮补满活跃集;不带上报的单条请求会让 gap 分配归零、回已退休 epoch(机制分析见决策 5)。等待的完成谓词是"可写"而非 reviveStatus——任何来源让 partition 可写都会提前唤醒;`reviveStatus == SUCCESS` 只代表 LM 已处理,不等于可写(簿记竞态),故每轮结束以 `currentFor(mapId)` 重查为准 |
+| 全部不可用(入口) | `ReviveManager.reviveUntilWritable` 阻塞等待标准批量 revive(预算 = `push.revive.maxRetries`);数据线程必须同步拿到可写 location,没有可重排队的载体,故只能阻塞。批调度器发送时携带全部未消化退休上报,LM 消化后一轮补满活跃集;不带上报的单条请求会让 gap 分配归零、回已退休 epoch(机制分析见决策 5)。完成谓词是"可写"而非 reviveStatus——任何来源让 partition 可写都会提前唤醒 |
+| 重推时 SUCCESS 但不可写 | `submitRetryPushData` 与 merged 路径同形 re-enqueue:重组 revive 请求入队、剩余预算减一,批调度器满足(本地或 LM 响应)后下一轮重推。`reviveStatus == SUCCESS` 只代表请求已被处理,不等于可写——满足到唤醒之间并发 HARD_SPLIT 可退休其余 location,LM 响应也可能基于发送时刻的退休快照(簿记竞态),故以 `currentFor(mapId)` 重查为准 |
 
 #### 并发要点
 
-Group 被四类线程并发访问(push 线程、push 回调、ReviveManager 调度器、经 ReviveManager 阻塞等待的 push/重推线程):读路径 COW+CHM 快照无锁;`retire`/`mergeActiveLocations`/`updateLatest` 同 group monitor;`retire` 首报信号靠 CHM compute 原子。阻塞等待复用批组批通道,每 partition 在飞请求由调度器天然去重(single-flight),等待线程被满足后重查可写性再返回。LM 侧同一 partition 的批处理由条纹锁 + `inBatchPartitions` 去重串行。
+Group 被四类线程并发访问(push 线程、push 回调、ReviveManager 调度器、经 ReviveManager 阻塞等待的入口 push 线程):读路径 COW+CHM 快照无锁;`retire`/`mergeActiveLocations`/`updateLatest` 同 group monitor;`retire` 首报信号靠 CHM compute 原子。阻塞等待复用批组批通道,每 partition 在飞请求由调度器天然去重(single-flight),等待线程被满足后重查可写性再返回。LM 侧同一 partition 的批处理由条纹锁 + `inBatchPartitions` 去重串行。
 
 #### 正确性
 
