@@ -1161,8 +1161,8 @@ class CelebornConf(loadDefaults: Boolean) extends Cloneable with Logging with Se
     get(CLIENT_SHUFFLE_ADAPTIVE_PARTITION_WRITE_PARALLELISM_ENABLED)
   def clientShuffleAdaptivePartitionWriteParallelismMaxLocations: Int =
     get(CLIENT_SHUFFLE_ADAPTIVE_PARTITION_WRITE_PARALLELISM_MAX_LOCATIONS)
-  def clientShuffleAdaptivePartitionWriteParallelismMinSplitIntervalMs: Long =
-    get(CLIENT_SHUFFLE_ADAPTIVE_PARTITION_WRITE_PARALLELISM_MIN_SPLIT_INTERVAL)
+  def clientShuffleAdaptivePartitionWriteParallelismTargetSplitIntervalMs: Long =
+    get(CLIENT_SHUFFLE_ADAPTIVE_PARTITION_WRITE_PARALLELISM_TARGET_SPLIT_INTERVAL)
   def batchHandleChangePartitionEnabled: Boolean = get(CLIENT_BATCH_HANDLE_CHANGE_PARTITION_ENABLED)
   def batchHandleChangePartitionBuckets: Int =
     get(CLIENT_BATCH_HANDLE_CHANGE_PARTITION_BUCKETS)
@@ -5386,15 +5386,16 @@ object CelebornConf extends Logging {
       .checkValue(v => v == -1 || v > 0, "Must be -1 or positive.")
       .createWithDefault(-1)
 
-  val CLIENT_SHUFFLE_ADAPTIVE_PARTITION_WRITE_PARALLELISM_MIN_SPLIT_INTERVAL: ConfigEntry[Long] =
-    buildConf("celeborn.client.shuffle.adaptivePartitionWriteParallelism.minSplitInterval")
+  val CLIENT_SHUFFLE_ADAPTIVE_PARTITION_WRITE_PARALLELISM_TARGET_SPLIT_INTERVAL: ConfigEntry[Long] =
+    buildConf("celeborn.client.shuffle.adaptivePartitionWriteParallelism.targetSplitInterval")
       .categories("client")
-      .doc("The target minimum fill time of a single partition location, i.e. the time " +
-        "from its allocation to its split. A location splits once, so in steady state this " +
-        "is also the partition's split interval. A location filled (split) faster than this " +
-        "marks the partition hot, and the target parallelism is raised to ceil(current " +
-        "parallelism * interval / measured fill time) so that the per-location fill time " +
-        "converges to this value.")
+      .doc("The target fill time of a single partition location, i.e. the time from its " +
+        "allocation to its split. A location splits once, so in steady state this is also " +
+        "the partition's split interval. A location filled (split) faster than this marks " +
+        "the partition hot, and the target parallelism is raised to ceil(targetSplitInterval " +
+        "/ measured fill time) - independent of the current parallelism - so that the " +
+        "per-location fill time converges to this value. Larger values demand more parallel " +
+        "locations and proportionally more slots and disk for hot partitions.")
       .version("0.7.0")
       .timeConf(TimeUnit.MILLISECONDS)
       .createWithDefaultString("60s")

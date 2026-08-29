@@ -61,8 +61,8 @@ private[client] class PartitionHotnessTracker(
 
   private val adaptivePartitionWriteParallelismMaxLocations =
     conf.clientShuffleAdaptivePartitionWriteParallelismMaxLocations
-  private val adaptivePartitionWriteParallelismMinSplitIntervalMs =
-    conf.clientShuffleAdaptivePartitionWriteParallelismMinSplitIntervalMs
+  private val adaptivePartitionWriteParallelismTargetSplitIntervalMs =
+    conf.clientShuffleAdaptivePartitionWriteParallelismTargetSplitIntervalMs
 
   // shuffleId -> (partitionId -> hot state). Sparse: only partitions revived in
   // adaptive-parallelism mode get an entry (see currentActiveEpochs).
@@ -136,7 +136,7 @@ private[client] class PartitionHotnessTracker(
         null
       }
     }
-    if (allocTime == null || nowMs - allocTime >= adaptivePartitionWriteParallelismMinSplitIntervalMs) {
+    if (allocTime == null || nowMs - allocTime >= adaptivePartitionWriteParallelismTargetSplitIntervalMs) {
       hotState.synchronized {
         hotState.splitReported.add(Integer.valueOf(epoch))
       }
@@ -148,7 +148,7 @@ private[client] class PartitionHotnessTracker(
         // otherwise compute ceil(interval / 0) = Infinity and pin desired to Int.MaxValue.
         val fillTimeMs = math.max(1L, nowMs - allocTime)
         val target = math.ceil(
-          adaptivePartitionWriteParallelismMinSplitIntervalMs.toDouble / fillTimeMs).toInt
+          adaptivePartitionWriteParallelismTargetSplitIntervalMs.toDouble / fillTimeMs).toInt
         // Unregistered shuffle defaults to 1 (unreachable in practice: registerShuffle
         // precedes any revive).
         val cap = shuffleParallelismCap.getOrDefault(shuffleId, 1).intValue()
