@@ -72,37 +72,46 @@ class ReviveManager {
               // Insert request that is not MapperEnded and with the max epoch
               // into requestsToSend
               Iterator<ReviveRequest> iter = requests.iterator();
-              // Adaptive parallelism only: one representative request per partition, used as the
-              // mapId/attemptId donor when rebuilding retire reports below.
-              Map<Integer, ReviveRequest> representativeRequests = new HashMap<>();
-              while (iter.hasNext()) {
-                ReviveRequest req = iter.next();
-                if (shuffleClient.mapperEnded(shuffleId, req.mapId)
-                    || (adaptivePartitionWriteParallelismEnabled
-                        ? shuffleClient.hasWritableLocation(
-                            partitionMap, req.partitionId, req.mapId)
-                        : shuffleClient.newerPartitionLocationExists(
-                            partitionMap, req.partitionId, req.epoch, false))) {
-                  req.reviveStatus = StatusCode.SUCCESS.getValue();
-                  if (adaptivePartitionWriteParallelismEnabled) {
+              ArrayList<ReviveRequest> allToSend;
+              if (!adaptivePartitionWriteParallelismEnabled) {
+                while (iter.hasNext()) {
+                  ReviveRequest req = iter.next();
+                  if (shuffleClient.newerPartitionLocationExists(
+                          partitionMap, req.partitionId, req.epoch, false)
+                      || shuffleClient.mapperEnded(shuffleId, req.mapId)) {
+                    req.reviveStatus = StatusCode.SUCCESS.getValue();
+                  } else {
+                    filteredRequests.add(req);
                     mapIds.add(req.mapId);
-                    representativeRequests.putIfAbsent(req.partitionId, req);
-                  }
-                } else {
-                  filteredRequests.add(req);
-                  mapIds.add(req.mapId);
-                  if (adaptivePartitionWriteParallelismEnabled) {
-                    representativeRequests.putIfAbsent(req.partitionId, req);
-                  }
-                  ReviveRequest current = requestsToSend.get(req.partitionId);
-                  if (current == null || current.epoch < req.epoch) {
-                    requestsToSend.put(req.partitionId, req);
+                    if (!requestsToSend.containsKey(req.partitionId)
+                        || requestsToSend.get(req.partitionId).epoch < req.epoch) {
+                      requestsToSend.put(req.partitionId, req);
+                    }
                   }
                 }
-              }
+                allToSend = new ArrayList<>(requestsToSend.values());
+              } else {
+                // Adaptive parallelism: one representative request per partition, used as the
+                // mapId/attemptId donor when rebuilding retire reports below.
+                Map<Integer, ReviveRequest> representativeRequests = new HashMap<>();
+                while (iter.hasNext()) {
+                  ReviveRequest req = iter.next();
+                  representativeRequests.putIfAbsent(req.partitionId, req);
+                  mapIds.add(req.mapId);
+                  if (shuffleClient.mapperEnded(shuffleId, req.mapId)
+                      || shuffleClient.hasWritableLocation(
+                          partitionMap, req.partitionId, req.mapId)) {
+                    req.reviveStatus = StatusCode.SUCCESS.getValue();
+                  } else {
+                    filteredRequests.add(req);
+                    ReviveRequest current = requestsToSend.get(req.partitionId);
+                    if (current == null || current.epoch < req.epoch) {
+                      requestsToSend.put(req.partitionId, req);
+                    }
+                  }
+                }
 
-              ArrayList<ReviveRequest> allToSend = new ArrayList<>(requestsToSend.values());
-              if (adaptivePartitionWriteParallelismEnabled) {
+                allToSend = new ArrayList<>(requestsToSend.values());
                 // Every retire report must reach the LifecycleManager (its active-set bookkeeping
                 // depends on it), even when already satisfied locally. Reports are rebuilt from
                 // the groups' outstanding sets at send time instead of being collected from the
@@ -115,11 +124,7 @@ class ReviveManager {
                 for (Map.Entry<Integer, ReviveRequest> entry : representativeRequests.entrySet()) {
                   int partitionId = entry.getKey();
                   ReviveRequest representative = entry.getValue();
-                  PartitionLocationGroup group =
-                      partitionMap == null ? null : partitionMap.get(partitionId);
-                  if (group == null) {
-                    continue;
-                  }
+                  PartitionLocationGroup group = partitionMap.get(partitionId);
                   // An epoch covered by a waiting (non-satisfied) request is reported by it.
                   ReviveRequest waiting = requestsToSend.get(partitionId);
                   int coveredEpoch = waiting == null ? -1 : waiting.epoch;

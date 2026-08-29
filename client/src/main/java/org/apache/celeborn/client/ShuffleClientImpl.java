@@ -360,7 +360,7 @@ public class ShuffleClientImpl extends ShuffleClient {
                   + request.loc));
     } else {
       PartitionLocation newLoc =
-          reducePartitionMap.get(shuffleId).get(partitionId).currentOrLatest(mapId);
+          reducePartitionMap.get(shuffleId).get(partitionId).currentFor(mapId);
       logger.info(
           "Revive for push data success, new location for shuffle {} map {} attempt {} partition {} batch {} is location {}.",
           shuffleId,
@@ -472,7 +472,7 @@ public class ShuffleClientImpl extends ShuffleClient {
               oldGroupedBatchId);
         } else if (request.reviveStatus == StatusCode.SUCCESS.getValue()) {
           PartitionLocation newLoc =
-              reducePartitionMap.get(shuffleId).get(request.partitionId).currentOrLatest(mapId);
+              reducePartitionMap.get(shuffleId).get(request.partitionId).currentFor(mapId);
           DataBatches newDataBatches =
               newDataBatchesMap.computeIfAbsent(genAddressPair(newLoc), (s) -> new DataBatches());
           newDataBatches.addDataBatch(newLoc, batch.batchId, batch.body);
@@ -893,7 +893,7 @@ public class ShuffleClientImpl extends ShuffleClient {
   boolean hasWritableLocation(
       Map<Integer, PartitionLocationGroup> shuffleMap, int partitionId, int mapId) {
     PartitionLocationGroup group = shuffleMap.get(partitionId);
-    return group != null && group.currentFor(mapId) != null;
+    return group != null && group.hasWritableFor(mapId);
   }
 
   void excludeWorkerByCause(StatusCode cause, PartitionLocation oldLocation) {
@@ -1132,7 +1132,7 @@ public class ShuffleClientImpl extends ShuffleClient {
     }
 
     PartitionLocationGroup group = map.get(partitionId);
-    final PartitionLocation loc = group == null ? null : group.currentOrLatest(mapId);
+    final PartitionLocation loc = group == null ? null : group.currentFor(mapId);
     if (loc == null) {
       throw new CelebornIOException(
           String.format(

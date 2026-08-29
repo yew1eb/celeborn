@@ -54,32 +54,30 @@ public class PartitionLocationGroup {
     this.single = loc;
   }
 
-  /** Fast path: returns the single location when not inflated, zero extra cost. */
-  public PartitionLocation currentFor(int mapId) {
-    return pick(mapId, -1);
-  }
-
   /**
-   * A writable location for {@code mapId}; when every known location is locally retired, falls back
-   * to the latest (possibly retired) one. This mirrors the baseline path, which never retires
-   * locally and keeps pushing the possibly-dead location until the worker rejects it and the reject
-   * drives the next revive round.
+   * Pick a writable location for {@code mapId}; when every known location is locally retired, falls
+   * back to the latest (possibly retired) one. The fallback mirrors the baseline path, which never
+   * retires locally and keeps pushing the possibly-dead location until the worker rejects it and
+   * the reject drives the next revive round.
    */
-  public PartitionLocation currentOrLatest(int mapId) {
-    PartitionLocation loc = currentFor(mapId);
+  public PartitionLocation currentFor(int mapId) {
+    PartitionLocation loc = pick(mapId);
     return loc == null ? latest() : loc;
   }
 
+  /** Whether the partition currently has a writable location for {@code mapId}. */
+  boolean hasWritableFor(int mapId) {
+    return pick(mapId) != null;
+  }
+
   /**
-   * Pick a writable location for {@code mapId}, skipping {@code excludeEpoch} (-1 = skip nothing);
-   * null when nothing is writable. The active list is snapshotted because a concurrent full-set
-   * merge may shrink it.
+   * Pick a writable location for {@code mapId}; null when nothing is writable. The active list is
+   * snapshotted because a concurrent full-set merge may shrink it.
    */
-  private PartitionLocation pick(int mapId, int excludeEpoch) {
+  private PartitionLocation pick(int mapId) {
     ParallelState p = parallel;
     if (p == null) {
-      PartitionLocation loc = single;
-      return (loc != null && loc.getEpoch() != excludeEpoch) ? loc : null;
+      return single;
     }
     // Snapshot the active list: a concurrent full-set merge may shrink it via removeIf, so
     // size()-then-get() on the live list races. Collect the writable subset in a single pass
@@ -87,7 +85,7 @@ public class PartitionLocationGroup {
     PartitionLocation[] snapshot = p.active.toArray(new PartitionLocation[0]);
     List<PartitionLocation> writable = new ArrayList<>();
     for (PartitionLocation loc : snapshot) {
-      if (isWritable(p, loc, excludeEpoch)) {
+      if (isWritable(p, loc)) {
         writable.add(loc);
       }
     }
@@ -98,10 +96,7 @@ public class PartitionLocationGroup {
     return writable.get(start);
   }
 
-  private static boolean isWritable(ParallelState p, PartitionLocation loc, int excludeEpoch) {
-    if (loc.getEpoch() == excludeEpoch) {
-      return false;
-    }
+  private static boolean isWritable(ParallelState p, PartitionLocation loc) {
     StatusCode cause = p.retired.get(loc.getEpoch());
     return cause == null || cause == StatusCode.SOFT_SPLIT;
   }

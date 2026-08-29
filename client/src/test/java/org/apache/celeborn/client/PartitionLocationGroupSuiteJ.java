@@ -20,7 +20,6 @@ package org.apache.celeborn.client;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
-import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
@@ -118,9 +117,11 @@ public class PartitionLocationGroupSuiteJ {
     PartitionLocationGroup group = new PartitionLocationGroup(loc(0, "w1"));
     group.mergeActiveLocations(Arrays.asList(loc(0, "w1"), loc(1, "w2")), true);
     group.retire(0, StatusCode.HARD_SPLIT);
-    assertTrue(group.currentFor(0) != null);
+    assertTrue(group.hasWritableFor(0));
     group.retire(1, StatusCode.HARD_SPLIT);
-    assertNull(group.currentFor(0));
+    // Nothing writable: currentFor falls back to the latest (possibly retired) location.
+    assertFalse(group.hasWritableFor(0));
+    assertEquals(1, group.currentFor(0).getEpoch());
   }
 
   @Test
@@ -140,7 +141,9 @@ public class PartitionLocationGroupSuiteJ {
     // A harder cause is never downgraded back to soft.
     assertTrue(group.retire(1, StatusCode.HARD_SPLIT));
     assertFalse(group.retire(1, StatusCode.SOFT_SPLIT));
-    assertNull(group.currentFor(0));
+    // Nothing writable: currentFor falls back to the latest (possibly retired) location.
+    assertFalse(group.hasWritableFor(0));
+    assertEquals(1, group.currentFor(0).getEpoch());
   }
 
   @Test
