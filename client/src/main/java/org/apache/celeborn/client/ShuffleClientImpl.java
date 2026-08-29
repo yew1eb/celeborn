@@ -365,11 +365,27 @@ public class ShuffleClientImpl extends ShuffleClient {
           && newLocGroup != null
           && adaptivePartitionWriteParallelismEnabled
           && remainReviveTimes > 0) {
-        // Revive reported SUCCESS but every known location is locally retired — concurrent
-        // HARD_SPLITs retired the rest, or the LM's reply was based on a stale retire snapshot.
-        // Re-enqueue a revive request and retry with the remaining budget, in the same shape as
-        // the merged path: the batch scheduler attaches the outstanding retire reports at send
-        // time, the LM replenishes the active set, and the next round re-pushes.
+        // Revive reported SUCCESS but nothing is writable: the remaining writable locations
+        // were retired by concurrent HARD_SPLITs / push failures after this request was
+        // satisfied/answered. A sent revive carries every retire known at send time (the
+        // request's own epoch plus the outstanding reports attached by the batch scheduler),
+        // so the LM's reply always contains a fresh writable replacement — only retires
+        // landing after that point can empty the writable set. Re-enqueue and retry with the
+        // remaining budget, same shape as the merged path: the scheduler attaches the
+        // outstanding retire reports at send time, the LM replenishes the active set, and the
+        // next round re-pushes.
+        logger.info(
+            "Shuffle {} partition {}: revive succeeded but no writable location for map {} "
+                + "attempt {} batch {} (active epochs: {}, retired: {}), re-enqueue revive, "
+                + "remaining budget {}.",
+            shuffleId,
+            partitionId,
+            mapId,
+            attemptId,
+            batchId,
+            newLocGroup.activeEpochsSnapshot(),
+            newLocGroup.retiredEpochsSnapshot(),
+            remainReviveTimes);
         ReviveRequest newRequest =
             new ReviveRequest(
                 shuffleId, mapId, attemptId, partitionId, request.epoch, request.loc, cause);
@@ -482,10 +498,7 @@ public class ShuffleClientImpl extends ShuffleClient {
    * next tick when the partition still has a writable location, otherwise by the LifecycleManager
    * response.
    */
-  private void retireLocallyIfAdaptive(int shuffleId, ReviveRequest[] requests, StatusCode cause) {
-    if (!adaptivePartitionWriteParallelismEnabled) {
-      return;
-    }
+  private void retireLocally(int shuffleId, ReviveRequest[] requests, StatusCode cause) {
     for (ReviveRequest request : requests) {
       PartitionLocationGroup group = locationGroup(shuffleId, request.partitionId);
       if (group != null) {
@@ -1904,7 +1917,10 @@ public class ShuffleClientImpl extends ShuffleClient {
                 ReviveRequest[] requests =
                     addAndGetReviveRequests(
                         shuffleId, mapId, attemptId, batchesNeedResubmit, StatusCode.HARD_SPLIT);
-                retireLocallyIfAdaptive(shuffleId, requests, StatusCode.HARD_SPLIT);
+                if (adaptivePartitionWriteParallelismEnabled) {
+                  // Adaptive: retire the epochs locally so routing skips them immediately.
+                  retireLocally(shuffleId, requests, StatusCode.HARD_SPLIT);
+                }
                 pushDataRetryPool.submit(
                     () ->
                         submitRetryPushMergedData(
@@ -1993,7 +2009,10 @@ public class ShuffleClientImpl extends ShuffleClient {
             if (!mapperEnded(shuffleId, mapId)) {
               ReviveRequest[] requests =
                   addAndGetReviveRequests(shuffleId, mapId, attemptId, batches, cause);
-              retireLocallyIfAdaptive(shuffleId, requests, cause);
+              if (adaptivePartitionWriteParallelismEnabled) {
+                // Adaptive: retire the epochs locally so routing skips them immediately.
+                retireLocally(shuffleId, requests, cause);
+              }
               pushDataRetryPool.submit(
                   () ->
                       submitRetryPushMergedData(

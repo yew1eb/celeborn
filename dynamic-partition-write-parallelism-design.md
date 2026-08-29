@@ -111,7 +111,7 @@ LM (ChangePartitionManager → PartitionHotnessTracker):
 | SOFT_SPLIT 回调 | `retire(epoch, SOFT)`(保持可写),首报且 mapper 未结束时上报;数据已落盘,零阻塞 |
 | HARD_SPLIT / push 失败 | `retire` 后走常规批量 revive:还有其他可写 location 时,批调度器下一个 tick 本地满足(≤ `push.revive.interval`,默认 100ms,不发 LM RPC);否则由 LM 响应分配新 location |
 | 全部不可用(入口) | `ReviveManager.reviveUntilWritable` 阻塞等待标准批量 revive(预算 = `push.revive.maxRetries`);数据线程必须同步拿到可写 location,没有可重排队的载体,故只能阻塞。批调度器发送时携带全部未消化退休上报,LM 消化后一轮补满活跃集;不带上报的单条请求会让 gap 分配归零、回已退休 epoch(机制分析见决策 5)。完成谓词是"可写"而非 reviveStatus——任何来源让 partition 可写都会提前唤醒 |
-| 重推时 SUCCESS 但不可写 | `submitRetryPushData` 与 merged 路径同形 re-enqueue:重组 revive 请求入队、剩余预算减一,批调度器满足(本地或 LM 响应)后下一轮重推。`reviveStatus == SUCCESS` 只代表请求已被处理,不等于可写——满足到唤醒之间并发 HARD_SPLIT 可退休其余 location,LM 响应也可能基于发送时刻的退休快照(簿记竞态),故以 `currentFor(mapId)` 重查为准 |
+| 重推时 SUCCESS 但不可写 | `submitRetryPushData` 与 merged 路径同形 re-enqueue:重组 revive 请求入队、剩余预算减一,批调度器满足(本地或 LM 响应)后下一轮重推。`reviveStatus == SUCCESS` 只代表请求已被处理,不等于此刻可写——已发出的 revive 必携带发送时刻全部退休、回复必含新鲜补位,只有满足/merge 之后新发生的并发 HARD_SPLIT/push 失败才能清空可写集(≤50ms 轮询窗口),故以 `currentFor(mapId)` 重查为准 |
 
 #### 并发要点
 
