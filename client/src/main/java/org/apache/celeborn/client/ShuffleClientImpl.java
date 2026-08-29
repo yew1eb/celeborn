@@ -374,7 +374,7 @@ public class ShuffleClientImpl extends ShuffleClient {
         // remaining budget, same shape as the merged path: the scheduler attaches the
         // outstanding retire reports at send time, the LM replenishes the active set, and the
         // next round re-pushes.
-        logger.info(
+        logger.warn(
             "Shuffle {} partition {}: revive succeeded but no writable location for map {} "
                 + "attempt {} batch {} (active epochs: {}, retired: {}), re-enqueue revive, "
                 + "remaining budget {}.",
@@ -556,6 +556,18 @@ public class ShuffleClientImpl extends ShuffleClient {
                 newDataBatchesMap.computeIfAbsent(genAddressPair(newLoc), (s) -> new DataBatches());
             newDataBatches.addDataBatch(newLoc, batch.batchId, batch.body);
           } else if (remainReviveTimes > 0) {
+            logger.warn(
+                "Shuffle {} partition {}: revive succeeded but no writable location for map {} "
+                    + "attempt {} batch {} (active epochs: {}, retired: {}), re-enqueue revive, "
+                    + "remaining budget {}.",
+                shuffleId,
+                request.partitionId,
+                mapId,
+                attemptId,
+                batch.batchId,
+                newLocGroup.activeEpochsSnapshot(),
+                newLocGroup.retiredEpochsSnapshot(),
+                remainReviveTimes);
             reviveFailedBatchesMap.add(batch);
           } else {
             String errorMsg =
@@ -1083,22 +1095,20 @@ public class ShuffleClientImpl extends ShuffleClient {
               partitionLocationMap.computeIfAbsent(
                   partitionId, id -> new PartitionLocationGroup(loc));
           if (adaptivePartitionWriteParallelismEnabled) {
-            // Converge to the full active set delivered by the LifecycleManager. The response is
-            // treated as a full set only when it genuinely carries additional active locations
-            // (additionalPartitions count > 0); a single-location response — whether from an old
-            // LM that never populates the field, or a new LM reporting a cold partition with only
-            // its max epoch — is NOT a full set, so it must not evict locally soft-retired epochs.
+            // The adaptive LifecycleManager always replies the current full active set of the
+            // partition (the max-epoch location as the primary reply plus the rest in
+            // additionalPartitions). Soft-split epochs are retained in the LM's active set, so
+            // converging to the reply only evicts already-digested retires.
             List<PartitionLocation> additionals = response.additionalLocs().get(partitionId);
-            boolean fullSet = additionals != null && !additionals.isEmpty();
             List<PartitionLocation> allActive = new ArrayList<>();
             if (loc != null) {
               allActive.add(loc);
             }
-            if (fullSet) {
+            if (additionals != null) {
               allActive.addAll(additionals);
             }
-            group.mergeActiveLocations(allActive, fullSet);
-            if (fullSet && allActive.size() > 1) {
+            group.mergeActiveLocations(allActive, true);
+            if (allActive.size() > 1) {
               StringBuilder sb = new StringBuilder();
               for (PartitionLocation l : allActive) {
                 if (sb.length() > 0) {
@@ -1221,6 +1231,7 @@ public class ShuffleClientImpl extends ShuffleClient {
       }
       return 0;
     }
+    
 
     PartitionLocationGroup group = map.get(partitionId);
     PartitionLocation currentLoc = group == null ? null : group.currentFor(mapId);
@@ -1230,7 +1241,7 @@ public class ShuffleClientImpl extends ShuffleClient {
       // digests them, replenishes the whole active set in one round and replies it. A request
       // without the reports would leave the LM's gap-based allocation at gap == 0 and re-reply
       // already-retired epochs.
-      logger.info(
+      logger.warn(
           "Shuffle {} partition {}: all {} location(s) unusable from epoch {}, blocking revive.",
           shuffleId,
           partitionId,
