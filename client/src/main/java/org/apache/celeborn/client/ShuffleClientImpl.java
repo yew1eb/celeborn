@@ -361,26 +361,10 @@ public class ShuffleClientImpl extends ShuffleClient {
     } else {
       PartitionLocationGroup newLocGroup = locationGroup(shuffleId, partitionId);
       PartitionLocation newLoc = newLocGroup == null ? null : newLocGroup.currentFor(mapId);
-      if (newLoc == null && newLocGroup != null && adaptivePartitionWriteParallelismEnabled) {
-        // Revive reported SUCCESS but nothing is writable: the remaining writable locations
-        // were retired by concurrent HARD_SPLITs / push failures after this request was
-        // satisfied. Fall back to the latest known (possibly retired) location — the same
-        // behavior as a non-adaptive client: the worker rejects it, and the reject drives
-        // another revive round until the LM's replacement lands in the group.
+      if (newLoc == null && newLocGroup != null) {
+        // All known locations are locally retired: fall back to the latest (possibly retired)
+        // one and let the worker reject it — the same self-heal shape as the non-adaptive path.
         newLoc = newLocGroup.latest();
-        logger.warn(
-            "Shuffle {} partition {}: revive succeeded but no writable location for map {} "
-                + "attempt {} batch {} (active epochs: {}, retired: {}), falling back to latest "
-                + "epoch {}@{}.",
-            shuffleId,
-            partitionId,
-            mapId,
-            attemptId,
-            batchId,
-            newLocGroup.activeEpochsSnapshot(),
-            newLocGroup.retiredEpochsSnapshot(),
-            newLoc.getEpoch(),
-            newLoc.hostAndPushPort());
       }
       if (newLoc == null) {
         pushDataRpcResponseCallback.onFailure(
@@ -527,23 +511,17 @@ public class ShuffleClientImpl extends ShuffleClient {
         } else if (request.reviveStatus == StatusCode.SUCCESS.getValue()) {
           PartitionLocationGroup newLocGroup = locationGroup(shuffleId, request.partitionId);
           PartitionLocation newLoc = newLocGroup == null ? null : newLocGroup.currentFor(mapId);
+          if (newLoc == null && newLocGroup != null) {
+            // Same fallback as submitRetryPushData: push the latest (possibly retired) location
+            // and let the worker-side reject drive the next revive round.
+            newLoc = newLocGroup.latest();
+          }
           if (newLoc != null) {
             DataBatches newDataBatches =
                 newDataBatchesMap.computeIfAbsent(genAddressPair(newLoc), (s) -> new DataBatches());
             newDataBatches.addDataBatch(newLoc, batch.batchId, batch.body);
           } else if (remainReviveTimes > 0) {
-            logger.warn(
-                "Shuffle {} partition {}: revive succeeded but no writable location for map {} "
-                    + "attempt {} batch {} (active epochs: {}, retired: {}), re-enqueue revive, "
-                    + "remaining budget {}.",
-                shuffleId,
-                request.partitionId,
-                mapId,
-                attemptId,
-                batch.batchId,
-                newLocGroup.activeEpochsSnapshot(),
-                newLocGroup.retiredEpochsSnapshot(),
-                remainReviveTimes);
+            // newLoc == null means the location group is gone (concurrent shuffle cleanup).
             reviveFailedBatchesMap.add(batch);
           } else {
             String errorMsg =
