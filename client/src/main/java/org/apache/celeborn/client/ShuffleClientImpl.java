@@ -359,13 +359,11 @@ public class ShuffleClientImpl extends ShuffleClient {
                   + ", old location: "
                   + request.loc));
     } else {
-      PartitionLocationGroup newLocGroup = locationGroup(shuffleId, partitionId);
+      PartitionLocationGroup newLocGroup = reducePartitionMap.get(shuffleId).get(partitionId);
       PartitionLocation newLoc =
-          newLocGroup == null
-              ? null
-              : newLocGroup.currentFor(mapId) == null
-                  ? newLocGroup.latest()
-                  : newLocGroup.currentFor(mapId);
+          newLocGroup.currentFor(mapId) == null
+              ? newLocGroup.latest()
+              : newLocGroup.currentFor(mapId);
       logger.info(
           "Revive for push data success, new location for shuffle {} map {} attempt {} partition {} batch {} is location {}.",
           shuffleId,
@@ -495,13 +493,12 @@ public class ShuffleClientImpl extends ShuffleClient {
               request.partitionId,
               oldGroupedBatchId);
         } else if (request.reviveStatus == StatusCode.SUCCESS.getValue()) {
-          PartitionLocationGroup newLocGroup = locationGroup(shuffleId, request.partitionId);
+          PartitionLocationGroup newLocGroup =
+              reducePartitionMap.get(shuffleId).get(request.partitionId);
           PartitionLocation newLoc =
-              newLocGroup == null
-                  ? null
-                  : newLocGroup.currentFor(mapId) == null
-                      ? newLocGroup.latest()
-                      : newLocGroup.currentFor(mapId);
+              newLocGroup.currentFor(mapId) == null
+                  ? newLocGroup.latest()
+                  : newLocGroup.currentFor(mapId);
           DataBatches newDataBatches =
               newDataBatchesMap.computeIfAbsent(genAddressPair(newLoc), (s) -> new DataBatches());
           newDataBatches.addDataBatch(newLoc, batch.batchId, batch.body);
