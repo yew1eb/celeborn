@@ -251,24 +251,6 @@ public class PartitionLocationGroup {
     return p == null ? (single == null ? 0 : 1) : p.active.size();
   }
 
-  /** Epochs of the active list, ascending — for diagnostics in failure messages. */
-  List<Integer> activeEpochsSnapshot() {
-    ParallelState p = parallel;
-    if (p == null) {
-      PartitionLocation loc = single;
-      List<Integer> epochs = new ArrayList<>(1);
-      if (loc != null) {
-        epochs.add(loc.getEpoch());
-      }
-      return epochs;
-    }
-    List<Integer> epochs = new ArrayList<>(p.active.size());
-    for (PartitionLocation loc : p.active) {
-      epochs.add(loc.getEpoch());
-    }
-    return epochs;
-  }
-
   /** Retired epochs and their causes, for diagnostics in failure messages. */
   List<String> retiredEpochsSnapshot() {
     ParallelState p = parallel;
