@@ -135,6 +135,9 @@ public class ShuffleClientImpl extends ShuffleClient {
 
   private final Map<Integer, Set<Integer>> splitting = JavaUtils.newConcurrentHashMap();
 
+  // key: shuffleId, value: partitionIds with an in-flight revive request
+  private final Map<Integer, Set<Integer>> revivingPartitions = JavaUtils.newConcurrentHashMap();
+
   protected final String appUniqueId;
   private final boolean authEnabled;
   private final TransportConf dataTransportConf;
@@ -415,10 +418,30 @@ public class ShuffleClientImpl extends ShuffleClient {
       PartitionLocation loc = batch.loc;
       ReviveRequest reviveRequest =
           new ReviveRequest(shuffleId, mapId, attemptId, loc.getId(), loc.getEpoch(), loc, cause);
+      markPartitionReviving(shuffleId, loc.getId());
       reviveManager.addRequest(reviveRequest);
       reviveRequests[i] = reviveRequest;
     }
     return reviveRequests;
+  }
+
+  @Override
+  public boolean isPartitionReviving(int shuffleId, int partitionId) {
+    Set<Integer> partitions = revivingPartitions.get(shuffleId);
+    return partitions != null && partitions.contains(partitionId);
+  }
+
+  void markPartitionReviving(int shuffleId, int partitionId) {
+    revivingPartitions
+        .computeIfAbsent(shuffleId, id -> ConcurrentHashMap.newKeySet())
+        .add(partitionId);
+  }
+
+  void clearRevivingPartitions(int shuffleId, Collection<Integer> partitionIds) {
+    Set<Integer> partitions = revivingPartitions.get(shuffleId);
+    if (partitions != null) {
+      partitions.removeAll(partitionIds);
+    }
   }
 
   private void submitRetryPushMergedData(
@@ -1193,6 +1216,7 @@ public class ShuffleClientImpl extends ShuffleClient {
                           latest.getEpoch(),
                           latest,
                           StatusCode.HARD_SPLIT);
+                  markPartitionReviving(shuffleId, partitionId);
                   reviveManager.addRequest(reviveRequest);
                   long dueTime =
                       System.currentTimeMillis()
@@ -1287,6 +1311,7 @@ public class ShuffleClientImpl extends ShuffleClient {
                 ReviveRequest reviveRequest =
                     new ReviveRequest(
                         shuffleId, mapId, attemptId, partitionId, latest.getEpoch(), latest, cause);
+                markPartitionReviving(shuffleId, partitionId);
                 reviveManager.addRequest(reviveRequest);
                 long dueTime =
                     System.currentTimeMillis()
@@ -1873,6 +1898,7 @@ public class ShuffleClientImpl extends ShuffleClient {
     mapperEndMap.remove(shuffleId);
     stageEndShuffleSet.remove(shuffleId);
     splitting.remove(shuffleId);
+    revivingPartitions.remove(shuffleId);
 
     logger.info("Unregistered shuffle {}.", shuffleId);
     return true;

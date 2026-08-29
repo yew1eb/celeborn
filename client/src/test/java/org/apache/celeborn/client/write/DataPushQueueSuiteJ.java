@@ -20,9 +20,12 @@ package org.apache.celeborn.client.write;
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.LongAdder;
 
 import org.junit.AfterClass;
@@ -176,6 +179,189 @@ public class DataPushQueueSuiteJ {
       Assert.assertTrue(e.getCause() instanceof OutOfMemoryError);
     }
     client.shutdown();
+  }
+
+  @Test
+  public void testReviveGateSkipsAndResumes() throws Exception {
+    int shuffleId = 0;
+    int mapId = 0;
+    int attemptId = 0;
+    int numMappers = 1;
+    int numPartitions = 2;
+    int gatedPartition = 0;
+
+    CelebornConf conf = new CelebornConf();
+    conf.set(CelebornConf.CLIENT_PUSH_REVIVE_GATE_ENABLED().key(), "true");
+    conf.set(CelebornConf.CLIENT_PUSH_TAKE_TASK_WAIT_INTERVAL().key(), "10ms");
+    conf.set(CelebornConf.CLIENT_PUSH_TAKE_TASK_REVIVE_MAX_WAIT_ATTEMPTS().key(), "10000");
+
+    final Set<Integer> reviving = ConcurrentHashMap.newKeySet();
+    reviving.add(gatedPartition);
+    final File tempFile = new File(tempDir, UUID.randomUUID().toString());
+    DummyShuffleClient client =
+        new DummyShuffleClient(conf, tempFile) {
+          @Override
+          public boolean isPartitionReviving(int shuffleId, int partitionId) {
+            return reviving.contains(partitionId);
+          }
+        };
+    client.initReducePartitionMap(shuffleId, numPartitions, 1);
+
+    LongAdder[] mapStatusLengths = new LongAdder[numPartitions];
+    for (int i = 0; i < numPartitions; i++) {
+      mapStatusLengths[i] = new LongAdder();
+    }
+    List<Integer> pushed = Collections.synchronizedList(new ArrayList<>());
+    DataPusher dataPusher =
+        new DataPusher(
+            shuffleId,
+            mapId,
+            attemptId,
+            0,
+            numMappers,
+            numPartitions,
+            conf,
+            client,
+            null,
+            integer -> {},
+            mapStatusLengths) {
+          @Override
+          protected void pushData(PushTask task) throws IOException {
+            pushed.add(task.getPartitionId());
+          }
+        };
+
+    dataPusher.addTask(gatedPartition, new byte[10], 10);
+    dataPusher.addTask(1, new byte[10], 10);
+
+    // The normal partition is pushed while the reviving one stays in the queue.
+    waitUntil(() -> pushed.contains(1));
+    Assert.assertFalse(pushed.contains(gatedPartition));
+
+    // After the revive window ends, the gated partition is pushed too.
+    reviving.clear();
+    dataPusher.waitOnTermination();
+    Assert.assertTrue(pushed.contains(gatedPartition));
+    client.shutdown();
+  }
+
+  @Test
+  public void testReviveGateDisabled() throws Exception {
+    int shuffleId = 0;
+    int mapId = 0;
+    int attemptId = 0;
+    int numMappers = 1;
+    int numPartitions = 1;
+
+    // reviveGateEnabled defaults to false, the gate must not take effect.
+    CelebornConf conf = new CelebornConf();
+    final File tempFile = new File(tempDir, UUID.randomUUID().toString());
+    DummyShuffleClient client =
+        new DummyShuffleClient(conf, tempFile) {
+          @Override
+          public boolean isPartitionReviving(int shuffleId, int partitionId) {
+            return true;
+          }
+        };
+    client.initReducePartitionMap(shuffleId, numPartitions, 1);
+
+    LongAdder[] mapStatusLengths = new LongAdder[numPartitions];
+    for (int i = 0; i < numPartitions; i++) {
+      mapStatusLengths[i] = new LongAdder();
+    }
+    List<Integer> pushed = Collections.synchronizedList(new ArrayList<>());
+    DataPusher dataPusher =
+        new DataPusher(
+            shuffleId,
+            mapId,
+            attemptId,
+            0,
+            numMappers,
+            numPartitions,
+            conf,
+            client,
+            null,
+            integer -> {},
+            mapStatusLengths) {
+          @Override
+          protected void pushData(PushTask task) throws IOException {
+            pushed.add(task.getPartitionId());
+          }
+        };
+
+    dataPusher.addTask(0, new byte[10], 10);
+    dataPusher.waitOnTermination();
+    Assert.assertTrue(pushed.contains(0));
+    client.shutdown();
+  }
+
+  @Test
+  public void testReviveGateSafetyValve() throws Exception {
+    int shuffleId = 0;
+    int mapId = 0;
+    int attemptId = 0;
+    int numMappers = 1;
+    int numPartitions = 1;
+
+    CelebornConf conf = new CelebornConf();
+    conf.set(CelebornConf.CLIENT_PUSH_REVIVE_GATE_ENABLED().key(), "true");
+    conf.set(CelebornConf.CLIENT_PUSH_TAKE_TASK_WAIT_INTERVAL().key(), "10ms");
+    conf.set(CelebornConf.CLIENT_PUSH_TAKE_TASK_REVIVE_MAX_WAIT_ATTEMPTS().key(), "2");
+
+    final File tempFile = new File(tempDir, UUID.randomUUID().toString());
+    // The revive flag is never cleared, the task must be taken anyway after
+    // takeTaskReviveMaxWaitAttempts rounds instead of waiting forever.
+    DummyShuffleClient client =
+        new DummyShuffleClient(conf, tempFile) {
+          @Override
+          public boolean isPartitionReviving(int shuffleId, int partitionId) {
+            return true;
+          }
+        };
+    client.initReducePartitionMap(shuffleId, numPartitions, 1);
+
+    LongAdder[] mapStatusLengths = new LongAdder[numPartitions];
+    for (int i = 0; i < numPartitions; i++) {
+      mapStatusLengths[i] = new LongAdder();
+    }
+    List<Integer> pushed = Collections.synchronizedList(new ArrayList<>());
+    DataPusher dataPusher =
+        new DataPusher(
+            shuffleId,
+            mapId,
+            attemptId,
+            0,
+            numMappers,
+            numPartitions,
+            conf,
+            client,
+            null,
+            integer -> {},
+            mapStatusLengths) {
+          @Override
+          protected void pushData(PushTask task) throws IOException {
+            pushed.add(task.getPartitionId());
+          }
+        };
+
+    dataPusher.addTask(0, new byte[10], 10);
+    dataPusher.waitOnTermination();
+    Assert.assertTrue(pushed.contains(0));
+    client.shutdown();
+  }
+
+  private void waitUntil(CheckCallable condition) throws Exception {
+    long deadline = System.currentTimeMillis() + 10000;
+    while (!condition.check()) {
+      if (System.currentTimeMillis() > deadline) {
+        Assert.fail("Timed out waiting for condition.");
+      }
+      Thread.sleep(10);
+    }
+  }
+
+  private interface CheckCallable {
+    boolean check();
   }
 
   public static byte[] intToBytes(int value) {

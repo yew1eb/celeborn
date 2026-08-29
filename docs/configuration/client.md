@@ -70,6 +70,7 @@ license: |
 | celeborn.client.push.revive.batchSize | 2048 | false | Max number of partitions in one Revive request. | 0.3.0 |  | 
 | celeborn.client.push.revive.interval | 100ms | false | Interval for client to trigger Revive to LifecycleManager. The number of partitions in one Revive request is `celeborn.client.push.revive.batchSize`. | 0.3.0 |  | 
 | celeborn.client.push.revive.maxRetries | 5 | false | Max retry times for reviving when celeborn push data failed. | 0.3.0 |  | 
+| celeborn.client.push.reviveGateEnabled | false | false | Whether to skip push tasks of partitions with an in-flight revive request, to avoid wasted pushes to a split location during the revive window. | 0.7.0 |  | 
 | celeborn.client.push.sendBufferPool.checkExpireInterval | 30s | false | Interval to check expire for send buffer pool. If the pool has been idle for more than `celeborn.client.push.sendBufferPool.expireTimeout`, the pooled send buffers and push tasks will be cleaned up. | 0.3.1 |  | 
 | celeborn.client.push.sendBufferPool.expireTimeout | 60s | false | Timeout before clean up SendBufferPool. If SendBufferPool is idle for more than this time, the send buffers and push tasks will be cleaned up. | 0.3.1 |  | 
 | celeborn.client.push.slowStart.initialSleepTime | 500ms | false | The initial sleep time if the current max in flight requests is 0 | 0.3.0 |  | 
@@ -77,6 +78,7 @@ license: |
 | celeborn.client.push.sort.randomizePartitionId.enabled | false | false | Whether to randomize partitionId in push sorter. If true, partitionId will be randomized when sort data to avoid skew when push to worker | 0.3.0 | celeborn.push.sort.randomizePartitionId.enabled | 
 | celeborn.client.push.stageEnd.timeout | &lt;value of celeborn.&lt;module&gt;.io.connectionTimeout&gt; | false | Timeout for waiting StageEnd. During this process, there are `celeborn.client.requestCommitFiles.maxRetries` times for retry opportunities for committing files and 1 times for releasing slots request. User can customize this value according to your setting. By default, the value is the max timeout value `celeborn.<module>.io.connectionTimeout`. | 0.3.0 | celeborn.push.stageEnd.timeout | 
 | celeborn.client.push.takeTaskMaxWaitAttempts | 1 | false | Max wait times if no task available to push to worker. | 0.3.0 |  | 
+| celeborn.client.push.takeTaskReviveMaxWaitAttempts | 20 | false | Max rounds a push task of a partition with an in-flight revive is skipped before being taken anyway. Only takes effect when `celeborn.client.push.reviveGateEnabled` is true. | 0.7.0 |  | 
 | celeborn.client.push.takeTaskWaitInterval | 50ms | false | Wait interval if no task available to push to worker. | 0.3.0 |  | 
 | celeborn.client.push.timeout | 120s | false | Timeout for a task to push data rpc message. This value should better be more than twice of `celeborn.<module>.push.timeoutCheck.interval` | 0.3.0 | celeborn.push.data.timeout | 
 | celeborn.client.readLocalShuffleFile.enabled | false | false | Enable read local shuffle file for clusters that co-deployed with yarn node manager. | 0.3.1 |  | 

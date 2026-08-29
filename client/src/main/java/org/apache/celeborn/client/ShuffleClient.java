@@ -463,6 +463,15 @@ public abstract class ShuffleClient {
 
   public abstract PushState getPushState(String mapKey);
 
+  /**
+   * Whether the partition has an in-flight revive request. DataPushQueue consults this to skip push
+   * tasks whose target location is known to reject pushes, avoiding wasted pushes during the revive
+   * window.
+   */
+  public boolean isPartitionReviving(int shuffleId, int partitionId) {
+    return false;
+  }
+
   public abstract Tuple2<Integer, Boolean> getShuffleId(
       int appShuffleId, String appShuffleIdentifier, boolean isWriter, boolean isBarrierStage);
 

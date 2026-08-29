@@ -21,6 +21,7 @@ import java.util.*;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -105,6 +106,12 @@ class ReviveManager {
                   }
                 }
               }
+              // All requests of this batch reached a terminal state (short-circuited SUCCESS,
+              // revived or REVIVE_FAILED), clear the reviving flags so that DataPushQueue
+              // resumes taking push tasks of these partitions.
+              shuffleClient.clearRevivingPartitions(
+                  shuffleId,
+                  requests.stream().map(req -> req.partitionId).collect(Collectors.toSet()));
             }
             // break the loop if remaining requests is less than half of
             // `celeborn.client.push.revive.batchSize`

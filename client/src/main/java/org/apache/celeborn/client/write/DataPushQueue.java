@@ -52,6 +52,8 @@ public class DataPushQueue {
   private final ShuffleClient client;
   private final long takeTaskWaitIntervalMs;
   private final int takeTaskMaxWaitAttempts;
+  private final boolean reviveGateEnabled;
+  private final int takeTaskReviveMaxWaitAttempts;
 
   public DataPushQueue(
       CelebornConf conf,
@@ -71,6 +73,8 @@ public class DataPushQueue {
     this.pushState = client.getPushState(mapKey);
     this.takeTaskWaitIntervalMs = conf.clientPushTakeTaskWaitIntervalMs();
     this.takeTaskMaxWaitAttempts = conf.clientPushTakeTaskMaxWaitAttempts();
+    this.reviveGateEnabled = conf.clientPushReviveGateEnabled();
+    this.takeTaskReviveMaxWaitAttempts = conf.clientPushTakeTaskReviveMaxWaitAttempts();
     final int capacity = conf.clientPushQueueCapacity();
     workingQueue = new LinkedBlockingQueue<>(capacity);
   }
@@ -83,6 +87,7 @@ public class DataPushQueue {
     ArrayList<PushTask> tasks = new ArrayList<>();
     HashMap<String, Integer> workerCapacity = new HashMap<>();
     HashMap<String, AtomicInteger> workerWaitAttempts = new HashMap<>();
+    HashMap<Integer, AtomicInteger> reviveWaitAttempts = new HashMap<>();
     while (dataPusher.stillRunning()) {
       // clear() here is necessary since inflight pushes might change after sleeping
       // takeTaskWaitTimeMs
@@ -98,6 +103,19 @@ public class DataPushQueue {
         while (iterator.hasNext()) {
           PushTask task = iterator.next();
           int partitionId = task.getPartitionId();
+          if (reviveGateEnabled && client.isPartitionReviving(shuffleId, partitionId)) {
+            // The partition has an in-flight revive, its location is known to reject pushes.
+            // Leave the task in the queue until the revive response arrives.
+            reviveWaitAttempts.putIfAbsent(partitionId, new AtomicInteger(0));
+            if (reviveWaitAttempts.get(partitionId).get() < takeTaskReviveMaxWaitAttempts) {
+              continue;
+            }
+            // Safety valve: take the task anyway after waiting too many rounds,
+            // rather a wasted push than waiting forever.
+            reviveWaitAttempts.get(partitionId).set(0);
+          } else {
+            reviveWaitAttempts.remove(partitionId);
+          }
           PartitionLocation loc = partitionLocationMap.get(partitionId);
           // According to CELEBORN-560, call rerun task and speculative task after LifecycleManager
           // handle StageEnd will return empty PartitionLocation map, here loc can be null
@@ -132,6 +150,7 @@ public class DataPushQueue {
         // Reaching here means no available tasks can be pushed to any worker, wait for a while
         Thread.sleep(takeTaskWaitIntervalMs);
         workerWaitAttempts.values().forEach(AtomicInteger::incrementAndGet);
+        reviveWaitAttempts.values().forEach(AtomicInteger::incrementAndGet);
       } catch (InterruptedException ie) {
         logger.info("Thread interrupted while waiting push task.");
         throw ie;

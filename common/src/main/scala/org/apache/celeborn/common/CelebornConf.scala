@@ -1114,6 +1114,9 @@ class CelebornConf(loadDefaults: Boolean) extends Cloneable with Logging with Se
   def clientPushLimitInFlightSleepDeltaMs: Long = get(CLIENT_PUSH_LIMIT_IN_FLIGHT_SLEEP_INTERVAL)
   def clientPushTakeTaskWaitIntervalMs: Long = get(CLIENT_PUSH_TAKE_TASK_WAIT_INTERVAL)
   def clientPushTakeTaskMaxWaitAttempts: Int = get(CLIENT_PUSH_TAKE_TASK_MAX_WAIT_ATTEMPTS)
+  def clientPushReviveGateEnabled: Boolean = get(CLIENT_PUSH_REVIVE_GATE_ENABLED)
+  def clientPushTakeTaskReviveMaxWaitAttempts: Int =
+    get(CLIENT_PUSH_TAKE_TASK_REVIVE_MAX_WAIT_ATTEMPTS)
   def clientPushSendBufferPoolExpireTimeout: Long = get(CLIENT_PUSH_SENDBUFFERPOOL_EXPIRETIMEOUT)
   def clientPushSendBufferPoolExpireCheckInterval: Long =
     get(CLIENT_PUSH_SENDBUFFERPOOL_CHECKEXPIREINTERVAL)
@@ -5168,6 +5171,25 @@ object CelebornConf extends Logging {
       .version("0.3.0")
       .intConf
       .createWithDefault(1)
+
+  val CLIENT_PUSH_REVIVE_GATE_ENABLED: ConfigEntry[Boolean] =
+    buildConf("celeborn.client.push.reviveGateEnabled")
+      .categories("client")
+      .doc("Whether to skip push tasks of partitions with an in-flight revive request, " +
+        "to avoid wasted pushes to a split location during the revive window.")
+      .version("0.7.0")
+      .booleanConf
+      .createWithDefault(false)
+
+  val CLIENT_PUSH_TAKE_TASK_REVIVE_MAX_WAIT_ATTEMPTS: ConfigEntry[Int] =
+    buildConf("celeborn.client.push.takeTaskReviveMaxWaitAttempts")
+      .categories("client")
+      .doc("Max rounds a push task of a partition with an in-flight revive is skipped " +
+        "before being taken anyway. Only takes effect when " +
+        "`celeborn.client.push.reviveGateEnabled` is true.")
+      .version("0.7.0")
+      .intConf
+      .createWithDefault(20)
 
   val CLIENT_PUSH_SENDBUFFERPOOL_EXPIRETIMEOUT: ConfigEntry[Long] =
     buildConf("celeborn.client.push.sendBufferPool.expireTimeout")
