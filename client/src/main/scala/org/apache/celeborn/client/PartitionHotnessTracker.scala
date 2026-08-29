@@ -90,9 +90,13 @@ private[client] class PartitionHotnessTracker(
    *
    * Hotness judgment: a retire is measured when the cause is SOFT_SPLIT or HARD_SPLIT and the
    * worker is still available; push failure causes and unavailable workers only retire. A fill
-   * faster than the minimum split interval raises desired to ceil(K * interval / fillTime):
-   * the measured fillTime is the single-location fill time under parallelism K, so the target
-   * must be scaled by K. Desired is monotone and capped, so no debounce is needed.
+   * faster than the minimum split interval raises desired to ceil(interval / fillTime). The
+   * target is NOT scaled by the current active count K: the measured fillTime is the fill time
+   * of a single location, whose write rate has a disk/pipeline floor and does not dilute with K
+   * in the regime this feature operates in (observed: fillTime ~2.2s at both K=36 and K=607).
+   * Multiplying by K would close a positive feedback loop — target ∝ K while K follows desired
+   * — that amplifies to the cap on every split report. Desired is monotone and capped, so no
+   * debounce is needed.
    */
   private[client] def onEpochRetired(
       shuffleId: Int,
@@ -103,24 +107,16 @@ private[client] class PartitionHotnessTracker(
       nowMs: Long): Unit = {
     val workerAvailable = workerAvailableByLocation(oldPartition)
     val hotState = getOrCreateHotState(shuffleId, partitionId)
-    // Capture under one monitor: whether the epoch was active before the report, whether the
-    // report retained it, and the active set size after — these reconstruct the parallelism K.
-    val (epochWasActive: Boolean, epochRetained: Boolean, activeCountAfterRetire: Int) =
-      hotState.synchronized {
-        val boxed = Integer.valueOf(epoch)
-        val wasActive = hotState.activeEpochs.contains(boxed)
-        val retained =
-          if (cause.contains(StatusCode.SOFT_SPLIT) && workerAvailable
-            && !hotState.hardRetiredEpochs.contains(boxed)) {
-            hotState.activeEpochs.add(boxed)
-            true
-          } else {
-            hotState.activeEpochs.remove(boxed)
-            hotState.hardRetiredEpochs.add(boxed)
-            false
-          }
-        (wasActive, retained, hotState.activeEpochs.size())
+    hotState.synchronized {
+      val boxed = Integer.valueOf(epoch)
+      if (cause.contains(StatusCode.SOFT_SPLIT) && workerAvailable
+        && !hotState.hardRetiredEpochs.contains(boxed)) {
+        hotState.activeEpochs.add(boxed)
+      } else {
+        hotState.activeEpochs.remove(boxed)
+        hotState.hardRetiredEpochs.add(boxed)
       }
+    }
     val measureEligible =
       (cause.contains(StatusCode.SOFT_SPLIT) || cause.contains(StatusCode.HARD_SPLIT)) &&
         workerAvailable
@@ -151,20 +147,16 @@ private[client] class PartitionHotnessTracker(
         // Floor fillTime at 1ms: a report in the same millisecond as the allocation would
         // otherwise compute ceil(interval / 0) = Infinity and pin desired to Int.MaxValue.
         val fillTimeMs = math.max(1L, nowMs - allocTime)
-        // K = locations active while this one filled: the post-report set size, plus the
-        // retired epoch itself when the report removed it.
-        val parallelismDuringFill =
-          math.max(1, activeCountAfterRetire + (if (epochWasActive && !epochRetained) 1 else 0))
         val target = math.ceil(
-          parallelismDuringFill * adaptivePartitionWriteParallelismMinSplitIntervalMs.toDouble / fillTimeMs).toInt
+          adaptivePartitionWriteParallelismMinSplitIntervalMs.toDouble / fillTimeMs).toInt
         // Unregistered shuffle defaults to 1 (unreachable in practice: registerShuffle
         // precedes any revive).
         val cap = shuffleParallelismCap.getOrDefault(shuffleId, 1).intValue()
         val newDesired = math.min(cap, target)
         if (newDesired > hotState.desired) {
           hotState.desired = newDesired
-          logInfo(s"Partition $shuffleId-$partitionId: fillTime ${fillTimeMs}ms under " +
-            s"parallelism $parallelismDuringFill, boost desired location count to $newDesired.")
+          logInfo(s"Partition $shuffleId-$partitionId: fillTime ${fillTimeMs}ms, " +
+            s"boost desired location count to $newDesired.")
         }
       }
     }

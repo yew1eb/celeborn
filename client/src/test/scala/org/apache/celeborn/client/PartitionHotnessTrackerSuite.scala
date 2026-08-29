@@ -100,7 +100,7 @@ class PartitionHotnessTrackerSuite extends CelebornFunSuite {
     tracker.onEpochRetired(shuffleId, partitionId, 0, loc0, Some(StatusCode.SOFT_SPLIT), 30000L)
     assert(tracker.desiredLocationCount(shuffleId, partitionId) == 2)
 
-    // fillTime 25s under K=2: target 5, capped at the configured 4.
+    // fillTime 25s: target 3.
     tracker.registerAllocation(shuffleId, partitionId, Set(1), 30000L)
     tracker.onEpochRetired(
       shuffleId,
@@ -109,8 +109,9 @@ class PartitionHotnessTrackerSuite extends CelebornFunSuite {
       makeLoc(partitionId, 1, "host1"),
       Some(StatusCode.SOFT_SPLIT),
       55000L)
-    assert(tracker.desiredLocationCount(shuffleId, partitionId) == 4)
+    assert(tracker.desiredLocationCount(shuffleId, partitionId) == 3)
 
+    // fillTime 10s: target 6, capped at the configured 4.
     tracker.registerAllocation(shuffleId, partitionId, Set(2), 55000L)
     tracker.onEpochRetired(
       shuffleId,
@@ -122,9 +123,10 @@ class PartitionHotnessTrackerSuite extends CelebornFunSuite {
     assert(tracker.desiredLocationCount(shuffleId, partitionId) == 4)
   }
 
-  test("fillTime measured under K active locations scales the target by K") {
-    // Without the K factor the per-location fillTime underestimates the target K-fold
-    // once K > 1, freezing desired at the value judged under K ~ 1.
+  test("fillTime measured under a larger active set does not scale the target") {
+    // The measured fillTime is the fill time of a single location; the target is
+    // interval/fillTime regardless of how many locations were active. Multiplying by the
+    // active count would close a positive feedback loop (target ∝ K while K follows desired).
     val tracker = makeTracker(_ => true, maxLocations = 64)
     val loc0 = makeLoc(partitionId, 0, "host1")
     tracker.recordInitialAllocTime(shuffleId, Array(loc0), 1000, 0L)
@@ -140,7 +142,29 @@ class PartitionHotnessTrackerSuite extends CelebornFunSuite {
       makeLoc(partitionId, 1, "host1"),
       Some(StatusCode.SOFT_SPLIT),
       40000L)
-    assert(tracker.desiredLocationCount(shuffleId, partitionId) == 12)
+    assert(tracker.desiredLocationCount(shuffleId, partitionId) == 6)
+  }
+
+  test("constant fillTime yields a constant target as the active set grows") {
+    // Regression: a partition observed filling in ~2.2s must not boost desired further just
+    // because the active set grew between measurements (36 → 949 → … → 16653 in production).
+    val tracker = makeTracker(_ => true, maxLocations = -1)
+    val loc0 = makeLoc(partitionId, 0, "host1")
+    tracker.recordInitialAllocTime(shuffleId, Array(loc0), 1000, 0L)
+
+    tracker.onEpochRetired(shuffleId, partitionId, 0, loc0, Some(StatusCode.SOFT_SPLIT), 2200L)
+    val firstDesired = tracker.desiredLocationCount(shuffleId, partitionId)
+    assert(firstDesired == 28)
+
+    tracker.registerAllocation(shuffleId, partitionId, (1 to 20).toSet, 2200L)
+    tracker.onEpochRetired(
+      shuffleId,
+      partitionId,
+      1,
+      makeLoc(partitionId, 1, "host1"),
+      Some(StatusCode.SOFT_SPLIT),
+      4400L)
+    assert(tracker.desiredLocationCount(shuffleId, partitionId) == firstDesired)
   }
 
   test("zero fillTime is floored at 1ms, desired capped at the mapper count") {
