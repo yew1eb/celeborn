@@ -86,6 +86,8 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
   private val pushRackAwareEnabled = conf.clientReserveSlotsRackAwareEnabled
   private val partitionSplitThreshold = conf.shufflePartitionSplitThreshold
   private val partitionSplitMode = conf.shufflePartitionSplitMode
+  private val adaptivePartitionWriteParallelismEnabled =
+    conf.clientShuffleAdaptivePartitionWriteParallelismEnabled
   // shuffle id -> partition type
   private val shufflePartitionType = JavaUtils.newConcurrentHashMap[Int, PartitionType]()
   private val rangeReadFilter = conf.shuffleRangeReadFilterEnabled
@@ -153,7 +155,7 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
       shuffleId: Int,
       locations: util.List[PartitionLocation]): Unit = {
     val map = latestPartitionLocation.computeIfAbsent(shuffleId, newMapFunc)
-    if (!conf.clientShuffleAdaptivePartitionWriteParallelismEnabled) {
+    if (!adaptivePartitionWriteParallelismEnabled) {
       locations.asScala.foreach(location => map.put(location.getId, location))
     } else {
       // Adaptive parallelism: one call may carry multiple active locations of the same
@@ -887,7 +889,7 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
       val allPrimaryPartitionLocations = slots.asScala.flatMap(_._2._1.asScala).toArray
       // Record the allocation time of the initial (epoch 0) locations so that
       // ChangePartitionManager can measure fill times for hot partition detection.
-      if (conf.clientShuffleAdaptivePartitionWriteParallelismEnabled) {
+      if (adaptivePartitionWriteParallelismEnabled) {
         changePartitionManager.recordInitialAllocTime(
           shuffleId,
           allPrimaryPartitionLocations,
@@ -910,8 +912,6 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
       oldPartitions: util.List[PartitionLocation],
       causes: util.List[StatusCode],
       serdeVersion: SerdeVersion): Unit = {
-    val adaptivePartitionWriteParallelismEnabled =
-      conf.clientShuffleAdaptivePartitionWriteParallelismEnabled
     // Adaptive parallelism: one Revive message may carry several retire reports of the same
     // partition (every retired epoch is forwarded, not only the latest one), so the response
     // completes once every DISTINCT partition has been replied.
