@@ -80,15 +80,24 @@ class ReviveManager {
                 if (adaptivePartitionWriteParallelismEnabled) {
                   representativeRequests.putIfAbsent(req.partitionId, req);
                 }
-                // Adaptive: satisfied only when a writable location exists — a newer but
-                // already-retired epoch must not short-circuit the request.
-                if (adaptivePartitionWriteParallelismEnabled
-                    ? shuffleClient.mapperEnded(shuffleId, req.mapId)
-                        || shuffleClient.hasWritableLocation(
-                            partitionMap, req.partitionId, req.mapId)
-                    : shuffleClient.newerPartitionLocationExists(
-                            partitionMap, req.partitionId, req.epoch, false)
-                        || shuffleClient.mapperEnded(shuffleId, req.mapId)) {
+                boolean satisfied;
+                if (adaptivePartitionWriteParallelismEnabled) {
+                  // Local retires precede the revive round, so a newer epoch can already be
+                  // hard-retired locally — the baseline "a newer location exists" condition
+                  // cannot tell. SUCCESS must mean the blocking retry has a writable location
+                  // to re-push, otherwise every blocked pusher re-pushes the same dead location
+                  // at once.
+                  satisfied =
+                      shuffleClient.mapperEnded(shuffleId, req.mapId)
+                          || shuffleClient.hasWritableLocation(
+                              partitionMap, req.partitionId, req.mapId);
+                } else {
+                  satisfied =
+                      shuffleClient.newerPartitionLocationExists(
+                              partitionMap, req.partitionId, req.epoch, false)
+                          || shuffleClient.mapperEnded(shuffleId, req.mapId);
+                }
+                if (satisfied) {
                   req.reviveStatus = StatusCode.SUCCESS.getValue();
                   if (adaptivePartitionWriteParallelismEnabled) {
                     mapIds.add(req.mapId);
@@ -118,10 +127,13 @@ class ReviveManager {
                   int partitionId = entry.getKey();
                   ReviveRequest representative = entry.getValue();
                   PartitionLocationGroup group = partitionMap.get(partitionId);
+                  if (group == null) {
+                    continue;
+                  }
                   // An epoch covered by a waiting (non-satisfied) request is reported by it.
                   ReviveRequest waiting = requestsToSend.get(partitionId);
                   int coveredEpoch = waiting == null ? -1 : waiting.epoch;
-                  for (PartitionLocationGroup.OutstandingRetire retire :
+                  for (PartitionLocationGroup.EpochState retire :
                       group.outstandingRetires()) {
                     if (retire.location.getEpoch() != coveredEpoch) {
                       allToSend.add(

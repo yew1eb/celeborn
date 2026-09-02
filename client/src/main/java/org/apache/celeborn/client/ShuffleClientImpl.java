@@ -1003,7 +1003,7 @@ public class ShuffleClientImpl extends ShuffleClient {
             if (additionals != null) {
               allActive.addAll(additionals);
             }
-            group.mergeActiveLocations(allActive, true);
+            group.convergeToActiveSet(allActive);
             if (allActive.size() > 1) {
               StringBuilder sb = new StringBuilder();
               for (PartitionLocation l : allActive) {

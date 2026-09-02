@@ -194,9 +194,9 @@ class ChangePartitionManager(
       isSegmentGranularityVisible: Boolean): Unit = {
     (0 until partitionIds.size()).groupBy(partitionIds.get(_)).foreach {
       case (partitionId, indices) =>
-        val primaryIdx = indices.maxBy(idx => oldEpochs.get(idx).toInt)
+        val maxEpochIdx = indices.maxBy(idx => oldEpochs.get(idx).toInt)
         indices.foreach { idx =>
-          if (idx != primaryIdx) {
+          if (idx != maxEpochIdx) {
             noteReviveEntry(
               shuffleId,
               partitionId,
@@ -209,9 +209,9 @@ class ChangePartitionManager(
           context,
           shuffleId,
           partitionId,
-          oldEpochs.get(primaryIdx),
-          oldPartitions.get(primaryIdx),
-          Some(causes.get(primaryIdx)),
+          oldEpochs.get(maxEpochIdx),
+          oldPartitions.get(maxEpochIdx),
+          Some(causes.get(maxEpochIdx)),
           isSegmentGranularityVisible)
     }
   }

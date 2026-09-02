@@ -57,7 +57,7 @@ public class PartitionLocationGroupSuiteJ {
 
     // Single-location revive update keeps thin-wrapper mode.
     PartitionLocation loc1 = loc(1, "w2");
-    group.mergeActiveLocations(Collections.singletonList(loc1), true);
+    group.convergeToActiveSet(Collections.singletonList(loc1));
     assertEquals(1, group.activeCount());
     assertSame(loc1, group.currentFor(0));
     assertEquals(1, group.maxEpoch());
@@ -74,7 +74,7 @@ public class PartitionLocationGroupSuiteJ {
     assertEquals(0, group.currentFor(0).getEpoch());
     assertTrue(group.currentFor(0) != null);
 
-    group.mergeActiveLocations(Arrays.asList(loc(0, "w1"), loc(1, "w2"), loc(2, "w3")), true);
+    group.convergeToActiveSet(Arrays.asList(loc(0, "w1"), loc(1, "w2"), loc(2, "w3")));
     assertEquals(2, group.maxEpoch());
     assertEquals(3, group.activeCount());
     assertEquals(0, group.currentFor(0).getEpoch());
@@ -94,28 +94,28 @@ public class PartitionLocationGroupSuiteJ {
   @Test
   public void testMergeConvergesOutOfOrderEpochs() {
     PartitionLocationGroup group = new PartitionLocationGroup(loc(5, "w1"));
-    group.mergeActiveLocations(Arrays.asList(loc(3, "w3"), loc(7, "w7"), loc(1, "w1")), true);
+    group.convergeToActiveSet(Arrays.asList(loc(3, "w3"), loc(7, "w7"), loc(1, "w1")));
     assertEquals(4, group.activeCount());
     assertEquals(7, group.maxEpoch());
     assertEquals(7, group.latest().getEpoch());
 
     // Locally retired epochs are never re-activated by the full set.
     group.retire(3, StatusCode.HARD_SPLIT);
-    group.mergeActiveLocations(Arrays.asList(loc(3, "w3"), loc(8, "w8")), true);
+    group.convergeToActiveSet(Arrays.asList(loc(3, "w3"), loc(8, "w8")));
     assertEquals(8, group.maxEpoch());
     for (int mapId = 0; mapId < 16; mapId++) {
       assertNotEquals(3, group.currentFor(mapId).getEpoch());
     }
 
     // Epoch 3 is evicted once the LM stops reporting it in the full set.
-    group.mergeActiveLocations(Arrays.asList(loc(7, "w7"), loc(8, "w8")), true);
+    group.convergeToActiveSet(Arrays.asList(loc(7, "w7"), loc(8, "w8")));
     assertEquals(4, group.activeCount());
   }
 
   @Test
   public void testAllUnusable() {
     PartitionLocationGroup group = new PartitionLocationGroup(loc(0, "w1"));
-    group.mergeActiveLocations(Arrays.asList(loc(0, "w1"), loc(1, "w2")), true);
+    group.convergeToActiveSet(Arrays.asList(loc(0, "w1"), loc(1, "w2")));
     group.retire(0, StatusCode.HARD_SPLIT);
     assertTrue(group.hasWritableFor(0));
     group.retire(1, StatusCode.HARD_SPLIT);
@@ -127,7 +127,7 @@ public class PartitionLocationGroupSuiteJ {
   @Test
   public void testRetireCauseUpgrade() {
     PartitionLocationGroup group = new PartitionLocationGroup(loc(0, "w1"));
-    group.mergeActiveLocations(Arrays.asList(loc(0, "w1"), loc(1, "w2")), true);
+    group.convergeToActiveSet(Arrays.asList(loc(0, "w1"), loc(1, "w2")));
     assertTrue(group.retire(0, StatusCode.SOFT_SPLIT));
     // Soft-retired location stays writable and keeps its routing share.
     assertEquals(0, group.currentFor(0).getEpoch());
@@ -149,23 +149,23 @@ public class PartitionLocationGroupSuiteJ {
   @Test
   public void testFullSetMergeEvictsProcessedRetiredEpochs() {
     PartitionLocationGroup group = new PartitionLocationGroup(loc(0, "w1"));
-    group.mergeActiveLocations(Arrays.asList(loc(0, "w1"), loc(1, "w2")), true);
+    group.convergeToActiveSet(Arrays.asList(loc(0, "w1"), loc(1, "w2")));
     group.retire(0, StatusCode.HARD_SPLIT);
 
     // The LM still reports epoch 0 (retirement not yet processed): it is kept locally.
-    group.mergeActiveLocations(Arrays.asList(loc(0, "w1"), loc(1, "w2")), true);
+    group.convergeToActiveSet(Arrays.asList(loc(0, "w1"), loc(1, "w2")));
     assertEquals(2, group.activeCount());
 
-    group.mergeActiveLocations(Arrays.asList(loc(1, "w2"), loc(2, "w3")), true);
+    group.convergeToActiveSet(Arrays.asList(loc(1, "w2"), loc(2, "w3")));
     assertEquals(2, group.activeCount());
     assertEquals(1, group.currentFor(0).getEpoch());
     assertEquals(2, group.currentFor(1).getEpoch());
 
-    // A non-full-set update never evicts retired entries.
+    // A single-location update never evicts retired entries.
     group.retire(1, StatusCode.HARD_SPLIT);
-    group.mergeActiveLocations(Collections.singletonList(loc(3, "w4")), false);
+    group.updateLatest(loc(3, "w4"));
     assertEquals(3, group.activeCount());
-    group.mergeActiveLocations(Arrays.asList(loc(2, "w3"), loc(3, "w4")), true);
+    group.convergeToActiveSet(Arrays.asList(loc(2, "w3"), loc(3, "w4")));
     assertEquals(2, group.activeCount());
     assertEquals(2, group.currentFor(0).getEpoch());
     assertEquals(3, group.currentFor(1).getEpoch());
@@ -181,7 +181,7 @@ public class PartitionLocationGroupSuiteJ {
       all.add(loc(e, "w" + e));
     }
     PartitionLocationGroup group = new PartitionLocationGroup(all.get(0));
-    group.mergeActiveLocations(all, true);
+    group.convergeToActiveSet(all);
     for (int e = 0; e < numEpochs; e += 2) {
       group.retire(e, StatusCode.SOFT_SPLIT);
     }
@@ -201,8 +201,8 @@ public class PartitionLocationGroupSuiteJ {
                   for (int e = 1; e < numEpochs; e += 2) {
                     odd.add(loc(e, "w" + e));
                   }
-                  group.mergeActiveLocations(odd, true);
-                  group.mergeActiveLocations(all, true);
+                  group.convergeToActiveSet(odd);
+                  group.convergeToActiveSet(all);
                 }
               } catch (Throwable t) {
                 failures.add(t);
@@ -250,11 +250,11 @@ public class PartitionLocationGroupSuiteJ {
     PartitionLocationGroup group = new PartitionLocationGroup(loc(0, "w1"));
     assertTrue(group.outstandingRetires().isEmpty());
 
-    group.mergeActiveLocations(Arrays.asList(loc(0, "w1"), loc(1, "w2"), loc(2, "w3")), true);
+    group.convergeToActiveSet(Arrays.asList(loc(0, "w1"), loc(1, "w2"), loc(2, "w3")));
     assertTrue(group.retire(0, StatusCode.SOFT_SPLIT));
     assertFalse(group.retire(0, StatusCode.HARD_SPLIT)); // soft upgraded to hard
     assertTrue(group.retire(2, StatusCode.HARD_SPLIT));
-    List<PartitionLocationGroup.OutstandingRetire> retires = group.outstandingRetires();
+    List<PartitionLocationGroup.EpochState> retires = group.outstandingRetires();
     assertEquals(2, retires.size());
     assertEquals(0, retires.get(0).location.getEpoch());
     assertEquals(StatusCode.HARD_SPLIT, retires.get(0).cause);
@@ -263,7 +263,7 @@ public class PartitionLocationGroupSuiteJ {
     assertEquals(1, group.currentFor(0).getEpoch());
 
     // Once the LM digests the retires, they are evicted and no longer outstanding.
-    group.mergeActiveLocations(Collections.singletonList(loc(1, "w2")), true);
+    group.convergeToActiveSet(Collections.singletonList(loc(1, "w2")));
     assertTrue(group.outstandingRetires().isEmpty());
     assertEquals(1, group.activeCount());
   }
