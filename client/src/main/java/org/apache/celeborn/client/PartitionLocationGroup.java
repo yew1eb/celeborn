@@ -18,36 +18,26 @@
 package org.apache.celeborn.client;
 
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 import org.apache.celeborn.common.protocol.PartitionLocation;
 import org.apache.celeborn.common.protocol.message.StatusCode;
 
 /**
- * A thin wrapper of the writable PartitionLocation(s) of one (shuffleId, partitionId).
- *
- * <p>In the common case (the partition never splits) it only holds a single volatile {@link
- * PartitionLocation} reference; the parallel state (active location list and retired epochs) is
- * inflated lazily on the first SOFT_SPLIT/HARD_SPLIT/push failure, or when a revive response
- * delivers more than one active location. Selection is uniform over the writable subset —
- * non-retired and soft-split locations, which stay writable until they hard-split — via {@code
- * mapId % writableCount}.
+ * Writable PartitionLocation(s) of one (shuffleId, partitionId). Stays a thin single-location
+ * wrapper until a split, a push failure, or a multi-location revive response inflates the
+ * parallel state. Routing is uniform over the writable subset — non-retired plus soft-split
+ * locations, which stay writable until they hard-split — via {@code mapId % writableCount}.
  */
 public class PartitionLocationGroup {
 
-  /**
-   * The only location before inflation; intentionally NOT kept in sync after inflation — the
-   * inflated {@link ParallelState#active} list is the source of truth.
-   */
+  /** Source of truth before inflation; intentionally left stale afterwards. */
   private volatile PartitionLocation single;
 
-  /** null until inflated; all mutating methods go through double-checked inflation. */
+  /** Null until inflated; mutators inflate via double-checked locking. */
   private volatile ParallelState parallel;
 
   public PartitionLocationGroup(PartitionLocation loc) {
@@ -55,62 +45,49 @@ public class PartitionLocationGroup {
   }
 
   /**
-   * Pick a writable location for {@code mapId}; when every known location is locally retired, falls
-   * back to the latest (possibly retired) one. The fallback mirrors the baseline path, which never
-   * retires locally and keeps pushing the possibly-dead location until the worker rejects it and
-   * the reject drives the next revive round.
+   * Writable location for {@code mapId}; when nothing is writable, falls back to the latest
+   * (possibly retired) one — mirroring the baseline path, which keeps pushing the possibly-dead
+   * location until the worker rejects it.
    */
   public PartitionLocation currentFor(int mapId) {
     PartitionLocation loc = pick(mapId);
     return loc == null ? latest() : loc;
   }
 
-  /** Whether the partition currently has a writable location for {@code mapId}. */
   boolean hasWritableFor(int mapId) {
     return pick(mapId) != null;
   }
 
-  /**
-   * Pick a writable location for {@code mapId}; null when nothing is writable. The active list is
-   * snapshotted because a concurrent full-set merge may shrink it.
-   */
   private PartitionLocation pick(int mapId) {
     ParallelState p = parallel;
     if (p == null) {
       return single;
     }
-    // Snapshot the active list: a concurrent full-set merge may shrink it via removeIf, so
-    // size()-then-get() on the live list races. Collect the writable subset in a single pass
-    // (two passes read the retired CHM twice and raced with a concurrent retire/eviction).
-    PartitionLocation[] snapshot = p.active.toArray(new PartitionLocation[0]);
     List<PartitionLocation> writable = new ArrayList<>();
-    for (PartitionLocation loc : snapshot) {
-      if (isWritable(p, loc)) {
-        writable.add(loc);
+    for (ActiveEntry e : p.active) {
+      if (e.writable()) {
+        writable.add(e.location);
       }
     }
     if (writable.isEmpty()) {
       return null;
     }
-    int start = Math.floorMod(mapId, writable.size());
-    return writable.get(start);
+    return writable.get(Math.floorMod(mapId, writable.size()));
   }
 
-  private static boolean isWritable(ParallelState p, PartitionLocation loc) {
-    StatusCode cause = p.retired.get(loc.getEpoch());
-    return cause == null || cause == StatusCode.SOFT_SPLIT;
-  }
-
-  /** The location with the max epoch, used where a single representative location is needed. */
+  /** The max-epoch location, where a single representative is needed. */
   public PartitionLocation latest() {
     ParallelState p = parallel;
     if (p == null) {
       return single;
     }
-    // Snapshot for the same reason as pick(): a concurrent full-set eviction may shrink the
-    // list between the emptiness check and the last-element access.
-    PartitionLocation[] snapshot = p.active.toArray(new PartitionLocation[0]);
-    return snapshot.length == 0 ? single : snapshot[snapshot.length - 1];
+    // Iterating a CopyOnWriteArrayList is snapshot-based: no race with a concurrent full-set
+    // merge shrinking the list.
+    PartitionLocation latest = single;
+    for (ActiveEntry e : p.active) {
+      latest = e.location;
+    }
+    return latest;
   }
 
   public int maxEpoch() {
@@ -123,9 +100,8 @@ public class PartitionLocationGroup {
   }
 
   /**
-   * A retired epoch still present in the active list, i.e. not yet confirmed digested by the
-   * LifecycleManager. Attached to the batched revive at send time so the LM's gap-based allocation
-   * sees the real active-set size.
+   * A retired epoch still in the active list, attached to the batched revive at send time so the
+   * LM's gap-based allocation sees the real active-set size.
    */
   static final class OutstandingRetire {
     final PartitionLocation location;
@@ -137,55 +113,51 @@ public class PartitionLocationGroup {
     }
   }
 
-  /**
-   * Snapshot of {@link OutstandingRetire}s, epoch ascending. Only epochs still in the active list
-   * are included — an evicted epoch has already been digested by the LM.
-   */
+  /** Retired epochs still in the active list, epoch ascending. */
   List<OutstandingRetire> outstandingRetires() {
     ParallelState p = parallel;
     if (p == null) {
       return new ArrayList<>(0);
     }
     List<OutstandingRetire> retires = new ArrayList<>();
-    for (PartitionLocation loc : p.active.toArray(new PartitionLocation[0])) {
-      StatusCode cause = p.retired.get(loc.getEpoch());
-      if (cause != null) {
-        retires.add(new OutstandingRetire(loc, cause));
+    for (ActiveEntry e : p.active) {
+      if (e.cause != null) {
+        retires.add(new OutstandingRetire(e.location, e.cause));
       }
     }
     return retires;
   }
 
   /**
-   * Mark {@code epoch} as retired with {@code cause}; soft-retired locations stay writable, hard
-   * ones are skipped by routing. A non-soft cause upgrades a previous SOFT_SPLIT retire and is
-   * never downgraded back. Synchronized so the tombstone write cannot interleave with the full-set
-   * cleanup in {@link #mergeActiveLocations}.
+   * Mark {@code epoch} retired: a soft-split location stays writable, a harder cause upgrades a
+   * soft retire and is never downgraded back.
    *
-   * @return true if this is the first time the epoch is retired (dedupe signal for the caller).
+   * @return true on the first retire of the epoch (dedupe signal for the caller)
    */
   public synchronized boolean retire(int epoch, StatusCode cause) {
     ParallelState p = inflateIfNeeded();
-    boolean[] firstRetire = {false};
-    p.retired.compute(
-        epoch,
-        (k, existing) -> {
-          if (existing == null) {
-            firstRetire[0] = true;
-            return cause;
-          }
-          return existing == StatusCode.SOFT_SPLIT && cause != StatusCode.SOFT_SPLIT
-              ? cause
-              : existing;
-        });
-    return firstRetire[0];
+    for (int i = 0; i < p.active.size(); i++) {
+      ActiveEntry e = p.active.get(i);
+      if (e.location.getEpoch() != epoch) {
+        continue;
+      }
+      if (e.cause == null) {
+        p.active.set(i, new ActiveEntry(e.location, cause));
+        return true;
+      }
+      if (e.cause == StatusCode.SOFT_SPLIT && cause != StatusCode.SOFT_SPLIT) {
+        p.active.set(i, new ActiveEntry(e.location, cause));
+      }
+      return false;
+    }
+    // Already evicted by a full-set merge; the LM no longer reports it, nothing to mark.
+    return true;
   }
 
   /**
-   * Converge to the active set delivered by the LifecycleManager: add locally missing epochs, never
-   * re-add retired ones. With {@code fullSet}, retired epochs the LM no longer reports are dropped
-   * from both the active list and the retired map. Synchronized for atomic check-then-add across
-   * concurrent revive responses.
+   * Converge to the LM-delivered active set: add missing epochs, never resurrect retired ones. A
+   * full-set reply evicts retired epochs the LM no longer reports — those have been digested by
+   * the LM. Synchronized for atomic check-then-add across concurrent revive responses.
    */
   public synchronized void mergeActiveLocations(
       List<PartitionLocation> locations, boolean fullSet) {
@@ -193,13 +165,12 @@ public class PartitionLocationGroup {
       return;
     }
     if (parallel == null && locations.size() == 1) {
-      // Stay in thin-wrapper mode when the LM only knows one active location.
       updateLatest(locations.get(0));
       return;
     }
     ParallelState p = inflateIfNeeded();
     for (PartitionLocation loc : locations) {
-      if (loc == null || p.retired.containsKey(loc.getEpoch())) {
+      if (loc == null) {
         continue;
       }
       insertActive(p, loc);
@@ -207,24 +178,35 @@ public class PartitionLocationGroup {
         p.maxEpoch = loc.getEpoch();
       }
     }
-    if (fullSet && !p.retired.isEmpty()) {
-      Set<Integer> reported = new HashSet<>();
-      for (PartitionLocation loc : locations) {
-        if (loc != null) {
-          reported.add(loc.getEpoch());
-        }
-      }
-      p.active.removeIf(
-          loc -> p.retired.containsKey(loc.getEpoch()) && !reported.contains(loc.getEpoch()));
-      p.retired.keySet().removeIf(epoch -> !reported.contains(epoch));
+    if (fullSet) {
+      evictDigestedRetires(p, locations);
     }
   }
 
+  private static void evictDigestedRetires(ParallelState p, List<PartitionLocation> reported) {
+    boolean anyRetired = false;
+    for (ActiveEntry e : p.active) {
+      if (e.cause != null) {
+        anyRetired = true;
+        break;
+      }
+    }
+    if (!anyRetired) {
+      return;
+    }
+    Set<Integer> reportedEpochs = new HashSet<>();
+    for (PartitionLocation loc : reported) {
+      if (loc != null) {
+        reportedEpochs.add(loc.getEpoch());
+      }
+    }
+    p.active.removeIf(e -> e.cause != null && !reportedEpochs.contains(e.location.getEpoch()));
+  }
+
   /**
-   * Legacy single-location update (adaptive parallelism disabled or single-location response).
-   * Synchronized because revive responses can be applied concurrently by the ReviveManager
-   * scheduler thread and by push threads via the blocking revive path, so the non-inflated
-   * check-then-set on {@link #single} must be atomic.
+   * Single-location update (adaptive disabled or single-location response). Synchronized because
+   * revive responses are applied concurrently by the ReviveManager scheduler thread and by push
+   * threads via the blocking revive path.
    */
   public synchronized void updateLatest(PartitionLocation loc) {
     ParallelState p = parallel;
@@ -246,17 +228,18 @@ public class PartitionLocationGroup {
     return p == null ? (single == null ? 0 : 1) : p.active.size();
   }
 
-  /** Retired epochs and their causes, for diagnostics in failure messages. */
+  /** Retired epochs with causes, epoch ascending, for failure diagnostics. */
   List<String> retiredEpochsSnapshot() {
     ParallelState p = parallel;
     if (p == null) {
       return new ArrayList<>(0);
     }
-    List<String> retires = new ArrayList<>(p.retired.size());
-    for (Map.Entry<Integer, StatusCode> entry : p.retired.entrySet()) {
-      retires.add(entry.getKey() + "=" + entry.getValue());
+    List<String> retires = new ArrayList<>();
+    for (ActiveEntry e : p.active) {
+      if (e.cause != null) {
+        retires.add(e.location.getEpoch() + "=" + e.cause);
+      }
     }
-    retires.sort(Comparator.comparing(s -> Integer.parseInt(s.substring(0, s.indexOf('=')))));
     return retires;
   }
 
@@ -269,7 +252,7 @@ public class PartitionLocationGroup {
           p = new ParallelState();
           PartitionLocation loc = single;
           if (loc != null) {
-            p.active.add(loc);
+            p.active.add(new ActiveEntry(loc, null));
             p.maxEpoch = loc.getEpoch();
           }
           parallel = p;
@@ -280,25 +263,37 @@ public class PartitionLocationGroup {
   }
 
   private static void insertActive(ParallelState p, PartitionLocation loc) {
-    List<PartitionLocation> active = p.active;
+    List<ActiveEntry> active = p.active;
     int i = 0;
-    while (i < active.size() && active.get(i).getEpoch() < loc.getEpoch()) {
+    while (i < active.size() && active.get(i).location.getEpoch() < loc.getEpoch()) {
       i++;
     }
-    if (i < active.size() && active.get(i).getEpoch() == loc.getEpoch()) {
-      // Already present (location objects are immutable per epoch).
+    if (i < active.size() && active.get(i).location.getEpoch() == loc.getEpoch()) {
+      // Already present; keep the existing entry so its retire cause is never lost.
       return;
     }
-    p.active.add(i, loc);
+    active.add(i, new ActiveEntry(loc, null));
   }
 
-  /** Parallel state, only exists for partitions that ever split or have multiple locations. */
+  /** Inflated once the partition ever splits or gets multiple locations. */
   private static class ParallelState {
-    // Active locations, sorted by epoch ascending. Includes soft-retired ones, which stay
-    // writable until they hard-split.
-    final CopyOnWriteArrayList<PartitionLocation> active = new CopyOnWriteArrayList<>();
-    // epoch -> retire cause
-    final ConcurrentHashMap<Integer, StatusCode> retired = new ConcurrentHashMap<>();
+    /** Epoch ascending. Mutated only under the group lock; iterated lock-free. */
+    final CopyOnWriteArrayList<ActiveEntry> active = new CopyOnWriteArrayList<>();
     volatile int maxEpoch = -1;
+  }
+
+  private static final class ActiveEntry {
+    final PartitionLocation location;
+    /** Retire cause; null while the location is routing-eligible. */
+    final StatusCode cause;
+
+    ActiveEntry(PartitionLocation location, StatusCode cause) {
+      this.location = location;
+      this.cause = cause;
+    }
+
+    boolean writable() {
+      return cause == null || cause == StatusCode.SOFT_SPLIT;
+    }
   }
 }
