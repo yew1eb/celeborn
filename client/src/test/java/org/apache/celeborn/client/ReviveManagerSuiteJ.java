@@ -85,7 +85,7 @@ public class ReviveManagerSuiteJ {
     // Every queued request below is locally satisfied, so the batch carries retire reports
     // only, rebuilt from the group's outstanding set.
     PartitionLocationGroup group = new PartitionLocationGroup(loc(0, "w1"));
-    group.convergeToActiveSet(Arrays.asList(loc(0, "w1"), loc(1, "w2"), loc(2, "w3")));
+    group.merge(Arrays.asList(loc(0, "w1"), loc(1, "w2"), loc(2, "w3")));
     group.retire(0, StatusCode.HARD_SPLIT);
     group.retire(1, StatusCode.HARD_SPLIT);
     ShuffleClientImpl client = spyClient(group);

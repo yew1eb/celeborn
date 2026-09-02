@@ -1003,7 +1003,7 @@ public class ShuffleClientImpl extends ShuffleClient {
             if (additionals != null) {
               allActive.addAll(additionals);
             }
-            group.convergeToActiveSet(allActive);
+            group.merge(allActive);
             if (allActive.size() > 1) {
               StringBuilder sb = new StringBuilder();
               for (PartitionLocation l : allActive) {
@@ -1020,7 +1020,7 @@ public class ShuffleClientImpl extends ShuffleClient {
                   sb);
             }
           } else if (loc != null) {
-            group.updateLatest(loc);
+            group.replace(loc);
           }
           if (loc != null) {
             pushExcludedWorkers.remove(loc.hostAndPushPort());
