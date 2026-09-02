@@ -133,8 +133,7 @@ class ReviveManager {
                   // An epoch covered by a waiting (non-satisfied) request is reported by it.
                   ReviveRequest waiting = requestsToSend.get(partitionId);
                   int coveredEpoch = waiting == null ? -1 : waiting.epoch;
-                  for (PartitionLocationGroup.EpochState retire :
-                      group.outstandingRetires()) {
+                  for (PartitionLocationGroup.EpochState retire : group.outstandingRetires()) {
                     if (retire.location.getEpoch() != coveredEpoch) {
                       allToSend.add(
                           new ReviveRequest(

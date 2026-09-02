@@ -427,8 +427,8 @@ public class ShuffleClientImpl extends ShuffleClient {
   }
 
   /**
-   * Retire the epoch locally so routing skips it ahead of the async batched revive round. Only
-   * the first retire logs — every batch that received the same split response lands here.
+   * Retire the epoch locally so routing skips it ahead of the async batched revive round. Only the
+   * first retire logs — every batch that received the same split response lands here.
    */
   private void retireEpoch(int shuffleId, int partitionId, int epoch, StatusCode cause) {
     if (reducePartitionMap.get(shuffleId).get(partitionId).retire(epoch, cause)) {

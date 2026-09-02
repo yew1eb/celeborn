@@ -27,12 +27,11 @@ import org.apache.celeborn.common.protocol.PartitionLocation;
 import org.apache.celeborn.common.protocol.message.StatusCode;
 
 /**
- * Writable PartitionLocation(s) of one (shuffleId, partitionId), epoch ascending: a single
- * entry in the common (never-split) case, the active set plus not-yet-digested retire
- * tombstones once the partition splits. Routing is uniform over the writable subset —
- * non-retired plus soft-split locations, which stay writable until they hard-split — via
- * {@code mapId % writableCount}. Mutators are synchronized; readers iterate the copy-on-write
- * list lock-free.
+ * Writable PartitionLocation(s) of one (shuffleId, partitionId), epoch ascending: a single entry in
+ * the common (never-split) case, the active set plus not-yet-digested retire tombstones once the
+ * partition splits. Routing is uniform over the writable subset — non-retired plus soft-split
+ * locations, which stay writable until they hard-split — via {@code mapId % writableCount}.
+ * Mutators are synchronized; readers iterate the copy-on-write list lock-free.
  */
 public class PartitionLocationGroup {
 
@@ -122,8 +121,8 @@ public class PartitionLocationGroup {
   }
 
   /**
-   * Singleton revive response — supersede the whole list: routing must track the newest
-   * location only, older entries must not keep receiving writes.
+   * Singleton revive response — supersede the whole list: routing must track the newest location
+   * only, older entries must not keep receiving writes.
    */
   public synchronized void replace(PartitionLocation loc) {
     if (loc.getEpoch() >= maxEpoch) {
@@ -133,10 +132,10 @@ public class PartitionLocationGroup {
   }
 
   /**
-   * Full-set revive response — merge instead of replace, because the response lags local
-   * retires: add missing epochs, never resurrect retired ones (a re-reported tombstone is not
-   * digested yet; resurrecting routes writes to a dead location), and evict retired epochs the
-   * LM no longer reports — digested.
+   * Full-set revive response — merge instead of replace, because the response lags local retires:
+   * add missing epochs, never resurrect retired ones (a re-reported tombstone is not digested yet;
+   * resurrecting routes writes to a dead location), and evict retired epochs the LM no longer
+   * reports — digested.
    */
   public synchronized void merge(List<PartitionLocation> reported) {
     if (reported == null || reported.isEmpty()) {
