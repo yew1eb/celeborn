@@ -47,6 +47,10 @@ public class PartitionLocationGroup {
   }
 
   public PartitionLocation currentFor(int mapId) {
+    if (epochs.size() == 1) {
+      return epochs.get(0).location;
+    }
+
     PartitionLocation loc = pick(mapId);
     return loc == null ? latest() : loc;
   }
@@ -69,8 +73,8 @@ public class PartitionLocationGroup {
   }
 
   public PartitionLocation latest() {
-    // The list is epoch ascending, so the last element is the max-epoch location; iterating a
-    // CopyOnWriteArrayList is snapshot-based, a race-free way to read it.
+    // Epoch-ascending, so the last entry seen is the max-epoch location; iterating the
+    // copy-on-write list is a race-free snapshot read.
     PartitionLocation latest = null;
     for (EpochState e : epochs) {
       latest = e.location;
@@ -118,21 +122,21 @@ public class PartitionLocationGroup {
   }
 
   /**
-   * Replace the whole list with the newest location from the revive response: routing tracks it
-   * only — older entries must not keep receiving writes.
+   * Singleton revive response — supersede the whole list: routing must track the newest
+   * location only, older entries must not keep receiving writes.
    */
   public synchronized void replace(PartitionLocation loc) {
     if (loc.getEpoch() >= maxEpoch) {
-      epochs.clear();
-      epochs.add(new EpochState(loc, null));
+      epochs.set(0, new EpochState(loc, null));
       maxEpoch = loc.getEpoch();
     }
   }
 
   /**
-   * Merge the LM-reported full active set from the revive response: add missing epochs, never
-   * resurrect retired ones, and evict retired epochs the LM no longer reports — those have been
-   * digested.
+   * Full-set revive response — merge instead of replace, because the response lags local
+   * retires: add missing epochs, never resurrect retired ones (a re-reported tombstone is not
+   * digested yet; resurrecting routes writes to a dead location), and evict retired epochs the
+   * LM no longer reports — digested.
    */
   public synchronized void merge(List<PartitionLocation> reported) {
     if (reported == null || reported.isEmpty()) {

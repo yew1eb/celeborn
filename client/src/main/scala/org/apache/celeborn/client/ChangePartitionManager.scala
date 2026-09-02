@@ -82,11 +82,8 @@ class ChangePartitionManager(
   private val adaptivePartitionWriteParallelismEnabled =
     conf.clientShuffleAdaptivePartitionWriteParallelismEnabled
 
-  // Injectable clock for testing.
   private[client] var nowMs: () => Long = () => System.currentTimeMillis()
 
-  // Per-partition hot state behind adaptive partition write parallelism: how many writable locations each
-  // partition should have. All hot state handling is delegated to this tracker.
   private[client] val hotnessTracker = new PartitionHotnessTracker(
     conf,
     latestEpoch,
@@ -174,17 +171,7 @@ class ChangePartitionManager(
     }
   }
 
-  /**
-   * Handle all entries of one Revive message; called only when adaptive partition write
-   * parallelism is enabled. Adaptive parallelism lets a message carry many entries of the same
-   * partition (every locally retired epoch is forwarded as a retire report; a backed-up client
-   * can pile 1000+ reports of one hot partition into a single Revive). Only the max-epoch entry
-   * can require a new location, so it alone goes through the full request path — which also
-   * completes the message's response (counted by distinct partitions). The remaining entries
-   * are pure retire reports and get bookkeeping only, keeping the per-message cost proportional
-   * to the distinct partition count instead of the entry count.
-   */
-  def handleReviveRequests(
+  def handlePartitionLocationRequests(
       context: RequestLocationCallContext,
       shuffleId: Int,
       partitionIds: util.List[Integer],
@@ -194,17 +181,16 @@ class ChangePartitionManager(
       isSegmentGranularityVisible: Boolean): Unit = {
     (0 until partitionIds.size()).groupBy(partitionIds.get(_)).foreach {
       case (partitionId, indices) =>
-        val maxEpochIdx = indices.maxBy(idx => oldEpochs.get(idx).toInt)
         indices.foreach { idx =>
-          if (idx != maxEpochIdx) {
-            noteReviveEntry(
-              shuffleId,
-              partitionId,
-              oldEpochs.get(idx),
-              oldPartitions.get(idx),
-              Some(causes.get(idx)))
-          }
+          recordEpochRetired(
+            shuffleId,
+            partitionId,
+            oldEpochs.get(idx),
+            oldPartitions.get(idx),
+            Some(causes.get(idx)))
         }
+        // Only the max-epoch entry can require new locations (gap allocation).
+        val maxEpochIdx = indices.maxBy(idx => oldEpochs.get(idx).toInt)
         handleRequestPartitionLocation(
           context,
           shuffleId,
@@ -216,13 +202,7 @@ class ChangePartitionManager(
     }
   }
 
-  /**
-   * Bookkeeping every revive entry of an adaptive-parallelism Revive message needs (called only
-   * when adaptive partition write parallelism is enabled): commit-time registration of the
-   * retired location, and active-set/hotness maintenance. A pure retire report needs nothing
-   * beyond this.
-   */
-  private def noteReviveEntry(
+  private def recordEpochRetired(
       shuffleId: Int,
       partitionId: Int,
       oldEpoch: Int,
@@ -233,13 +213,7 @@ class ChangePartitionManager(
       oldPartition,
       cause)
 
-    // The requested epoch is retiring: update the active epoch set of the partition (soft-split
-    // epochs of available workers stay writable and are retained; hard/failed ones are removed)
-    // and, when the retire is measure-eligible, judge whether the partition is hot and needs
-    // more locations.
-    if (oldEpoch >= 0) {
-      hotnessTracker.onEpochRetired(shuffleId, partitionId, oldEpoch, oldPartition, cause, nowMs())
-    }
+    hotnessTracker.onEpochRetired(shuffleId, partitionId, oldEpoch, oldPartition, cause, nowMs())
   }
 
   def handleRequestPartitionLocation(
@@ -267,8 +241,6 @@ class ChangePartitionManager(
         shuffleId,
         oldPartition,
         cause)
-    } else {
-      noteReviveEntry(shuffleId, partitionId, oldEpoch, oldPartition, cause)
     }
 
     val locksForShuffle = locks.computeIfAbsent(shuffleId, locksRegisterFunc)
@@ -282,7 +254,7 @@ class ChangePartitionManager(
         getLatestPartition(shuffleId, partitionId, oldEpoch).foreach { latestLoc =>
           val additionalLocs =
             if (adaptivePartitionWriteParallelismEnabled) {
-              currentActiveLocations(shuffleId, partitionId)
+              availableActiveLocations(shuffleId, partitionId)
                 .filter(_.getEpoch != latestLoc.getEpoch)
                 .asJava
             } else {
@@ -318,13 +290,13 @@ class ChangePartitionManager(
   }
 
   /**
-   * The currently active locations of a partition, looked up from worker snapshots by the
-   * active epochs. Locations on unavailable workers are dropped and their epochs hard-retired
-   * (no retire report ever arrives for a dead worker, so its epoch would otherwise stay in
-   * the active set and keep being advertised). Falls back to the latest location when
-   * snapshots have no record.
+   * The active locations of a partition on available workers, looked up from worker snapshots
+   * by the active epochs. Locations on unavailable workers are dropped and their epochs
+   * hard-retired (no retire report ever arrives for a dead worker, so its epoch would
+   * otherwise stay in the active set and keep being advertised). Falls back to the latest
+   * location when nothing available remains.
    */
-  private def currentActiveLocations(
+  private def availableActiveLocations(
       shuffleId: Int,
       partitionId: Int): List[PartitionLocation] = {
     val epochs = hotnessTracker.currentActiveEpochs(shuffleId, partitionId)
@@ -431,11 +403,8 @@ class ChangePartitionManager(
       }
     }
 
-    // remove together to reduce lock time. Adaptive parallelism: allocation is decoupled from
-    // replying — every request is replied with the current full active set of the partition
-    // (max epoch location as the primary reply, the rest as additional locations), so all
-    // executors converge to the same active set even when this round allocates nothing.
-    def replySuccessFullSet(): Unit = {
+    // remove together to reduce lock time
+    def replySuccessActiveSet(): Unit = {
       val locksForShuffle = locks.computeIfAbsent(shuffleId, locksRegisterFunc)
       changePartitions.map { changePartition =>
         changePartition.partitionId ->
@@ -447,7 +416,7 @@ class ChangePartitionManager(
           }
       }.foreach { case (partitionId, requests) =>
         requests.foreach { requestSet =>
-          val sorted = currentActiveLocations(shuffleId, partitionId).sortBy(_.getEpoch)
+          val sorted = availableActiveLocations(shuffleId, partitionId).sortBy(_.getEpoch)
           val maxLoc = sorted.lastOption.orNull
           val additionalLocs = sorted.dropRight(1).asJava
           requestSet.asScala.toList.foreach(req =>
@@ -581,40 +550,34 @@ class ChangePartitionManager(
     }
 
     if (newPrimaryLocations.nonEmpty) {
-      // newPrimaryLocations may contain both the primary and the replica peer of one
-      // partition, dedupe by partition id before logging.
-      val distinctPartitions = newPrimaryLocations.groupBy(_.getId).map(_._2.head)
-      val requestCauses = changePartitions.map(c => c.partitionId -> c.causes).toMap
-      val changes = distinctPartitions.map { partition =>
-        val partitionId = partition.getId
-        val cause = requestCauses.get(partitionId).flatten
-        s"(partition $partitionId epoch from ${partition.getEpoch - 1} to ${partition.getEpoch}" +
-          s", cause ${cause.map(_.name()).getOrElse("NONE")})"
+      val changes = newPrimaryLocations.map { partition =>
+        s"(partition ${partition.getId} epoch from ${partition.getEpoch - 1} to ${partition.getEpoch})"
       }.mkString("[", ", ", "]")
       logInfo(s"[Update partition] success for " +
         s"shuffle $shuffleId, succeed partitions: " +
         s"$changes.")
     }
 
-    // Register the hot state of revived partitions: the reserved epochs are read back from
-    // the reserve result (see registerAllocation for why the pre-reserve plan cannot be used).
     if (adaptivePartitionWriteParallelismEnabled) {
-      val reservedEpochsByPartition = newlyAllocatedLocations.asScala.values.flatMap {
-        case (primaryLocations, replicaLocations) =>
-          (primaryLocations.asScala ++ replicaLocations.asScala.map(_.getPeer))
-            .filter(_ != null)
-            .groupBy(_.getId)
-      }.map { case (partitionId, locs) => partitionId -> locs.map(_.getEpoch).toSet }
-      val allocTimeMs = nowMs()
-      reservedEpochsByPartition.foreach { case (partitionId, epochs) =>
-        hotnessTracker.registerAllocation(shuffleId, partitionId, epochs, allocTimeMs)
-      }
-    }
-
-    if (adaptivePartitionWriteParallelismEnabled) {
-      replySuccessFullSet()
+      registerReservedEpochs(shuffleId, newlyAllocatedLocations)
+      replySuccessActiveSet()
     } else {
       replySuccess(newPrimaryLocations.toArray)
+    }
+  }
+
+  private def registerReservedEpochs(
+      shuffleId: Int,
+      reservedLocations: WorkerResource): Unit = {
+    val reservedEpochsByPartition = reservedLocations.asScala.values.flatMap {
+      case (primaryLocations, replicaLocations) =>
+        (primaryLocations.asScala ++ replicaLocations.asScala.map(_.getPeer))
+          .filter(_ != null)
+          .groupBy(_.getId)
+    }.map { case (partitionId, locs) => partitionId -> locs.map(_.getEpoch).toSet }
+    val allocTimeMs = nowMs()
+    reservedEpochsByPartition.foreach { case (partitionId, epochs) =>
+      hotnessTracker.registerAllocation(shuffleId, partitionId, epochs, allocTimeMs)
     }
   }
 

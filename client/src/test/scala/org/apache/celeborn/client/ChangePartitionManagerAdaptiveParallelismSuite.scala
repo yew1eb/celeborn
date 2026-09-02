@@ -118,6 +118,22 @@ class ChangePartitionManagerAdaptiveParallelismSuite extends CelebornFunSuite {
       .flatMap(_.getPrimaryPartitions(Some(partitionId)).asScala)
       .toList
 
+  private def reviveEpoch(
+      changePartitionManager: ChangePartitionManager,
+      context: RequestLocationCallContext,
+      shuffleId: Int,
+      partitionId: Int,
+      epoch: Int,
+      loc: PartitionLocation): Unit =
+    changePartitionManager.handlePartitionLocationRequests(
+      context,
+      shuffleId,
+      util.Collections.singletonList(Integer.valueOf(partitionId)),
+      util.Collections.singletonList(Integer.valueOf(epoch)),
+      util.Collections.singletonList(loc),
+      util.Collections.singletonList(StatusCode.SOFT_SPLIT),
+      isSegmentGranularityVisible = false)
+
   /** A ChangePartitionManager whose clock is driven by the returned time holder. */
   private class FakeClockManager(
       conf: CelebornConf,
@@ -141,14 +157,7 @@ class ChangePartitionManagerAdaptiveParallelismSuite extends CelebornFunSuite {
 
     changePartitionManager.advance(40000)
     val context = new CapturingContext
-    changePartitionManager.handleRequestPartitionLocation(
-      context,
-      shuffleId,
-      partitionId,
-      0,
-      loc0,
-      Some(StatusCode.SOFT_SPLIT),
-      isSegmentGranularityVisible = false)
+    reviveEpoch(changePartitionManager, context, shuffleId, partitionId, 0, loc0)
 
     assert(changePartitionManager.hotnessTracker.desiredLocationCount(shuffleId, partitionId) == 2)
     val newLocs = primaryLocs(shuffleId, partitionId).filter(_.getEpoch > 0)
@@ -172,14 +181,7 @@ class ChangePartitionManagerAdaptiveParallelismSuite extends CelebornFunSuite {
     val changePartitionManager = new FakeClockManager(conf, lifecycleManager, 100000L)
 
     val context = new CapturingContext
-    changePartitionManager.handleRequestPartitionLocation(
-      context,
-      shuffleId,
-      partitionId,
-      0,
-      loc0,
-      Some(StatusCode.SOFT_SPLIT),
-      isSegmentGranularityVisible = false)
+    reviveEpoch(changePartitionManager, context, shuffleId, partitionId, 0, loc0)
 
     assert(primaryLocs(shuffleId, partitionId).filter(_.getEpoch > 0).isEmpty)
   }
@@ -194,28 +196,14 @@ class ChangePartitionManagerAdaptiveParallelismSuite extends CelebornFunSuite {
     changePartitionManager.recordInitialAllocTime(shuffleId, Array(loc0), 1000, 100000L)
 
     changePartitionManager.advance(40000)
-    changePartitionManager.handleRequestPartitionLocation(
-      new CapturingContext,
-      shuffleId,
-      partitionId,
-      0,
-      loc0,
-      Some(StatusCode.SOFT_SPLIT),
-      isSegmentGranularityVisible = false)
+    reviveEpoch(changePartitionManager, new CapturingContext, shuffleId, partitionId, 0, loc0)
     assert(changePartitionManager.hotnessTracker.desiredLocationCount(shuffleId, partitionId) == 2)
     val locCountAfterBoost = primaryLocs(shuffleId, partitionId).size
 
     // No boost, no new allocation, but the reporter still gets the current active set.
     changePartitionManager.advance(5000)
     val context = new CapturingContext
-    changePartitionManager.handleRequestPartitionLocation(
-      context,
-      shuffleId,
-      partitionId,
-      0,
-      loc0,
-      Some(StatusCode.SOFT_SPLIT),
-      isSegmentGranularityVisible = false)
+    reviveEpoch(changePartitionManager, context, shuffleId, partitionId, 0, loc0)
 
     assert(changePartitionManager.hotnessTracker.desiredLocationCount(shuffleId, partitionId) == 2)
     assert(primaryLocs(shuffleId, partitionId).size == locCountAfterBoost)
@@ -236,14 +224,7 @@ class ChangePartitionManagerAdaptiveParallelismSuite extends CelebornFunSuite {
 
     // Boost to 2 writable locations first: writable epochs {0, 1}.
     changePartitionManager.advance(40000)
-    changePartitionManager.handleRequestPartitionLocation(
-      new CapturingContext,
-      shuffleId,
-      partitionId,
-      0,
-      loc0,
-      Some(StatusCode.SOFT_SPLIT),
-      isSegmentGranularityVisible = false)
+    reviveEpoch(changePartitionManager, new CapturingContext, shuffleId, partitionId, 0, loc0)
     val locCountAfterBoost = primaryLocs(shuffleId, partitionId).size
     val loc1 = primaryLocs(shuffleId, partitionId).find(_.getEpoch == 1).get
 
@@ -251,14 +232,7 @@ class ChangePartitionManagerAdaptiveParallelismSuite extends CelebornFunSuite {
     // but the reply still carries the current writable set.
     changePartitionManager.advance(90000)
     val context = new CapturingContext
-    changePartitionManager.handleRequestPartitionLocation(
-      context,
-      shuffleId,
-      partitionId,
-      1,
-      loc1,
-      Some(StatusCode.SOFT_SPLIT),
-      isSegmentGranularityVisible = false)
+    reviveEpoch(changePartitionManager, context, shuffleId, partitionId, 1, loc1)
 
     assert(changePartitionManager.hotnessTracker.desiredLocationCount(shuffleId, partitionId) == 2)
     assert(primaryLocs(shuffleId, partitionId).size == locCountAfterBoost)
@@ -341,7 +315,7 @@ class ChangePartitionManagerAdaptiveParallelismSuite extends CelebornFunSuite {
       (Integer.valueOf(epoch), makeLoc(partitionId, epoch, s"host${epoch + 1}"))
     }
     val context = new CapturingContext
-    changePartitionManager.handleReviveRequests(
+    changePartitionManager.handlePartitionLocationRequests(
       context,
       shuffleId,
       util.Arrays.asList(Array.fill(entries.size)(Integer.valueOf(partitionId)): _*),

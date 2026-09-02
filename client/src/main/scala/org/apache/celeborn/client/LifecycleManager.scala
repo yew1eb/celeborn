@@ -158,8 +158,6 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
     if (!adaptivePartitionWriteParallelismEnabled) {
       locations.asScala.foreach(location => map.put(location.getId, location))
     } else {
-      // Adaptive parallelism: one call may carry multiple active locations of the same
-      // partition (gap allocation), so latest = the location with the max epoch.
       locations.asScala.foreach(location =>
         map.merge(
           location.getId,
@@ -887,8 +885,6 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
       // Fifth, reply the allocated partition location to ShuffleClient.
       logInfo(s"Handle RegisterShuffle Success for $shuffleId.")
       val allPrimaryPartitionLocations = slots.asScala.flatMap(_._2._1.asScala).toArray
-      // Record the allocation time of the initial (epoch 0) locations so that
-      // ChangePartitionManager can measure fill times for hot partition detection.
       if (adaptivePartitionWriteParallelismEnabled) {
         changePartitionManager.recordInitialAllocTime(
           shuffleId,
@@ -912,9 +908,6 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
       oldPartitions: util.List[PartitionLocation],
       causes: util.List[StatusCode],
       serdeVersion: SerdeVersion): Unit = {
-    // Adaptive parallelism: one Revive message may carry several retire reports of the same
-    // partition (every retired epoch is forwarded, not only the latest one), so the response
-    // completes once every DISTINCT partition has been replied.
     val contextWrapper =
       ChangeLocationsCallContext(
         context,
@@ -955,7 +948,7 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
     }
 
     if (adaptivePartitionWriteParallelismEnabled) {
-      changePartitionManager.handleReviveRequests(
+      changePartitionManager.handlePartitionLocationRequests(
         contextWrapper,
         shuffleId,
         partitionIds,
