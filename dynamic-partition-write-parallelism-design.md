@@ -104,14 +104,14 @@ LM (ChangePartitionManager → PartitionHotnessTracker):
 
 ### Executor 侧实现
 
-#### PartitionLocationGroup(薄包装,懒膨胀)
+#### PartitionLocationGroup(epoch 升序单列表)
 
-`reducePartitionMap` 值类型改为 `PartitionLocationGroup`:未 split 的 partition 只是 `volatile single` + `null` 的 `ParallelState`(比原先多一个对象头),首次 split/失败/多 location 响应才 inflate 出 active 列表 + retired 表。5 万 partition 的 executor 增量内存 ≈ 1MB;ParallelState 仅热点 partition 存在。
+`reducePartitionMap` 值类型改为 `PartitionLocationGroup`:一个按 epoch 升序的 copy-on-write `EpochState{location, cause}` 列表,cause 即本地退休墓碑;未 split 的 partition 恒为单条目 fast path(写路径零额外遍历),split/失败/多 location 响应后才追加条目。mutator(`retire`/`merge`/`replace`)走 group monitor,读路径迭代 COW 快照无锁。
 
-- **路由**:`currentFor(mapId)` 委托 `pick(mapId)`——快照 active 列表单遍收集可写子集(非退休 + soft),`floorMod(mapId, size)` 均匀分派;同一 map task 稳定写同一 location(保住 PushState 按 host 聚合)。可写子集为空时 fallback 到 `latest()`(见决策 5)。
-- **退休**:`retire(epoch, cause)` CHM compute 原子,返回是否首次(每 epoch 只上报一次);cause 可升级(SOFT→HARD)不可降级;与全集 merge 同 monitor,防墓碑写与清理交错。
-- **全集收敛**:`mergeActiveLocations(locations, fullSet)` 按 epoch 有序插入、跳过本地已退休 epoch;`fullSet=true` 时清理 LM 已消化(全集中不再出现)的退休条目。adaptive 链路下 LM 恒回当前全集(主回复 + `additionalPartitions`,active=1 时 additionals 为空),客户端恒按全集收敛——soft 退休 epoch 由 LM 保留在活跃集内,驱逐只清理已消化退休,不会误伤 soft 条目。
-- **诊断视图**:`retiredEpochsSnapshot()` 供失败信息;`outstandingRetires()` 供退休上报(仅含仍在 active 列表中的退休 epoch,被全集清理的说明 LM 已消化)。批量 revive 在**发送时**从该视图现取未消化退休集合,而不是从队列收集:队列在调度器被超时堵住时积压无上界,group 视图则有界(≤ 活跃集大小)、自动去陈旧、RPC 超时丢失的条目自动随下一次重发。另外 `hasWritableFor(mapId)` 返回是否存在可写 location——`currentFor` 内置 fallback 后不再返回 null,可写性判定必须用这个方法(批调度器的"本地可满足"判定依赖它,见决策 5)。
+- **路由**:`currentFor(mapId)`——单条目直接返回;否则快照列表单遍收集可写子集(非退休 + soft),`floorMod(mapId, size)` 均匀分派;同一 map task 稳定写同一 location(保住 PushState 按 host 聚合)。可写子集为空时 fallback 到 `latest()`(见决策 5)。
+- **退休**:`retire(epoch, cause)` 在 monitor 内原子完成,返回是否首次(每 epoch 只上报一次);cause 可升级(SOFT→HARD)不可降级。
+- **全集收敛**:`merge(locations)` 按 epoch 有序补齐缺失条目、绝不复活本地已退休 epoch(重报到的墓碑说明 LM 尚未消化,复活会把写路由到死 location),并驱逐 LM 不再上报的已退休条目(已消化)。adaptive 链路下 LM 恒回当前全集(主回复 + `additionalPartitions`,active=1 时 additionals 为空),客户端恒按全集收敛——soft 退休 epoch 由 LM 保留在活跃集内,驱逐只清理已消化退休,不会误伤 soft 条目。单 location 响应(flag 关闭或旧 LM)走 `replace(loc)`:整体取代,路由只跟踪最新 location。
+- **诊断视图**:`outstandingRetires()` 供退休上报(仍在列表中且带 cause 的条目;被全集驱逐的说明 LM 已消化)。批量 revive 在**发送时**从该视图现取未消化退休集合,而不是从队列收集:队列在调度器被超时堵住时积压无上界,group 视图则有界(≤ 活跃集大小)、自动去陈旧、RPC 超时丢失的条目自动随下一次重发。另外 `hasWritableFor(mapId)` 返回是否存在可写 location——`currentFor` 内置 fallback 后不再返回 null,可写性判定必须用这个方法(批调度器的"本地可满足"判定依赖它,见决策 5)。
 
 #### ShuffleClientImpl 接入
 
@@ -126,7 +126,7 @@ LM (ChangePartitionManager → PartitionHotnessTracker):
 
 #### 并发要点
 
-Group 被三类线程并发访问(push 线程、push 回调、ReviveManager 调度器):读路径 COW+CHM 快照无锁;`retire`/`mergeActiveLocations`/`updateLatest` 同 group monitor;`retire` 首报信号靠 CHM compute 原子。每 partition 在飞 revive 请求由调度器天然去重(single-flight)。LM 侧同一 partition 的批处理由条纹锁 + `inBatchPartitions` 去重串行。
+Group 被三类线程并发访问(push 线程、push 回调、ReviveManager 调度器):读路径迭代 COW 列表快照无锁;`retire`/`merge`/`replace` 同 group monitor,`retire` 的首报信号在同一 monitor 内原子给出。每 partition 在飞 revive 请求由调度器天然去重(single-flight)。LM 侧同一 partition 的批处理由条纹锁 + `inBatchPartitions` 去重串行。
 
 #### 正确性
 

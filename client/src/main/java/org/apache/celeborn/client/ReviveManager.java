@@ -72,32 +72,25 @@ class ReviveManager {
               // Insert request that is not MapperEnded and with the max epoch
               // into requestsToSend
               Iterator<ReviveRequest> iter = requests.iterator();
-              // Adaptive parallelism only: one representative request per partition, used as the
-              // mapId/attemptId donor when rebuilding retire reports below.
-              Map<Integer, ReviveRequest> representativeRequests = new HashMap<>();
+              Map<Integer, ReviveRequest> retireReportDonors = new HashMap<>();
               while (iter.hasNext()) {
                 ReviveRequest req = iter.next();
                 if (adaptivePartitionWriteParallelismEnabled) {
-                  representativeRequests.putIfAbsent(req.partitionId, req);
+                  retireReportDonors.putIfAbsent(req.partitionId, req);
                 }
-                boolean satisfied;
+                boolean locallySatisfied;
                 if (adaptivePartitionWriteParallelismEnabled) {
-                  // Local retires precede the revive round, so a newer epoch can already be
-                  // hard-retired locally — the baseline "a newer location exists" condition
-                  // cannot tell. SUCCESS must mean the blocking retry has a writable location
-                  // to re-push, otherwise every blocked pusher re-pushes the same dead location
-                  // at once.
-                  satisfied =
+                  locallySatisfied =
                       shuffleClient.mapperEnded(shuffleId, req.mapId)
                           || shuffleClient.hasWritableLocation(
                               partitionMap, req.partitionId, req.mapId);
                 } else {
-                  satisfied =
+                  locallySatisfied =
                       shuffleClient.newerPartitionLocationExists(
                               partitionMap, req.partitionId, req.epoch, false)
                           || shuffleClient.mapperEnded(shuffleId, req.mapId);
                 }
-                if (satisfied) {
+                if (locallySatisfied) {
                   req.reviveStatus = StatusCode.SUCCESS.getValue();
                   if (adaptivePartitionWriteParallelismEnabled) {
                     mapIds.add(req.mapId);
@@ -114,18 +107,13 @@ class ReviveManager {
 
               ArrayList<ReviveRequest> allToSend = new ArrayList<>(requestsToSend.values());
               if (adaptivePartitionWriteParallelismEnabled) {
-                // Every retire report must reach the LifecycleManager (its active-set bookkeeping
-                // depends on it), even when already satisfied locally. Reports are rebuilt from
-                // the groups' outstanding sets at send time instead of being collected from the
-                // queue: the queue version let a stuck scheduler pile every distinct retired
-                // epoch of the backlog (thousands for one hot partition) into a single Revive
-                // message, while the group view only holds retired epochs the LM has not
-                // digested yet (still in the active list) — bounded by the active set size,
-                // dropping stale reports, and automatically re-sending ones lost to an RPC
-                // timeout (they stay outstanding until the LM's full-set reply evicts them).
-                for (Map.Entry<Integer, ReviveRequest> entry : representativeRequests.entrySet()) {
+                // Retire reports must reach the LifecycleManager even when the request is
+                // already satisfied locally; they are rebuilt from the groups' outstanding
+                // retires at send time — bounded, stale epochs dropped, reports lost to an RPC
+                // timeout are re-sent by the next round.
+                for (Map.Entry<Integer, ReviveRequest> entry : retireReportDonors.entrySet()) {
                   int partitionId = entry.getKey();
-                  ReviveRequest representative = entry.getValue();
+                  ReviveRequest donor = entry.getValue();
                   PartitionLocationGroup group = partitionMap.get(partitionId);
                   if (group == null) {
                     continue;
@@ -138,8 +126,8 @@ class ReviveManager {
                       allToSend.add(
                           new ReviveRequest(
                               shuffleId,
-                              representative.mapId,
-                              representative.attemptId,
+                              donor.mapId,
+                              donor.attemptId,
                               partitionId,
                               retire.location.getEpoch(),
                               retire.location,

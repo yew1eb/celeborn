@@ -30,23 +30,13 @@ import org.apache.celeborn.common.util.JavaUtils
 
 /** Driver-side hot state of one (shuffleId, partitionId); mutated under this instance's monitor. */
 private[client] class HotState {
-  // Writable epochs: SOFT_SPLIT epochs of available workers stay (writable until hard split).
   val activeEpochs = new util.LinkedHashSet[Integer]()
-  // Non-soft-retired epochs: a late SOFT_SPLIT report must not resurrect them.
   val hardRetiredEpochs: util.Set[Integer] = ConcurrentHashMap.newKeySet[Integer]()
-  // epoch -> when its location was allocated (slots reserved).
   val allocTimeMs = JavaUtils.newConcurrentHashMap[Int, java.lang.Long]()
-  // Epochs already judged once (boosted or not).
   val splitReported: util.Set[Integer] = ConcurrentHashMap.newKeySet[Integer]()
-  // Monotone increasing, capped at the shuffle's parallelism cap.
   @volatile var desired: Int = 1
 }
 
-/**
- * Per-partition hot state behind adaptive partition write parallelism: how many writable
- * locations each partition should have. Dependencies and timestamps are injected so the
- * tracker can be tested in isolation.
- */
 private[client] class PartitionHotnessTracker(
     conf: CelebornConf,
     latestEpoch: (Int, Int) => Option[Int],
@@ -57,28 +47,20 @@ private[client] class PartitionHotnessTracker(
   private val adaptivePartitionWriteParallelismTargetSplitIntervalMs =
     conf.clientShuffleAdaptivePartitionWriteParallelismTargetSplitIntervalMs
 
-  // shuffleId -> partitionId -> hot state; sparse, created on the first retire report.
   private val partitionHotStates =
     JavaUtils.newConcurrentHashMap[Int, ConcurrentHashMap[Integer, HotState]]()
 
   private val shuffleInitialAllocTimeMs =
     JavaUtils.newConcurrentHashMap[Int, java.lang.Long]()
 
-  // shuffleId -> cap of any partition's desired count: min(configured max, numMappers).
-  // Routing is mapId % activeCount, so more locations than mappers are never usable.
   private val shuffleParallelismCap =
     JavaUtils.newConcurrentHashMap[Int, java.lang.Integer]()
 
   /**
-   * Process the retire report of one epoch: update the active set (a SOFT_SPLIT location of
-   * an available worker stays writable; every other cause removes the epoch for good — late
-   * reports never resurrect it), then judge hotness at most once per epoch: a SOFT/HARD_SPLIT
-   * on an available worker filled faster than the target interval raises desired to
-   * ceil(targetInterval / fillTime).
-   *
-   * The target is NOT scaled by the current active count K: fillTime is the fill time of one
-   * location and does not dilute with K, and target ∝ K with K following desired would close
-   * a positive feedback loop amplifying to the cap on every report.
+   * Process the retire report of one epoch: update the active set (a SOFT_SPLIT location of an
+   * available worker stays; every other cause removes the epoch for good), then judge hotness at
+   * most once per epoch — a split filled faster than the target interval raises desired to
+   * min(cap, ceil(targetInterval / fillTime)).
    */
   private[client] def onEpochRetired(
       shuffleId: Int,
@@ -119,8 +101,7 @@ private[client] class PartitionHotnessTracker(
         }
         if (allocTime != null
           && nowMs - allocTime < adaptivePartitionWriteParallelismTargetSplitIntervalMs) {
-          // Floor fillTime at 1ms: a report in the same millisecond as the allocation would
-          // otherwise compute ceil(interval / 0) = Infinity and pin desired to Int.MaxValue.
+          // Floor at 1ms: a same-millisecond report would otherwise divide by zero.
           val fillTimeMs = math.max(1L, nowMs - allocTime)
           val target = math.ceil(
             adaptivePartitionWriteParallelismTargetSplitIntervalMs.toDouble / fillTimeMs).toInt
@@ -137,11 +118,6 @@ private[client] class PartitionHotnessTracker(
     }
   }
 
-  /**
-   * Record the allocation time of a shuffle's initial (epoch 0) locations and its parallelism
-   * cap. The registerShuffle RPC is sent lazily by the first pushing mapper, so this timestamp
-   * is the shuffle's write start. A repeated registration does not overwrite.
-   */
   private[client] def recordInitialAllocTime(
       shuffleId: Int,
       partitionLocations: Array[PartitionLocation],
@@ -162,11 +138,6 @@ private[client] class PartitionHotnessTracker(
     }
   }
 
-  /**
-   * Add the reserved epochs to the active set and record their allocation times. The epochs
-   * MUST be read back from the reserve result: a retried reservation may use a different
-   * epoch, and a pre-reserve plan would diverge from the reserved reality.
-   */
   private[client] def registerAllocation(
       shuffleId: Int,
       partitionId: Int,
@@ -206,7 +177,6 @@ private[client] class PartitionHotnessTracker(
     if (map == null) null else map.get(partitionId)
   }
 
-  /** The registered active epochs, else derived as { latestPartitionLocation.epoch }. */
   private[client] def currentActiveEpochs(shuffleId: Int, partitionId: Int): Set[Int] = {
     val entry = hotStateOrNull(shuffleId, partitionId)
     if (entry != null) {
@@ -218,10 +188,6 @@ private[client] class PartitionHotnessTracker(
     }
   }
 
-  /**
-   * Hard-retire epochs whose hosting worker is unavailable: no retire report ever arrives for
-   * a dead worker, so its epochs would otherwise keep being advertised as active.
-   */
   private[client] def retireUnavailableWorkerEpochs(
       shuffleId: Int,
       partitionId: Int,

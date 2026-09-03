@@ -72,8 +72,7 @@ public class PartitionLocationGroup {
   }
 
   public PartitionLocation latest() {
-    // Epoch-ascending, so the last entry seen is the max-epoch location; iterating the
-    // copy-on-write list is a race-free snapshot read.
+    // Epoch-ascending: the last entry of this race-free snapshot is the max-epoch location.
     PartitionLocation latest = null;
     for (EpochState e : epochs) {
       latest = e.location;
@@ -96,7 +95,7 @@ public class PartitionLocationGroup {
   }
 
   /**
-   * Mark {@code epoch} retired: a soft-split location stays writable, a harder cause upgrades a
+   * Mark {@code epoch} retired: a soft-split location stays writable; a harder cause upgrades a
    * soft retire and is never downgraded back.
    *
    * @return true on the first retire of the epoch
@@ -121,8 +120,8 @@ public class PartitionLocationGroup {
   }
 
   /**
-   * Singleton revive response — supersede the whole list: routing must track the newest location
-   * only, older entries must not keep receiving writes.
+   * Single-location revive response: supersede the list with the newest location, so routing no
+   * longer writes to older entries.
    */
   public synchronized void replace(PartitionLocation loc) {
     if (loc.getEpoch() >= maxEpoch) {
@@ -132,21 +131,20 @@ public class PartitionLocationGroup {
   }
 
   /**
-   * Full-set revive response — merge instead of replace, because the response lags local retires:
-   * add missing epochs, never resurrect retired ones (a re-reported tombstone is not digested yet;
-   * resurrecting routes writes to a dead location), and evict retired epochs the LM no longer
-   * reports — digested.
+   * Full-set revive response: add missing epochs in epoch order, never resurrect a locally
+   * retired epoch (a re-reported tombstone is not digested yet; resurrecting would route writes
+   * to a dead location), and evict retired epochs absent from the set — the LM has digested them.
    */
-  public synchronized void merge(List<PartitionLocation> reported) {
-    if (reported == null || reported.isEmpty()) {
+  public synchronized void merge(List<PartitionLocation> activeLocations) {
+    if (activeLocations == null || activeLocations.isEmpty()) {
       return;
     }
-    Set<Integer> reportedEpochs = new HashSet<>();
-    for (PartitionLocation loc : reported) {
-      reportedEpochs.add(loc.getEpoch());
+    Set<Integer> activeEpochs = new HashSet<>();
+    for (PartitionLocation loc : activeLocations) {
+      activeEpochs.add(loc.getEpoch());
       insertIfAbsent(loc);
     }
-    epochs.removeIf(e -> e.cause != null && !reportedEpochs.contains(e.location.getEpoch()));
+    epochs.removeIf(e -> e.cause != null && !activeEpochs.contains(e.location.getEpoch()));
   }
 
   private void insertIfAbsent(PartitionLocation loc) {

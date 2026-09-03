@@ -427,8 +427,8 @@ public class ShuffleClientImpl extends ShuffleClient {
   }
 
   /**
-   * Retire the epoch locally so routing skips it ahead of the async batched revive round. Only the
-   * first retire logs — every batch that received the same split response lands here.
+   * Retire the epoch locally so routing skips it ahead of the async batched revive round; only
+   * the first retire logs.
    */
   private void retireEpoch(int shuffleId, int partitionId, int epoch, StatusCode cause) {
     if (reducePartitionMap.get(shuffleId).get(partitionId).retire(epoch, cause)) {
@@ -880,13 +880,6 @@ public class ShuffleClientImpl extends ShuffleClient {
     }
   }
 
-  /**
-   * Whether the partition currently has a writable location for {@code mapId} (non-retired or
-   * soft-split). Adaptive parallelism only: a revive request is locally satisfied only when this is
-   * true — a newer but already-retired epoch must not short-circuit the request, otherwise the
-   * retry loop spins on a stale local view and the LifecycleManager never learns it must allocate a
-   * replacement.
-   */
   boolean hasWritableLocation(
       Map<Integer, PartitionLocationGroup> shuffleMap, int partitionId, int mapId) {
     PartitionLocationGroup group = shuffleMap.get(partitionId);
@@ -991,10 +984,6 @@ public class ShuffleClientImpl extends ShuffleClient {
               partitionLocationMap.computeIfAbsent(
                   partitionId, id -> new PartitionLocationGroup(loc));
           if (adaptivePartitionWriteParallelismEnabled) {
-            // The adaptive LifecycleManager always replies the current full active set of the
-            // partition (the max-epoch location as the primary reply plus the rest in
-            // additionalPartitions). Soft-split epochs are retained in the LM's active set, so
-            // converging to the reply only evicts already-digested retires.
             List<PartitionLocation> additionals = response.additionalLocs().get(partitionId);
             List<PartitionLocation> allActive = new ArrayList<>();
             if (loc != null) {
@@ -1005,24 +994,20 @@ public class ShuffleClientImpl extends ShuffleClient {
             }
             group.merge(allActive);
             if (allActive.size() > 1) {
-              StringBuilder sb = new StringBuilder();
-              for (PartitionLocation l : allActive) {
-                if (sb.length() > 0) {
-                  sb.append(",");
-                }
-                sb.append(l.getEpoch()).append("@").append(l.hostAndPushPort());
-              }
               logger.info(
-                  "Shuffle {} partition {}: parallel write active, now writing to {} locations: {}.",
+                  "Shuffle {} partition {}: parallel write active, now writing to {} locations.",
                   shuffleId,
                   partitionId,
-                  allActive.size(),
-                  sb);
+                  allActive.size());
+            }
+            for (PartitionLocation active : allActive) {
+              pushExcludedWorkers.remove(active.hostAndPushPort());
+              if (active.hasPeer()) {
+                pushExcludedWorkers.remove(active.getPeer().hostAndPushPort());
+              }
             }
           } else if (loc != null) {
             group.replace(loc);
-          }
-          if (loc != null) {
             pushExcludedWorkers.remove(loc.hostAndPushPort());
             if (loc.hasPeer()) {
               pushExcludedWorkers.remove(loc.getPeer().hostAndPushPort());
@@ -1788,7 +1773,6 @@ public class ShuffleClientImpl extends ShuffleClient {
                     addAndGetReviveRequests(
                         shuffleId, mapId, attemptId, batchesNeedResubmit, StatusCode.HARD_SPLIT);
                 if (adaptivePartitionWriteParallelismEnabled) {
-                  // Adaptive: retire the epochs locally so routing skips them immediately.
                   for (ReviveRequest request : requests) {
                     retireEpoch(
                         shuffleId, request.partitionId, request.epoch, StatusCode.HARD_SPLIT);

@@ -290,10 +290,8 @@ class ChangePartitionManager(
   }
 
   /**
-   * The active locations of a partition on available workers, looked up from worker snapshots
-   * by the active epochs. Locations on unavailable workers are dropped and their epochs
-   * hard-retired (no retire report ever arrives for a dead worker, so its epoch would
-   * otherwise stay in the active set and keep being advertised). Falls back to the latest
+   * The partition's active locations on available workers, epoch ascending. Locations on
+   * unavailable workers are dropped and hard-retired in the tracker; falls back to the latest
    * location when nothing available remains.
    */
   private def availableActiveLocations(
@@ -319,7 +317,7 @@ class ChangePartitionManager(
         unavailable.map(_.getEpoch).toSet)
     }
     if (available.nonEmpty) {
-      available
+      available.sortBy(_.getEpoch)
     } else {
       val map = lifecycleManager.latestPartitionLocation.get(shuffleId)
       if (map == null) List.empty else Option(map.get(partitionId)).toList
@@ -416,7 +414,7 @@ class ChangePartitionManager(
           }
       }.foreach { case (partitionId, requests) =>
         requests.foreach { requestSet =>
-          val sorted = availableActiveLocations(shuffleId, partitionId).sortBy(_.getEpoch)
+          val sorted = availableActiveLocations(shuffleId, partitionId)
           val maxLoc = sorted.lastOption.orNull
           val additionalLocs = sorted.dropRight(1).asJava
           requestSet.asScala.toList.foreach(req =>
@@ -582,11 +580,9 @@ class ChangePartitionManager(
   }
 
   /**
-   * Allocate new locations for each requested partition by the gap between the desired
-   * location count (judged locally from eligible split reports, capped at the configured upper
-   * bound) and the current active location count. The gap can be 0 when another executor
-   * has already triggered the allocation. Newly allocated locations of one partition are
-   * placed on mutually different workers (best effort) with increasing epochs.
+   * Allocate new locations for each requested partition by the gap between the desired count and
+   * the current active count; new locations go to mutually different workers (best effort) with
+   * increasing epochs.
    */
   private def allocateParallelLocations(
       shuffleId: Int,
@@ -626,8 +622,7 @@ class ChangePartitionManager(
     val minCandidates = if (pushReplicateEnabled) 2 else 1
     var remaining = candidates
     val newEpochs = scala.collection.mutable.Set[Int]()
-    // Early-exit once candidates are exhausted: gap can be as large as the mapper count (or a
-    // misjudged desired), and spinning the loop billions of times would stall the batch thread.
+    // Early-exit once candidates are exhausted: gap can be as large as the mapper count.
     var i = 0
     while (i < gap && remaining.size >= minCandidates) {
       i += 1
