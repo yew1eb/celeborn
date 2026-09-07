@@ -581,8 +581,8 @@ class ChangePartitionManager(
 
   /**
    * Allocate new locations for each requested partition by the gap between the desired count and
-   * the current active count; new locations go to mutually different workers (best effort) with
-   * increasing epochs.
+   * the current active count; new locations prefer mutually different workers (cycling over the
+   * candidates when the gap exceeds their count) with increasing epochs.
    */
   private def allocateParallelLocations(
       shuffleId: Int,
@@ -622,9 +622,12 @@ class ChangePartitionManager(
     val minCandidates = if (pushReplicateEnabled) 2 else 1
     var remaining = candidates
     val newEpochs = scala.collection.mutable.Set[Int]()
-    // Early-exit once candidates are exhausted: gap can be as large as the mapper count.
     var i = 0
-    while (i < gap && remaining.size >= minCandidates) {
+    while (i < gap && candidates.size >= minCandidates) {
+      // Distinct workers first; cycle over the candidates when the gap exceeds their count.
+      if (remaining.size < minCandidates) {
+        remaining = candidates
+      }
       i += 1
       val newEpoch = baseEpoch + i
       lifecycleManager.allocateFromCandidates(partitionId, newEpoch - 1, remaining, slots)

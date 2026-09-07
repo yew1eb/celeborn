@@ -171,6 +171,32 @@ class ChangePartitionManagerAdaptiveParallelismSuite extends CelebornFunSuite {
     assert(reply.additionals.asScala.map(_.getEpoch).toSet == Set(0))
   }
 
+  test("gap larger than the candidate workers stacks locations by cycling over them") {
+    val conf = makeConf()
+    val shuffleId = 1
+    val partitionId = 0
+    val workers = (1 to 2).map(makeWorker)
+    val loc0 = prepareLifecycleManager(conf, shuffleId, partitionId, workers)
+    val changePartitionManager = new FakeClockManager(conf, lifecycleManager, 100000L)
+    changePartitionManager.recordInitialAllocTime(shuffleId, Array(loc0), 1000, 100000L)
+
+    // fillTime 6s against the 60s target boosts desired to 10; with only 2 candidate
+    // workers the 9-location gap must cycle and stack on them.
+    changePartitionManager.advance(6000)
+    val context = new CapturingContext
+    reviveEpoch(changePartitionManager, context, shuffleId, partitionId, 0, loc0)
+
+    assert(changePartitionManager.hotnessTracker.desiredLocationCount(shuffleId, partitionId) == 10)
+    val newLocs = primaryLocs(shuffleId, partitionId).filter(_.getEpoch > 0)
+    assert(newLocs.map(_.getEpoch).toSet == (1 to 9).toSet)
+    assert(newLocs.map(_.getHost).toSet == Set("host1", "host2"))
+
+    val reply = context.replies.get(partitionId)
+    assert(reply != null && reply.status == StatusCode.SUCCESS)
+    assert(reply.loc.isDefined && reply.loc.get.getEpoch == 9)
+    assert(reply.additionals.asScala.map(_.getEpoch).toSet == (0 to 8).toSet)
+  }
+
   test("epoch with unknown allocTime (legacy data) never boosts") {
     val conf = makeConf()
     val shuffleId = 1
