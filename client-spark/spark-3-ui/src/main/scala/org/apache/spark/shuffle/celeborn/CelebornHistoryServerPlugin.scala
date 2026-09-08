@@ -22,7 +22,6 @@ import org.apache.spark.scheduler.SparkListener
 import org.apache.spark.shuffle.celeborn.ui.CelebornUITab
 import org.apache.spark.status.{AppHistoryServerPlugin, ElementTrackingStore}
 import org.apache.spark.ui.SparkUI
-import org.apache.spark.util.kvstore.KVStore
 
 /** Registered via SPI at META-INF/services/org.apache.spark.status.AppHistoryServerPlugin. */
 class CelebornHistoryServerPlugin extends AppHistoryServerPlugin {
@@ -30,13 +29,20 @@ class CelebornHistoryServerPlugin extends AppHistoryServerPlugin {
   override def createListeners(
       conf: SparkConf,
       store: ElementTrackingStore): Seq[SparkListener] = {
-    Seq(new CelebornListener(store, conf))
+    val listener = new CelebornListener(store, conf, requirePluginOptIn = true)
+    // Persist the final accumulated values when replay finishes, covering logs
+    // whose last events fall inside the throttle interval and that may lack an
+    // ApplicationEnd event.
+    store.onFlush(listener.flush())
+    Seq(listener)
   }
 
   override def setupUI(ui: SparkUI): Unit = {
-    val kvstore: KVStore = ui.store.store
-    val statusStore = new CelebornStatusStore(kvstore)
-    new CelebornUITab(statusStore, ui)
+    val statusStore = new CelebornStatusStore(ui.store.store)
+    // Only attach the tab for applications that opted in via spark.plugins.
+    if (statusStore.extensionEnabled()) {
+      new CelebornUITab(statusStore, ui)
+    }
   }
 
   override def displayOrder: Int = 1

@@ -27,11 +27,19 @@ import org.apache.spark.util.kvstore.KVStore
 /**
  * Collects Celeborn shuffle metrics into the Spark KVStore for live UI and
  * HistoryServer replay.
+ *
+ * When `requirePluginOptIn` is true (History Server replay), collection stays
+ * disabled until the application's recorded `spark.plugins` contains
+ * [[CelebornPlugin]], and an enable marker is persisted so `setupUI` can decide
+ * whether to attach the Celeborn tab.
  */
 private[celeborn] class CelebornListener(
     val kvstore: KVStore,
-    val conf: SparkConf)
+    val conf: SparkConf,
+    requirePluginOptIn: Boolean = false)
   extends SparkListener with Logging {
+
+  @volatile private var pluginEnabled = !requirePluginOptIn
 
   private val totalWriteBytes = new AtomicLong(0L)
   private val totalWriteTimeMs = new AtomicLong(0L)
@@ -48,6 +56,9 @@ private[celeborn] class CelebornListener(
   }
 
   override def onTaskEnd(taskEnd: SparkListenerTaskEnd): Unit = {
+    if (!pluginEnabled) {
+      return
+    }
     Option(taskEnd.taskMetrics).foreach { metrics =>
       totalWriteBytes.addAndGet(metrics.shuffleWriteMetrics.bytesWritten)
       // writeTime is in nanoseconds; normalize to ms.
@@ -59,9 +70,28 @@ private[celeborn] class CelebornListener(
     mayUpdate()
   }
 
+  override def onJobEnd(jobEnd: SparkListenerJobEnd): Unit = {
+    // Flush per-job so that tasks finishing within the throttle interval of the
+    // previous flush are not lost when the application stays alive but idle.
+    mayUpdate(force = true)
+  }
+
   override def onEnvironmentUpdate(environmentUpdate: SparkListenerEnvironmentUpdate): Unit = {
-    val celebornProps = environmentUpdate.environmentDetails
+    val sparkProps = environmentUpdate.environmentDetails
       .getOrElse("Spark Properties", Seq.empty)
+    if (!pluginEnabled) {
+      val pluginClass = classOf[CelebornPlugin].getName
+      val optedIn = sparkProps.exists { case (k, v) =>
+        k == "spark.plugins" && v.split(",").exists(_.trim == pluginClass)
+      }
+      if (optedIn) {
+        pluginEnabled = true
+        kvstore.write(new CelebornExtensionEnabledUIData())
+      } else {
+        return
+      }
+    }
+    val celebornProps = sparkProps
       .filter { case (k, _) => k.startsWith("spark.celeborn.") }
       .sortBy(_._1)
     if (celebornProps.nonEmpty) {
@@ -72,6 +102,12 @@ private[celeborn] class CelebornListener(
   override def onApplicationEnd(applicationEnd: SparkListenerApplicationEnd): Unit = {
     mayUpdate(force = true)
     logInfo("CelebornListener: application ended, final flush completed")
+  }
+
+  /** Flushes the current aggregations immediately, bypassing the throttle. */
+  def flush(): Unit = {
+    lastUpdateTimestamp.set(System.currentTimeMillis())
+    flushAggregations()
   }
 
   private def mayUpdate(force: Boolean = false): Unit = {
@@ -86,6 +122,9 @@ private[celeborn] class CelebornListener(
   }
 
   private def flushAggregations(): Unit = {
+    if (!pluginEnabled) {
+      return
+    }
     try {
       kvstore.write(AggregatedTaskInfoUIData(
         totalWriteBytes.get(),

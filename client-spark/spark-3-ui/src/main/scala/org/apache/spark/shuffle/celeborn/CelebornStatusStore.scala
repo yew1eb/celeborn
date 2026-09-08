@@ -40,6 +40,19 @@ private[celeborn] class CelebornPropertiesUIData(
   def id: String = classOf[CelebornPropertiesUIData].getName
 }
 
+/**
+ * Marker persisted during History Server replay when the application's recorded
+ * `spark.plugins` contains [[CelebornPlugin]]. `setupUI` runs on a fresh plugin
+ * instance (FsHistoryProvider loads plugins again after replay), so the opt-in
+ * state has to be passed through the KVStore rather than in memory.
+ */
+private[celeborn] class CelebornExtensionEnabledUIData {
+
+  @JsonIgnore
+  @KVIndex
+  def id: String = classOf[CelebornExtensionEnabledUIData].getName
+}
+
 private[celeborn] class CelebornStatusStore(store: KVStore) {
 
   def aggregatedTaskInfo(): AggregatedTaskInfoUIData = {
@@ -57,6 +70,16 @@ private[celeborn] class CelebornStatusStore(store: KVStore) {
       store.read(kClass, kClass.getName)
     } catch {
       case _: NoSuchElementException => new CelebornPropertiesUIData(Seq.empty)
+    }
+  }
+
+  def extensionEnabled(): Boolean = {
+    val kClass = classOf[CelebornExtensionEnabledUIData]
+    try {
+      store.read(kClass, kClass.getName)
+      true
+    } catch {
+      case _: NoSuchElementException => false
     }
   }
 }
