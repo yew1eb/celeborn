@@ -319,7 +319,8 @@ public class HARaftServer {
     }
   }
 
-  private void checkRaftServerState() {
+  @VisibleForTesting
+  void checkRaftServerState() {
     if (stopped.get() || unexpectedCloseHandled.get()) {
       return;
     }
@@ -344,7 +345,7 @@ public class HARaftServer {
 
   @VisibleForTesting
   void setUnexpectedCloseHandler(Runnable handler) {
-    this.unexpectedCloseHandler = handler;
+    this.unexpectedCloseHandler = Objects.requireNonNull(handler);
   }
 
   private RaftProperties newRaftProperties(CelebornConf conf, RpcType rpc) {
@@ -577,7 +578,7 @@ public class HARaftServer {
    */
   public void updateServerRole() {
     LifeCycle.State state = server.getLifeCycleState();
-    if (state != LifeCycle.State.RUNNING) {
+    if (state == LifeCycle.State.CLOSED || state == LifeCycle.State.EXCEPTION) {
       // Only log on role change to avoid flooding logs on every metrics scrape.
       if (cachedPeerRole.isPresent()) {
         LOG.warn(

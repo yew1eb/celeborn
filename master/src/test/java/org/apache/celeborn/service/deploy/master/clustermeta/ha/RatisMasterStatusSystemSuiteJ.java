@@ -2162,10 +2162,9 @@ public class RatisMasterStatusSystemSuiteJ {
       nonLeader.getServer().close();
       Assert.assertEquals(LifeCycle.State.CLOSED, nonLeader.getServerState());
 
-      long deadline = System.currentTimeMillis() + 30_000;
-      while (!handlerInvoked.get() && System.currentTimeMillis() < deadline) {
-        Thread.sleep(200L);
-      }
+      // Run the state check once, deterministically, instead of waiting for
+      // the scheduled role checker to fire.
+      nonLeader.checkRaftServerState();
       Assert.assertTrue(handlerInvoked.get());
 
       nonLeader.updateServerRole();
