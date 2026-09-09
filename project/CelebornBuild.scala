@@ -1125,7 +1125,7 @@ trait SparkClientProjects {
           "org.apache.spark" %% "spark-core" % sparkVersion % "provided",
           Dependencies.javaxServletApi % "provided",
           Dependencies.jakartaServletApi % "provided"
-        ),
+        ) ++ commonUnitTestDependencies,
         // Mirrors Maven's build-helper-maven-plugin `add-servlet-source` execution.
         Compile / unmanagedSourceDirectories += baseDirectory.value / "src" / "main" / servletSourceDir
       )
