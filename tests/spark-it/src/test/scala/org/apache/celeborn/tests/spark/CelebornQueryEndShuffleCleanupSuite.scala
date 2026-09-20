@@ -118,6 +118,28 @@ class CelebornQueryEndShuffleCleanupSuite extends AnyFunSuite
     spark.stop()
   }
 
+  test("CELEBORN-2465: all shuffles of a multi-join query are unregistered, aqeEnabled: true") {
+    val spark = SparkSession.builder().config(shuffleCleanupConf(true)).getOrCreate()
+
+    spark.range(0, 1000, 1, 4).createOrReplaceTempView("ta")
+    spark.range(0, 1000, 1, 4).createOrReplaceTempView("tb")
+    // Four shuffle joins in a row, so the final plan holds multiple shuffle query stages.
+    val result = spark.sql(
+      """
+        |SELECT COUNT(*) FROM (
+        |  SELECT a1.id AS k FROM ta a1
+        |  JOIN tb b1 ON a1.id = b1.id
+        |  JOIN ta a2 ON a1.id = a2.id
+        |  JOIN tb b2 ON a1.id = b2.id
+        |  JOIN ta a3 ON a1.id = a3.id
+        |)
+        |""".stripMargin).collect()
+    assert(result.head.getLong(0) == 1000)
+    awaitShufflesUnregistered(lifecycleManager())
+
+    spark.stop()
+  }
+
   test("CELEBORN-2465: shuffles are not unregistered on SQL query completion by default") {
     val sparkConf = updateSparkConf(
       new SparkConf().setAppName("celeborn-test").setMaster("local[2]"),
