@@ -95,6 +95,29 @@ class CelebornQueryEndShuffleCleanupSuite extends AnyFunSuite
     }
   }
 
+  test("CELEBORN-2465: CTAS shuffles are unregistered on SQL query completion, aqeEnabled: true") {
+    val spark = SparkSession.builder().config(shuffleCleanupConf(true)).getOrCreate()
+
+    try {
+      // For CTAS / INSERT, the root of executedPlan is a DataWritingCommandExec wrapping an
+      // AdaptiveSparkPlanExec, so the exchanges are not reachable without unwrapping the
+      // AdaptiveSparkPlanExec nested in the tree.
+      import org.apache.spark.sql.functions._
+      spark.range(0, 1000, 1, 4)
+        .withColumn("k", expr("id % 10"))
+        .groupBy("k")
+        .count()
+        .write
+        .mode("overwrite")
+        .saveAsTable("celeborn_cleanup_ctas_test")
+      awaitShufflesUnregistered(lifecycleManager())
+    } finally {
+      spark.sql("DROP TABLE IF EXISTS celeborn_cleanup_ctas_test")
+    }
+
+    spark.stop()
+  }
+
   test("CELEBORN-2465: shuffles are not unregistered on SQL query completion by default") {
     val sparkConf = updateSparkConf(
       new SparkConf().setAppName("celeborn-test").setMaster("local[2]"),
