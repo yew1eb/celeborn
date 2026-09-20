@@ -57,13 +57,13 @@ class CelebornQueryEndShuffleCleanupSuite extends AnyFunSuite
       "Shuffles should be unregistered after the SQL query completes.")
   }
 
-  private def queryEndShuffleCleanupConf(aqeEnabled: Boolean): SparkConf = {
+  private def shuffleCleanupConf(aqeEnabled: Boolean): SparkConf = {
     val sparkConf = updateSparkConf(
       new SparkConf().setAppName("celeborn-test").setMaster("local[2]"),
       ShuffleMode.HASH)
     sparkConf.set(SQLConf.ADAPTIVE_EXECUTION_ENABLED.key, aqeEnabled.toString)
     sparkConf.set(
-      s"spark.${CelebornConf.CLIENT_SPARK_SQL_QUERY_END_SHUFFLE_CLEANUP_ENABLED.key}",
+      s"spark.${CelebornConf.CLIENT_SPARK_SHUFFLE_CLEANUP_ENABLED.key}",
       "true")
     // Speed up the delayed unregister inside LifecycleManager.
     sparkConf.set(s"spark.${CelebornConf.SHUFFLE_EXPIRED_CHECK_INTERVAL.key}", "1s")
@@ -74,7 +74,7 @@ class CelebornQueryEndShuffleCleanupSuite extends AnyFunSuite
   Seq(true, false).foreach { aqeEnabled =>
     test(s"CELEBORN-2465: shuffles are unregistered on SQL query completion, " +
       s"aqeEnabled: $aqeEnabled") {
-      val spark = SparkSession.builder().config(queryEndShuffleCleanupConf(aqeEnabled))
+      val spark = SparkSession.builder().config(shuffleCleanupConf(aqeEnabled))
         .getOrCreate()
 
       spark.range(0, 1000, 1, 4).createOrReplaceTempView("ta")
@@ -113,7 +113,7 @@ class CelebornQueryEndShuffleCleanupSuite extends AnyFunSuite
   }
 
   test("CELEBORN-2465: failed query only cleans up actually registered shuffles") {
-    val spark = SparkSession.builder().config(queryEndShuffleCleanupConf(false)).getOrCreate()
+    val spark = SparkSession.builder().config(shuffleCleanupConf(false)).getOrCreate()
 
     spark.range(0, 1000, 1, 4).createOrReplaceTempView("ta")
     spark.udf.register(

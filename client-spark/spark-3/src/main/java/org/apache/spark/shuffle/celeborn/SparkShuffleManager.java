@@ -28,7 +28,7 @@ import org.apache.spark.launcher.SparkLauncher;
 import org.apache.spark.rdd.DeterministicLevel;
 import org.apache.spark.shuffle.*;
 import org.apache.spark.shuffle.sort.SortShuffleManager;
-import org.apache.spark.sql.celeborn.CelebornSQLExecutionEndCleaner;
+import org.apache.spark.sql.celeborn.CelebornShuffleCleanupListener;
 import org.apache.spark.sql.internal.SQLConf;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -180,8 +180,12 @@ public class SparkShuffleManager implements ShuffleManager {
             }
           }
 
-          if (celebornConf.clientSparkSqlQueryEndShuffleCleanupEnabled()) {
-            SparkUtils.addSparkListener(new CelebornSQLExecutionEndCleaner());
+          if (celebornConf.clientSparkShuffleCleanupEnabled()) {
+            SparkContext sparkContext = SparkContext$.MODULE$.getActive().getOrElse(null);
+            if (sparkContext != null) {
+              sparkContext.addSparkListener(
+                  new CelebornShuffleCleanupListener(sparkContext, celebornConf));
+            }
           }
 
           if (lifecycleManager.conf().clientFetchCleanFailedShuffle()) {
