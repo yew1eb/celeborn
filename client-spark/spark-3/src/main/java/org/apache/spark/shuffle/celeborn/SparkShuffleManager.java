@@ -183,8 +183,23 @@ public class SparkShuffleManager implements ShuffleManager {
           if (celebornConf.clientSparkShuffleCleanupEnabled()) {
             SparkContext sparkContext = SparkContext$.MODULE$.getActive().getOrElse(null);
             if (sparkContext != null) {
+              logger.info(
+                  "Registering CelebornShuffleCleanupListener on SparkContext {}, "
+                      + "stageLevelCleanupEnabled: {}, stageLevelDelayedMinutes: {}",
+                  sparkContext.applicationId(),
+                  celebornConf.clientSparkShuffleCleanupStageLevelEnabled(),
+                  celebornConf.clientSparkShuffleCleanupStageLevelDelayedMinutes());
               sparkContext.addSparkListener(
                   new CelebornShuffleCleanupListener(sparkContext, celebornConf));
+            } else {
+              // The original SparkUtils.addSparkListener silently skips registration when there
+              // is no active SparkContext, which makes the feature look like a no-op in
+              // production. Log a warning so the misconfiguration is visible.
+              logger.warn(
+                  "{} is true but no active SparkContext is found on this thread, "
+                      + "skip registering CelebornShuffleCleanupListener. Shuffles will only be "
+                      + "cleaned up by driver GC or application end.",
+                  CelebornConf.CLIENT_SPARK_SHUFFLE_CLEANUP_ENABLED().key());
             }
           }
 

@@ -57,6 +57,12 @@ class CelebornShuffleCleanupListener(sparkContext: SparkContext, celebornConf: C
       None
     }
 
+  logInfo(
+    s"CelebornShuffleCleanupListener created, stageLevelCleanupEnabled: " +
+      s"${stageDependencyTracker.isDefined}, " +
+      s"stageLevelDelayedMinutes: " +
+      s"${celebornConf.clientSparkShuffleCleanupStageLevelDelayedMinutes}")
+
   override def onOtherEvent(event: SparkListenerEvent): Unit = {
     event match {
       case end: SparkListenerSQLExecutionEnd =>
@@ -117,8 +123,11 @@ class CelebornShuffleCleanupListener(sparkContext: SparkContext, celebornConf: C
   private def cleanupShufflesOnQueryEnd(end: SparkListenerSQLExecutionEnd): Unit = {
     val qe = end.qe
     if (qe == null) {
-      logDebug(
-        s"QueryExecution is null in SparkListenerSQLExecutionEnd ${end.executionId}, skipping.")
+      // The event can arrive with a null QueryExecution on the driver, e.g. when the SQL
+      // execution has already been cleaned up. Nothing can be collected in this case.
+      logWarning(
+        s"QueryExecution is null in SparkListenerSQLExecutionEnd ${end.executionId}, " +
+          s"skip shuffle cleanup for this execution.")
       return
     }
 
@@ -127,6 +136,9 @@ class CelebornShuffleCleanupListener(sparkContext: SparkContext, celebornConf: C
       case _ => null
     }
     if (lifecycleManager == null) {
+      logWarning(
+        s"No Celeborn LifecycleManager found on driver when SQL execution ${end.executionId} " +
+          s"ended, skip shuffle cleanup for this execution.")
       return
     }
 
@@ -148,6 +160,9 @@ class CelebornShuffleCleanupListener(sparkContext: SparkContext, celebornConf: C
       .filter(lifecycleManager.isAppShuffleRegistered(_, hasMapping))
 
     if (shuffleIds.isEmpty) {
+      logInfo(
+        s"No registered shuffles found in the final plan of SQL execution ${end.executionId}, " +
+          s"nothing to cleanup.")
       return
     }
 
@@ -179,6 +194,10 @@ class CelebornShuffleCleanupListener(sparkContext: SparkContext, celebornConf: C
       if (lifecycleManager.isAppShuffleRegistered(shuffleId, hasMapping)) {
         logInfo(s"Eagerly cleaning up shuffle $shuffleId after its last reader stage completed.")
         sparkContext.shuffleDriverComponents.removeShuffle(shuffleId, false)
+      } else {
+        logDebug(
+          s"Skip eager cleanup for shuffle $shuffleId as it is not registered in " +
+            s"LifecycleManager (already cleaned up or sort-shuffle fallback).")
       }
     } catch {
       case t: Throwable =>
