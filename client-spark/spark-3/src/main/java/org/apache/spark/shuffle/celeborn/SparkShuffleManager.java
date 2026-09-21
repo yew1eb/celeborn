@@ -181,9 +181,9 @@ public class SparkShuffleManager implements ShuffleManager {
           }
 
           if (celebornConf.clientSparkShuffleCleanupEnabled()) {
-            SparkContext sparkContext = SparkContext$.MODULE$.getActive().get();
-            sparkContext.addSparkListener(
-                new CelebornShuffleCleanupListener(sparkContext, celebornConf));
+            SparkUtils.addSparkListener(
+                new CelebornShuffleCleanupListener(
+                    SparkContext$.MODULE$.getActive().get(), celebornConf));
           }
 
           if (lifecycleManager.conf().clientFetchCleanFailedShuffle()) {
