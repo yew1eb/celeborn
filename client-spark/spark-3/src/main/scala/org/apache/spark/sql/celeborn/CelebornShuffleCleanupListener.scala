@@ -29,16 +29,6 @@ import org.apache.spark.sql.execution.ui.SparkListenerSQLExecutionEnd
 import org.apache.celeborn.client.LifecycleManager
 import org.apache.celeborn.common.CelebornConf
 
-/**
- * A [[SparkListener]] that proactively unregisters shuffles instead of waiting for driver GC
- * or application end. Query-end cleanup (unregisters all shuffles of a finished SQL query)
- * is always on once the listener is registered; stage-level cleanup (a port of Apache
- * Uniffle's eager shuffle deletion, apache/uniffle#2704) is opt-in via
- * `celeborn.client.spark.shuffleCleanup.stageLevel.enabled`.
- *
- * Note: this class lives in package `org.apache.spark.sql` because
- * [[SparkListenerSQLExecutionEnd.qe]] is `private[sql]`.
- */
 class CelebornShuffleCleanupListener(sparkContext: SparkContext, celebornConf: CelebornConf)
   extends SparkListener
   with Logging {
@@ -53,19 +43,13 @@ class CelebornShuffleCleanupListener(sparkContext: SparkContext, celebornConf: C
       None
     }
 
-  logInfo(
-    s"CelebornShuffleCleanupListener created, stageLevelCleanupEnabled: " +
-      s"${stageDependencyTracker.isDefined}, " +
-      s"stageLevelDelayedMinutes: " +
-      s"${celebornConf.clientSparkShuffleCleanupStageLevelDelayedMinutes}")
-
   override def onOtherEvent(event: SparkListenerEvent): Unit = {
     event match {
       case end: SparkListenerSQLExecutionEnd =>
         safe(s"cleanup shuffles on completion of SQL execution ${end.executionId}") {
           cleanupShufflesOnQueryEnd(end)
         }
-      case _ => // ignore other events
+      case _ =>
     }
   }
 
@@ -93,7 +77,6 @@ class CelebornShuffleCleanupListener(sparkContext: SparkContext, celebornConf: C
     }
   }
 
-  // Never let an event handler throw on the listener bus thread.
   private def safe(what: => String)(body: => Unit): Unit = {
     try {
       body
@@ -103,23 +86,19 @@ class CelebornShuffleCleanupListener(sparkContext: SparkContext, celebornConf: C
   }
 
   private def lifecycleManager: Option[LifecycleManager] = {
-    SparkEnv.get.shuffleManager match {
-      case manager: SparkShuffleManager => Option(manager.getLifecycleManager)
-      case _ => None
+    Option(SparkEnv.get).flatMap { env =>
+      env.shuffleManager match {
+        case manager: SparkShuffleManager => Option(manager.getLifecycleManager)
+        case _ => None
+      }
     }
   }
 
-  // Standard Spark shuffle cleanup entry point: RemoveShuffle reaches the driver's
-  // SparkShuffleManager.unregisterShuffle -> LifecycleManager.unregisterAppShuffle.
   private def unregisterShuffles(shuffleIds: Seq[Int]): Unit = {
     shuffleIds.foreach(shuffleId =>
       sparkContext.shuffleDriverComponents.removeShuffle(shuffleId, false))
   }
 
-  // Collects the shuffle ids of all shuffles written by the given plan. AdaptiveSparkPlanExec
-  // (nested under DataWritingCommandExec for CTAS/INSERT), ShuffleQueryStageExec and
-  // ReusedExchangeExec are LeafExecNodes whose wrapped plans are only reachable via
-  // executedPlan / plan / child, so they are unwrapped recursively.
   private def extractShuffleIds(plan: SparkPlan): Seq[Int] = {
     plan.collect {
       case adaptivePlan: AdaptiveSparkPlanExec => extractShuffleIds(adaptivePlan.executedPlan)
@@ -130,37 +109,13 @@ class CelebornShuffleCleanupListener(sparkContext: SparkContext, celebornConf: C
   }
 
   private def cleanupShufflesOnQueryEnd(end: SparkListenerSQLExecutionEnd): Unit = {
-    if (end.qe == null) {
-      logWarning(
-        s"QueryExecution is null in SparkListenerSQLExecutionEnd ${end.executionId}, " +
-          s"skip shuffle cleanup for this execution.")
-      return
-    }
+    lifecycleManager.foreach { lifecycleManager =>
+      val allShuffleIds = extractShuffleIds(end.qe.executedPlan)
+      val shuffleIds = allShuffleIds.filter(
+        lifecycleManager.isAppShuffleRegistered(_, lifecycleManager.conf.clientStageRerunEnabled))
+      val skippedIds = allShuffleIds.filterNot(shuffleIds.toSet)
 
-    lifecycleManager match {
-      case None =>
-        logWarning(
-          s"No Celeborn LifecycleManager found on driver when SQL execution ${end.executionId} " +
-            s"ended, skip shuffle cleanup for this execution.")
-      case Some(lifecycleManager) =>
-        val hasMapping = lifecycleManager.conf.clientStageRerunEnabled
-        val allShuffleIds = extractShuffleIds(end.qe.executedPlan)
-        val shuffleIds =
-          allShuffleIds.filter(lifecycleManager.isAppShuffleRegistered(_, hasMapping))
-
-        if (shuffleIds.isEmpty) {
-          // Empty allShuffleIds: the plan has no exchange; otherwise the shuffles were never
-          // registered with Celeborn (e.g. sort-shuffle fallback) or already unregistered.
-          logInfo(
-            s"Found shuffle ids [${allShuffleIds.mkString(", ")}] in the final plan of SQL " +
-              s"execution ${end.executionId}, but none is registered in Celeborn " +
-              s"LifecycleManager (stageRerunEnabled: $hasMapping, registeredShuffles: " +
-              s"${lifecycleManager.registeredShuffle.size()}, shuffleIdMappings: " +
-              s"${lifecycleManager.getShuffleIdMapping.size()}), nothing to cleanup.")
-          return
-        }
-
-        val skippedIds = allShuffleIds.filterNot(shuffleIds.toSet)
+      if (shuffleIds.nonEmpty) {
         val skippedLog =
           if (skippedIds.nonEmpty) {
             s" Shuffle ids [${skippedIds.mkString(", ")}] collected from the plan are not " +
@@ -172,22 +127,25 @@ class CelebornShuffleCleanupListener(sparkContext: SparkContext, celebornConf: C
           s"Cleaning up shuffles [${shuffleIds.mkString(", ")}] on completion of " +
             s"SQL execution ${end.executionId}.$skippedLog")
         unregisterShuffles(shuffleIds)
+      } else {
+        logInfo(
+          s"Found shuffle ids [${allShuffleIds.mkString(", ")}] in the final plan of SQL " +
+            s"execution ${end.executionId}, but none is registered in Celeborn LifecycleManager, " +
+            s"nothing to cleanup.")
+      }
     }
   }
 
-  // Invoked by the stage-level tracker (on its daemon thread) after the deletion delay, guarded
-  // by the registration check so shuffles already unregistered or never registered are skipped.
   private def unregisterShuffleIfStillRegistered(shuffleId: Int): Unit = {
     safe(s"eagerly cleanup shuffle $shuffleId on stage completion") {
       lifecycleManager.foreach { lifecycleManager =>
-        val hasMapping = lifecycleManager.conf.clientStageRerunEnabled
-        if (lifecycleManager.isAppShuffleRegistered(shuffleId, hasMapping)) {
+        if (lifecycleManager.isAppShuffleRegistered(
+            shuffleId,
+            lifecycleManager.conf.clientStageRerunEnabled)) {
           logInfo(s"Eagerly cleaning up shuffle $shuffleId after its last reader stage completed.")
           unregisterShuffles(Seq(shuffleId))
         } else {
-          logDebug(
-            s"Skip eager cleanup for shuffle $shuffleId as it is not registered in " +
-              s"LifecycleManager (already cleaned up or sort-shuffle fallback).")
+          logDebug(s"Skip eager cleanup for shuffle $shuffleId as it is not registered.")
         }
       }
     }
