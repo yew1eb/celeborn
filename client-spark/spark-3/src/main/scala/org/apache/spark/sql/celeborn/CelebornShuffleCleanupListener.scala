@@ -122,16 +122,12 @@ class CelebornShuffleCleanupListener(sparkContext: SparkContext, celebornConf: C
   }
 
   private def unregisterShuffleIfStillRegistered(shuffleId: Int): Unit = {
-    safe(s"eagerly cleanup shuffle $shuffleId on stage completion") {
-      lifecycleManager.foreach { lifecycleManager =>
-        if (lifecycleManager.isAppShuffleRegistered(
-            shuffleId,
-            lifecycleManager.conf.clientStageRerunEnabled)) {
-          logInfo(s"Eagerly cleaning up shuffle $shuffleId after its last reader stage completed.")
-          unregisterShuffles(Seq(shuffleId))
-        } else {
-          logDebug(s"Skip eager cleanup for shuffle $shuffleId as it is not registered.")
-        }
+    lifecycleManager.foreach { lifecycleManager =>
+      if (lifecycleManager.isAppShuffleRegistered(
+          shuffleId,
+          lifecycleManager.conf.clientStageRerunEnabled)) {
+        logInfo(s"Eagerly cleaning up shuffle $shuffleId after its last reader stage completed.")
+        unregisterShuffles(Seq(shuffleId))
       }
     }
   }
