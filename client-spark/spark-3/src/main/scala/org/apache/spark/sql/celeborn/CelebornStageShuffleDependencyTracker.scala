@@ -26,9 +26,6 @@ import org.apache.spark.internal.Logging
 
 import org.apache.celeborn.common.util.ThreadUtils
 
-/**
- * A shuffle deletion item in the delayed deletion queue, expiring at `expireAtMs`.
- */
 private[celeborn] class ShuffleDeletionItem(val shuffleId: Int, delayMs: Long)
   extends Delayed {
 
@@ -49,39 +46,24 @@ private[celeborn] class ShuffleDeletionItem(val shuffleId: Int, delayMs: Long)
 }
 
 /**
- * Tracks the dependencies between stages to manage the lifecycle of shuffle data. It maintains
- * the mapping of writer stages to their shuffles and the reference counts from reader stages, so
- * that a shuffle can be unregistered as soon as its last reader stage has completed, instead of
- * waiting for the whole query to end or for the driver GC. For the shuffle-reuse scenario, a
- * delayed deletion mechanism avoids the too-early deletion issue: when the item is dequeued, the
- * readers are checked again and the deletion is skipped if new reader stages have linked.
- *
- * This is a port of Apache Uniffle's StageDependencyTracker (apache/uniffle#2704) with a daemon
- * deletion thread, and it is still a best-effort mechanism that may not cover all edge cases.
- *
- * @param delayMs delayed milliseconds before deleting a shuffle whose reader count dropped to
- *                zero; non-positive value deletes immediately
- * @param deletionFunc callback to unregister a shuffle, invoked on a single daemon thread
+ * Tracks stage-level shuffle dependencies so that a shuffle can be unregistered as soon as its
+ * last reader stage has completed (after an optional delay guarding shuffle reuse), instead of
+ * waiting for the whole query to end or for driver GC. A port of Apache Uniffle's
+ * StageDependencyTracker (apache/uniffle#2704) with a daemon deletion thread.
  */
 private[celeborn] class CelebornStageShuffleDependencyTracker private[celeborn] (
     delayMs: Long,
     deletionFunc: Int => Unit)
   extends Logging {
 
-  // key: stageId, value: shuffleId of the writer of this stage
   private val stageIdToShuffleIdOfWriters = new ConcurrentHashMap[Int, Int]()
-
-  // key: shuffleId, value: stageIds of readers
   private val shuffleIdToStageIdsOfReaders = new ConcurrentHashMap[Int, util.Set[Int]]()
-  // reverse link by the stageId
   private val stageIdToShuffleIdOfReaders = new ConcurrentHashMap[Int, util.Set[Int]]()
 
   private val deletionDelayQueue = new DelayQueue[ShuffleDeletionItem]()
-
   private val deletionExecutor =
     ThreadUtils.newDaemonSingleThreadExecutor("celeborn-stage-shuffle-cleaner")
 
-  // for test cases
   @volatile private var cleanedShuffleCount = 0
 
   deletionExecutor.execute(() => deletionLoop())
@@ -89,8 +71,7 @@ private[celeborn] class CelebornStageShuffleDependencyTracker private[celeborn] 
   private def deletionLoop(): Unit = {
     while (true) {
       try {
-        val item = deletionDelayQueue.take()
-        val shuffleId = item.shuffleId
+        val shuffleId = deletionDelayQueue.take().shuffleId
         // check references again to guard against shuffle reuse
         val readers = shuffleIdToStageIdsOfReaders.get(shuffleId)
         if (readers == null || readers.isEmpty) {
@@ -102,8 +83,7 @@ private[celeborn] class CelebornStageShuffleDependencyTracker private[celeborn] 
           logInfo(s"Skipping deletion for shuffleId: $shuffleId as it has new readers")
         }
       } catch {
-        case e: InterruptedException =>
-          logInfo("Interrupted while waiting for deletion delay queue", e)
+        case _: InterruptedException =>
           Thread.currentThread().interrupt()
           return
         case e: Exception =>
@@ -113,12 +93,7 @@ private[celeborn] class CelebornStageShuffleDependencyTracker private[celeborn] 
   }
 
   def getShuffleIdByStageIdOfWriter(stageId: Int): Int = {
-    if (stageIdToShuffleIdOfWriters.containsKey(stageId)) {
-      stageIdToShuffleIdOfWriters.get(stageId)
-    } else {
-      // the stage does not write a shuffle, ignore it
-      -1
-    }
+    stageIdToShuffleIdOfWriters.getOrDefault(stageId, -1)
   }
 
   def linkWriter(shuffleId: Int, writerStageId: Int): Unit = {
@@ -135,14 +110,11 @@ private[celeborn] class CelebornStageShuffleDependencyTracker private[celeborn] 
   }
 
   def removeStage(stageId: Int): Unit = {
-    val upstreamShuffleIds = stageIdToShuffleIdOfReaders.get(stageId)
-    if (upstreamShuffleIds != null) {
+    Option(stageIdToShuffleIdOfReaders.get(stageId)).foreach { upstreamShuffleIds =>
       upstreamShuffleIds.asScala.foreach { shuffleId =>
-        val readers = shuffleIdToStageIdsOfReaders.get(shuffleId)
-        if (readers != null) {
+        Option(shuffleIdToStageIdsOfReaders.get(shuffleId)).foreach { readers =>
           readers.remove(stageId)
           if (readers.isEmpty) {
-            // add into the delayed deletion queue
             deletionDelayQueue.offer(new ShuffleDeletionItem(shuffleId, delayMs))
           }
         }
