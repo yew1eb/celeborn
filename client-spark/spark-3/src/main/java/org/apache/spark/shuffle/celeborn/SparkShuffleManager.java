@@ -181,15 +181,7 @@ public class SparkShuffleManager implements ShuffleManager {
           }
 
           if (celebornConf.clientSparkShuffleCleanupEnabled()) {
-            // initializeLifecycleManager is only invoked from registerShuffle on the driver,
-            // which can only happen while the SparkContext is alive, so getActive is never empty.
             SparkContext sparkContext = SparkContext$.MODULE$.getActive().get();
-            logger.info(
-                "Registering CelebornShuffleCleanupListener on SparkContext {}, "
-                    + "stageLevelCleanupEnabled: {}, stageLevelDelayedMinutes: {}",
-                sparkContext.applicationId(),
-                celebornConf.clientSparkShuffleCleanupStageLevelEnabled(),
-                celebornConf.clientSparkShuffleCleanupStageLevelDelayedMinutes());
             sparkContext.addSparkListener(
                 new CelebornShuffleCleanupListener(sparkContext, celebornConf));
           }

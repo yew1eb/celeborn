@@ -110,28 +110,13 @@ class CelebornShuffleCleanupListener(sparkContext: SparkContext, celebornConf: C
 
   private def cleanupShufflesOnQueryEnd(end: SparkListenerSQLExecutionEnd): Unit = {
     lifecycleManager.foreach { lifecycleManager =>
-      val allShuffleIds = extractShuffleIds(end.qe.executedPlan)
-      val shuffleIds = allShuffleIds.filter(
+      val shuffleIds = extractShuffleIds(end.qe.executedPlan).filter(
         lifecycleManager.isAppShuffleRegistered(_, lifecycleManager.conf.clientStageRerunEnabled))
-      val skippedIds = allShuffleIds.filterNot(shuffleIds.toSet)
-
       if (shuffleIds.nonEmpty) {
-        val skippedLog =
-          if (skippedIds.nonEmpty) {
-            s" Shuffle ids [${skippedIds.mkString(", ")}] collected from the plan are not " +
-              s"registered in LifecycleManager, skipped."
-          } else {
-            ""
-          }
         logInfo(
           s"Cleaning up shuffles [${shuffleIds.mkString(", ")}] on completion of " +
-            s"SQL execution ${end.executionId}.$skippedLog")
+            s"SQL execution ${end.executionId}.")
         unregisterShuffles(shuffleIds)
-      } else {
-        logInfo(
-          s"Found shuffle ids [${allShuffleIds.mkString(", ")}] in the final plan of SQL " +
-            s"execution ${end.executionId}, but none is registered in Celeborn LifecycleManager, " +
-            s"nothing to cleanup.")
       }
     }
   }
