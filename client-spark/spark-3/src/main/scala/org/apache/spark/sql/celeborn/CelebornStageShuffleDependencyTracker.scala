@@ -48,8 +48,7 @@ private[celeborn] class ShuffleDeletionItem(val shuffleId: Int, delayMs: Long)
 /**
  * Tracks stage-level shuffle dependencies so that a shuffle can be unregistered as soon as its
  * last reader stage has completed (after an optional delay guarding shuffle reuse), instead of
- * waiting for the whole query to end or for driver GC. A port of Apache Uniffle's
- * StageDependencyTracker (apache/uniffle#2704) with a daemon deletion thread.
+ * waiting for the whole query to end or for driver GC.
  */
 private[celeborn] class CelebornStageShuffleDependencyTracker private[celeborn] (
     delayMs: Long,
