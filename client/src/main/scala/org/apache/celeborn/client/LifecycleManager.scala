@@ -1304,6 +1304,19 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
     }
   }
 
+  /**
+   * Whether the given app shuffle id is currently registered in this LifecycleManager.
+   * Used to guard proactive unregister requests against shuffles that were never
+   * materialized or have already been unregistered.
+   */
+  def isAppShuffleRegistered(appShuffleId: Int, hasMapping: Boolean): Boolean = {
+    if (hasMapping) {
+      shuffleIdMapping.containsKey(appShuffleId)
+    } else {
+      registeredShuffle.contains(appShuffleId)
+    }
+  }
+
   /* ========================================================== *
    |        END OF EVENT HANDLER                                |
    * ========================================================== */

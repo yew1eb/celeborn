@@ -1045,6 +1045,12 @@ class CelebornConf(loadDefaults: Boolean) extends Cloneable with Logging with Se
   def clientFetchCleanFailedShuffle: Boolean = get(CLIENT_FETCH_CLEAN_FAILED_SHUFFLE)
   def clientFetchCleanFailedShuffleIntervalMS: Long =
     get(CLIENT_FETCH_CLEAN_FAILED_SHUFFLE_INTERVAL)
+  def clientSparkShuffleCleanupEnabled: Boolean =
+    get(CLIENT_SPARK_SHUFFLE_CLEANUP_ENABLED)
+  def clientSparkShuffleCleanupStageLevelEnabled: Boolean =
+    get(CLIENT_SPARK_SHUFFLE_CLEANUP_STAGE_LEVEL_ENABLED)
+  def clientSparkShuffleCleanupStageLevelDelayedMinutes: Int =
+    get(CLIENT_SPARK_SHUFFLE_CLEANUP_STAGE_LEVEL_DELAYED_MINUTES)
   def clientFetchExcludeWorkerOnFailureEnabled: Boolean =
     get(CLIENT_FETCH_EXCLUDE_WORKER_ON_FAILURE_ENABLED)
   def clientFetchExcludedWorkerExpireTimeout: Long =
@@ -5272,6 +5278,44 @@ object CelebornConf extends Logging {
       .doc("Whether to enable stage rerun. If true, client throws FetchFailedException instead of CelebornIOException.")
       .booleanConf
       .createWithDefault(true)
+
+  val CLIENT_SPARK_SHUFFLE_CLEANUP_ENABLED: ConfigEntry[Boolean] =
+    buildConf("celeborn.client.spark.shuffleCleanup.enabled")
+      .categories("client")
+      .version("1.0.0")
+      .doc("When enabled, shuffles written by a SQL query (or Dataset action) are proactively " +
+        "unregistered when the query completes, instead of waiting for driver GC or application " +
+        "end. Note that if the same DataFrame reference is executed again, the cleaned shuffles " +
+        "must be regenerated via stage retries, so it is strongly recommended to enable " +
+        s"${CLIENT_STAGE_RERUN_ENABLED.key} together.")
+      .booleanConf
+      .createWithDefault(false)
+
+  val CLIENT_SPARK_SHUFFLE_CLEANUP_STAGE_LEVEL_ENABLED: ConfigEntry[Boolean] =
+    buildConf("celeborn.client.spark.shuffleCleanup.stageLevel.enabled")
+      .categories("client")
+      .version("1.0.0")
+      .doc("When enabled (requires " +
+        s"${CLIENT_SPARK_SHUFFLE_CLEANUP_ENABLED.key} to be enabled too), the cleanup listener " +
+        "additionally tracks stage-level shuffle dependencies and proactively unregisters a " +
+        "shuffle once its last reader stage has completed and the delay configured by " +
+        "celeborn.client.spark.shuffleCleanup.stageLevel.delayedMinutes has elapsed, instead of " +
+        "waiting for the whole query to end or for driver GC. The delayed deletion guards against " +
+        "shuffle reuse scenarios. It is strongly recommended to enable " +
+        s"${CLIENT_STAGE_RERUN_ENABLED.key} together.")
+      .booleanConf
+      .createWithDefault(false)
+
+  val CLIENT_SPARK_SHUFFLE_CLEANUP_STAGE_LEVEL_DELAYED_MINUTES: ConfigEntry[Int] =
+    buildConf("celeborn.client.spark.shuffleCleanup.stageLevel.delayedMinutes")
+      .categories("client")
+      .version("1.0.0")
+      .doc("The delayed minutes to eagerly unregister a shuffle after the reference count of its " +
+        "reader stages drops to zero, only valid when " +
+        s"${CLIENT_SPARK_SHUFFLE_CLEANUP_STAGE_LEVEL_ENABLED.key} is enabled. A non-positive value " +
+        "means deleting immediately, which is mainly used for tests.")
+      .intConf
+      .createWithDefault(20)
 
   val CLIENT_FETCH_CLEAN_FAILED_SHUFFLE: ConfigEntry[Boolean] =
     buildConf("celeborn.client.spark.fetch.cleanFailedShuffle")
