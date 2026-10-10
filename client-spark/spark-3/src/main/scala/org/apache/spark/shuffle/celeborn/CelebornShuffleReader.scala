@@ -651,13 +651,31 @@ class CelebornShuffleReader[K, C](
   /**
    * Deserialization happens lazily while the key/value iterator is consumed, so timing only
    * the `deserializeStream` construction would report ~0. Wrap the stream and time each
-   * `readObject` call (`readKey`/`readValue` delegate to it), attributing the cost to the
-   * stream's ReadStreamStats so it is reported when the stream closes.
+   * readKey/readValue/readObject call, attributing the cost to the stream's ReadStreamStats so
+   * it is reported when the stream closes.
+   *
+   * All three readers must be overridden: serializers like Spark SQL's UnsafeRowSerializer
+   * override readKey/readValue directly and make the generic readObject throw
+   * UnsupportedOperationException, so delegating only readObject breaks them.
    */
   private class TimedDeserializationStream(
       delegate: DeserializationStream,
       stats: ReadStreamStats)
     extends DeserializationStream {
+
+    override def readKey[T]()(implicit ct: scala.reflect.ClassTag[T]): T = {
+      val start = System.nanoTime()
+      val result = delegate.readKey[T]()
+      stats.addDeserializeTime(System.nanoTime() - start)
+      result
+    }
+
+    override def readValue[T]()(implicit ct: scala.reflect.ClassTag[T]): T = {
+      val start = System.nanoTime()
+      val result = delegate.readValue[T]()
+      stats.addDeserializeTime(System.nanoTime() - start)
+      result
+    }
 
     override def readObject[T]()(implicit ct: scala.reflect.ClassTag[T]): T = {
       val start = System.nanoTime()
