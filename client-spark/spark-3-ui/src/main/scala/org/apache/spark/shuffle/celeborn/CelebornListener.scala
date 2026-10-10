@@ -112,7 +112,9 @@ private[celeborn] class CelebornListener(
       // are persisted on store close / replay end, mirroring AppStatusListener's onFlush hook.
       // Without this, the trailing metrics would be lost from both the live store rebuild and
       // the HistoryServer replay.
-      tracking.onFlush(() => mayUpdate(force = true))
+      tracking.onFlush {
+        mayUpdate(force = true)
+      }
       tracking.addTrigger(classOf[CelebornShuffleAssignmentUIData], retainedShuffles.toLong) {
         count => cleanupAssignments(tracking, count)
       }
