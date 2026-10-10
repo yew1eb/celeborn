@@ -659,7 +659,7 @@ class CelebornConf(loadDefaults: Boolean) extends Cloneable with Logging with Se
   def masterSlotAssignPolicyName: String = get(MASTER_SLOT_ASSIGN_POLICY)
 
   /** Returns the configured built-in policy. Use `masterSlotAssignPolicyName` for SPI providers. */
-  @deprecated("Use masterSlotAssignPolicyName for SPI provider selection", "0.7.0")
+  @deprecated("Use masterSlotAssignPolicyName for SPI provider selection", "1.0.0")
   def masterSlotAssignPolicy: SlotsAssignPolicy =
     SlotsAssignPolicy.valueOf(get(MASTER_SLOT_ASSIGN_POLICY))
 
@@ -688,6 +688,7 @@ class CelebornConf(loadDefaults: Boolean) extends Cloneable with Logging with Se
   def masterSlotAssignExtraSlots: Int = get(MASTER_SLOT_ASSIGN_EXTRA_SLOTS)
   def masterSlotAssignMaxWorkers: Int = get(MASTER_SLOT_ASSIGN_MAX_WORKERS)
   def masterSlotAssignMinWorkers: Int = get(MASTER_SLOT_ASSIGN_MIN_WORKERS)
+  def masterSplitSlotAssignMaxWorkers: Int = get(MASTER_SPLIT_SLOT_ASSIGN_MAX_WORKERS)
   def initialEstimatedPartitionSize: Long = get(ESTIMATED_PARTITION_SIZE_INITIAL_SIZE)
   def estimatedPartitionSizeUpdaterInitialDelay: Long =
     get(ESTIMATED_PARTITION_SIZE_UPDATE_INITIAL_DELAY)
@@ -961,7 +962,8 @@ class CelebornConf(loadDefaults: Boolean) extends Cloneable with Logging with Se
   def clientCommitFilesIgnoreExcludedWorkers: Boolean = get(CLIENT_COMMIT_IGNORE_EXCLUDED_WORKERS)
   def clientShuffleDynamicResourceEnabled: Boolean =
     get(CLIENT_SHUFFLE_DYNAMIC_RESOURCE_ENABLED)
-  def clientShuffleDynamicResourceFactor: Double = get(CLIENT_SHUFFLE_DYNAMIC_RESOURCE_FACTOR)
+  def clientShuffleDynamicResourceUpdateTime: Long =
+    get(CLIENT_SHUFFLE_DYNAMIC_RESOURCE_UPDATE_TIME)
   def appHeartbeatTimeoutMs: Long = get(APPLICATION_HEARTBEAT_TIMEOUT)
   def dfsExpireDirsTimeoutMS: Long = get(DFS_EXPIRE_DIRS_TIMEOUT)
   def appHeartbeatIntervalMs: Long = get(APPLICATION_HEARTBEAT_INTERVAL)
@@ -1033,6 +1035,7 @@ class CelebornConf(loadDefaults: Boolean) extends Cloneable with Logging with Se
   // //////////////////////////////////////////////////////
   def clientFetchTimeoutMs: Long = get(CLIENT_FETCH_TIMEOUT)
   def clientFetchPollChunkWaitTime: Long = get(CLIENT_FETCH_POLL_CHUNK_WAIT_TIME)
+  def clientFetchSlowChunkThresholdMs: Long = get(CLIENT_FETCH_SLOW_CHUNK_THRESHOLD)
   def clientFetchBufferSize: Int = get(CLIENT_FETCH_BUFFER_SIZE).toInt
   def clientFetchMaxReqsInFlight: Int = get(CLIENT_FETCH_MAX_REQS_IN_FLIGHT)
   def isPartitionReaderCheckpointEnabled: Boolean =
@@ -1042,6 +1045,8 @@ class CelebornConf(loadDefaults: Boolean) extends Cloneable with Logging with Se
 
   def clientFetchMaxRetriesForEachReplica: Int = get(CLIENT_FETCH_MAX_RETRIES_FOR_EACH_REPLICA)
   def clientStageRerunEnabled: Boolean = get(CLIENT_STAGE_RERUN_ENABLED)
+  def clientSparkUIEnabled: Boolean = get(CLIENT_SPARK_UI_ENABLED)
+  def clientSparkUIRetainedShuffles: Int = get(CLIENT_SPARK_UI_RETAINED_SHUFFLES)
   def clientFetchCleanFailedShuffle: Boolean = get(CLIENT_FETCH_CLEAN_FAILED_SHUFFLE)
   def clientFetchCleanFailedShuffleIntervalMS: Long =
     get(CLIENT_FETCH_CLEAN_FAILED_SHUFFLE_INTERVAL)
@@ -1112,6 +1117,7 @@ class CelebornConf(loadDefaults: Boolean) extends Cloneable with Logging with Se
         pushDataTimeoutMs * clientPushMaxReviveTimes * 2)
     }
   def clientPushLimitInFlightSleepDeltaMs: Long = get(CLIENT_PUSH_LIMIT_IN_FLIGHT_SLEEP_INTERVAL)
+  def clientPushSlowPushThresholdMs: Long = get(CLIENT_PUSH_SLOW_PUSH_THRESHOLD)
   def clientPushTakeTaskWaitIntervalMs: Long = get(CLIENT_PUSH_TAKE_TASK_WAIT_INTERVAL)
   def clientPushTakeTaskMaxWaitAttempts: Int = get(CLIENT_PUSH_TAKE_TASK_MAX_WAIT_ATTEMPTS)
   def clientPushSendBufferPoolExpireTimeout: Long = get(CLIENT_PUSH_SENDBUFFERPOOL_EXPIRETIMEOUT)
@@ -3222,6 +3228,18 @@ object CelebornConf extends Logging {
       .intConf
       .createWithDefault(100)
 
+  val MASTER_SPLIT_SLOT_ASSIGN_MAX_WORKERS: ConfigEntry[Int] =
+    buildConf("celeborn.master.splitSlot.assign.maxWorkers")
+      .categories("master")
+      .version("1.0.0")
+      .doc("Maximum workers returned by each dynamic candidate refresh. The request limit is the " +
+        "smaller positive value of this setting and `celeborn.client.slot.assign.maxWorkers`. " +
+        "For replicated shuffle, an effective limit of one is raised to two. Workers already " +
+        "present in a shuffle snapshot are not counted against this limit.")
+      .intConf
+      .checkValue(_ > 0, "Must be positive.")
+      .createWithDefault(500)
+
   val ESTIMATED_PARTITION_SIZE_INITIAL_SIZE: ConfigEntry[Long] =
     buildConf("celeborn.master.estimatedPartitionSize.initialSize")
       .withAlternative("celeborn.shuffle.initialEstimatedPartitionSize")
@@ -5133,6 +5151,16 @@ object CelebornConf extends Logging {
       .timeConf(TimeUnit.MILLISECONDS)
       .createWithDefaultString("50ms")
 
+  val CLIENT_PUSH_SLOW_PUSH_THRESHOLD: ConfigEntry[Long] =
+    buildConf("celeborn.client.push.slowPush.threshold")
+      .categories("client")
+      .doc("Threshold of the push data round trip time. If pushing a batch to a worker " +
+        "takes longer than this threshold, a warn log will be recorded with the target " +
+        "worker, partition and batch info.")
+      .version("0.7.0")
+      .timeConf(TimeUnit.MILLISECONDS)
+      .createWithDefaultString("5s")
+
   val CLIENT_PUSH_SORT_RANDOMIZE_PARTITION_ENABLED: ConfigEntry[Boolean] =
     buildConf("celeborn.client.push.sort.randomizePartitionId.enabled")
       .withAlternative("celeborn.push.sort.randomizePartitionId.enabled")
@@ -5217,6 +5245,16 @@ object CelebornConf extends Logging {
       .timeConf(TimeUnit.MILLISECONDS)
       .createWithDefault(500)
 
+  val CLIENT_FETCH_SLOW_CHUNK_THRESHOLD: ConfigEntry[Long] =
+    buildConf("celeborn.client.fetch.slowChunk.threshold")
+      .categories("client")
+      .version("0.7.0")
+      .doc("Threshold of the fetch chunk round trip time. If fetching a chunk from a worker " +
+        "takes longer than this threshold, a warn log will be recorded with the worker, " +
+        "stream and chunk info.")
+      .timeConf(TimeUnit.MILLISECONDS)
+      .createWithDefaultString("1s")
+
   val CLIENT_FETCH_BUFFER_SIZE: ConfigEntry[Long] =
     buildConf("celeborn.client.fetch.buffer.size")
       .categories("client")
@@ -5272,6 +5310,32 @@ object CelebornConf extends Logging {
       .doc("Whether to enable stage rerun. If true, client throws FetchFailedException instead of CelebornIOException.")
       .booleanConf
       .createWithDefault(true)
+
+  val CLIENT_SPARK_UI_ENABLED: ConfigEntry[Boolean] =
+    buildConf("celeborn.client.spark.ui.enabled")
+      .categories("client")
+      .version("1.0.0")
+      .doc("Whether to enable the Celeborn Spark UI extension. When true and the " +
+        "CelebornPlugin is registered via spark.plugins, a Celeborn tab is attached to the " +
+        "Spark WebUI aggregating shuffle assignment, fallback stats and task-level shuffle " +
+        "metrics. Shuffle assignment and fallback events are posted to the Spark listener bus " +
+        "only when this is enabled, so it is zero-overhead when off.")
+      .booleanConf
+      .createWithDefault(true)
+
+  val CLIENT_SPARK_UI_RETAINED_SHUFFLES: ConfigEntry[Int] =
+    buildConf("celeborn.client.spark.ui.retainedShuffles")
+      .withAlternative("celeborn.client.spark.ui.retainedShuffle")
+      .categories("client")
+      .version("1.0.0")
+      .doc("Number of Celeborn shuffle assignments to retain in the Spark status KVStore " +
+        "(and thus the event log) for the Celeborn UI tab. When more shuffles are registered, " +
+        "the oldest assignment rows are evicted to bound memory/event-log growth on long-running " +
+        "jobs with many shuffles. Mirrors Spark's spark.ui.retainedStages and Gluten's " +
+        "UI_RETAINED_EXECUTIONS trigger. Only the per-shuffle assignment rows are capped; " +
+        "singleton entities (build info, fallback stats, aggregated metrics) are not affected.")
+      .intConf
+      .createWithDefault(1000)
 
   val CLIENT_FETCH_CLEAN_FAILED_SHUFFLE: ConfigEntry[Boolean] =
     buildConf("celeborn.client.spark.fetch.cleanFailedShuffle")
@@ -5603,21 +5667,24 @@ object CelebornConf extends Logging {
     buildConf("celeborn.client.shuffle.dynamicResourceEnabled")
       .categories("client")
       .version("0.6.0")
-      .doc("When enabled, the ChangePartitionManager will obtain candidate workers from the availableWorkers pool " +
-        "during heartbeats when worker resource change.")
+      .doc("When enabled, ChangePartitionManager refreshes endpoint-ready worker candidates from " +
+        "the Master on demand while handling change-partition requests, and combines them with " +
+        "workers already present in the shuffle snapshot.")
       .booleanConf
       .createWithDefault(false)
 
-  val CLIENT_SHUFFLE_DYNAMIC_RESOURCE_FACTOR: ConfigEntry[Double] =
-    buildConf("celeborn.client.shuffle.dynamicResourceFactor")
+  val CLIENT_SHUFFLE_DYNAMIC_RESOURCE_UPDATE_TIME: ConfigEntry[Long] =
+    buildConf("celeborn.client.shuffle.dynamicResource.updateTime")
       .categories("client")
-      .version("0.6.0")
-      .doc("The ChangePartitionManager will check whether (unavailable workers / shuffle allocated workers) " +
-        "is more than the factor before obtaining candidate workers from the requestSlots RPC response " +
-        s"when `${CLIENT_SHUFFLE_DYNAMIC_RESOURCE_ENABLED.key}` set true")
-      .doubleConf
-      .checkValue(v => v >= 0.0 && v <= 1.0, "Should be in [0.0, 1.0].")
-      .createWithDefault(0.5)
+      .version("1.0.0")
+      .doc(
+        "Minimum interval after a worker-candidate refresh attempt completes before " +
+          s"ChangePartitionManager may try again when `${CLIENT_SHUFFLE_DYNAMIC_RESOURCE_ENABLED.key}` " +
+          "is true. Set to 0 to allow each change-partition handling cycle to refresh when no " +
+          "refresh is already in progress.")
+      .timeConf(TimeUnit.MILLISECONDS)
+      .checkValue(_ >= 0, "Must be non-negative.")
+      .createWithDefaultString("30s")
 
   val CLIENT_PUSH_STAGE_END_TIMEOUT: ConfigEntry[Long] =
     buildConf("celeborn.client.push.stageEnd.timeout")
