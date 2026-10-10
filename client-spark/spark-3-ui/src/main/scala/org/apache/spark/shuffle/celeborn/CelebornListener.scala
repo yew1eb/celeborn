@@ -132,6 +132,18 @@ private[celeborn] class CelebornListener(
     }
   }
 
+  /**
+   * Writes an entity through the trigger-checking path when the store supports it: the plain
+   * KVStore.write bypasses ElementTrackingStore's eviction triggers, so the
+   * retainedShuffles cap only takes effect via write(value, checkTriggers = true).
+   */
+  private def writeEntity(value: Any): Unit = kvstore match {
+    case tracking: ElementTrackingStore =>
+      tracking.write(value, checkTriggers = true)
+    case _ =>
+      kvstore.write(value)
+  }
+
   override def onTaskEnd(taskEnd: SparkListenerTaskEnd): Unit = {
     if (!pluginEnabled) {
       return
@@ -208,7 +220,7 @@ private[celeborn] class CelebornListener(
       kvstore.write(new CelebornBuildInfoUIData(e.info.toSeq.sortBy(_._1)))
       mayUpdate()
     case e: CelebornShuffleAssignmentEvent =>
-      kvstore.write(new CelebornShuffleAssignmentUIData(
+      writeEntity(new CelebornShuffleAssignmentUIData(
         e.appShuffleId,
         e.celebornShuffleId,
         e.workers,
