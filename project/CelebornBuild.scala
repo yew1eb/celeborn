@@ -57,14 +57,15 @@ object Dependencies {
   val junitInterfaceVersion = "0.13.3"
   // don't forget update `junitInterfaceVersion` when we upgrade junit
   val junitVersion = "4.13.2"
+  val jolVersion = "0.17"
   val leveldbJniVersion = "1.8"
   val log4j2Version = "2.25.4"
   val disruptorVersion = "3.4.4"
   val jdkToolsVersion = "0.1"
   val metricsVersion = "4.2.25"
   val mockitoVersion = "4.11.0"
-  val nettyVersion = "4.2.10.Final"
-  val ratisVersion = "3.2.2"
+  val nettyVersion = "4.2.17.Final"
+  val ratisVersion = "3.3.0"
   val roaringBitmapVersion = "1.0.6"
   val rocksdbJniVersion = "9.10.0"
   val jacksonVersion = "2.15.3"
@@ -158,6 +159,10 @@ object Dependencies {
     ExclusionRule("io.netty", "netty-transport-udt"),
     ExclusionRule("io.netty", "netty-transport-sctp"),
     ExclusionRule("io.netty", "netty-handler-ssl-ocsp"),
+    // Netty 4.2 merged the QUIC/HTTP3 stack into netty-all; see pom.xml for details.
+    ExclusionRule("io.netty", "netty-codec-http3"),
+    ExclusionRule("io.netty", "netty-codec-classes-quic"),
+    ExclusionRule("io.netty", "netty-codec-native-quic"),
     ExclusionRule("org.jctools", "jctools-core")
   )
   val ioNettyEpollLinuxX8664 = "io.netty" % "netty-transport-native-epoll" % nettyVersion classifier "linux-x86_64"
@@ -245,6 +250,7 @@ object Dependencies {
   // https://www.scala-sbt.org/1.x/docs/Testing.html
   val junitInterface = "com.github.sbt" % "junit-interface" % junitInterfaceVersion
   val junit = "junit" % "junit" % junitVersion
+  val jolCore = "org.openjdk.jol" % "jol-core" % jolVersion
   val mockitoCore = "org.mockito" % "mockito-core" % mockitoVersion
   val mockitoInline = "org.mockito" % "mockito-inline" % mockitoVersion
   val scalatestMockito = "org.mockito" %% "mockito-scala-scalatest" % scalatestMockitoVersion
@@ -702,6 +708,7 @@ object CelebornCommon {
         Dependencies.jacksonCore,
         Dependencies.jacksonDatabind,
         Dependencies.jacksonAnnotations,
+        Dependencies.jolCore % "test",
         Dependencies.log4jSlf4jImpl % "test",
         Dependencies.log4j12Api % "test",
         // SSL support
@@ -900,7 +907,7 @@ object Spark30 extends SparkClientProjects {
   val sparkClientShadedProjectName = "celeborn-client-spark-3-shaded"
 
   val lz4JavaVersion = "1.7.1"
-  val sparkProjectScalaVersion = "2.12.10"
+  val sparkProjectScalaVersion = "2.12.18"
 
   val sparkVersion = "3.0.3"
   val zstdJniVersion = "1.4.4-3"
@@ -915,7 +922,7 @@ object Spark31 extends SparkClientProjects {
   val sparkClientShadedProjectName = "celeborn-client-spark-3-shaded"
 
   val lz4JavaVersion = "1.7.1"
-  val sparkProjectScalaVersion = "2.12.10"
+  val sparkProjectScalaVersion = "2.12.18"
 
   val sparkVersion = "3.1.3"
   val zstdJniVersion = "1.4.8-1"
@@ -930,7 +937,7 @@ object Spark32 extends SparkClientProjects {
   val sparkClientShadedProjectName = "celeborn-client-spark-3-shaded"
 
   val lz4JavaVersion = "1.7.1"
-  val sparkProjectScalaVersion = "2.12.15"
+  val sparkProjectScalaVersion = "2.12.18"
 
   val sparkVersion = "3.2.4"
   val zstdJniVersion = "1.5.0-4"
@@ -947,7 +954,7 @@ object Spark33 extends SparkClientProjects {
   // val jacksonVersion = "2.13.4"
   // val jacksonDatabindVersion = "2.13.4.2"
   val lz4JavaVersion = "1.8.0"
-  val sparkProjectScalaVersion = "2.12.15"
+  val sparkProjectScalaVersion = "2.12.18"
   // scalaBinaryVersion
   // val scalaBinaryVersion = "2.12"
   val sparkVersion = "3.3.4"
@@ -963,7 +970,7 @@ object Spark34 extends SparkClientProjects {
   val sparkClientShadedProjectName = "celeborn-client-spark-3-shaded"
 
   val lz4JavaVersion = "1.8.0"
-  val sparkProjectScalaVersion = "2.12.17"
+  val sparkProjectScalaVersion = "2.12.18"
 
   val sparkVersion = "3.4.4"
   val zstdJniVersion = "1.5.2-5"
@@ -1001,6 +1008,7 @@ object Spark40 extends SparkClientProjects {
   val zstdJniVersion = "1.5.6-9"
   val scalaBinaryVersion = "2.13"
 
+  override val servletSourceDir: String = "scala-spark4"
   override val sparkColumnarShuffleVersion: String = "4"
 }
 
@@ -1018,6 +1026,7 @@ object Spark41 extends SparkClientProjects {
   val zstdJniVersion = "1.5.7-6"
   val scalaBinaryVersion = "2.13"
 
+  override val servletSourceDir: String = "scala-spark4"
   override val sparkColumnarShuffleVersion: String = "4"
   override val paranamerVersionOverride: Option[String] = Some("2.8.3")
 }
@@ -1037,6 +1046,7 @@ object Spark42 extends SparkClientProjects {
   val scalaBinaryVersion = "2.13"
 
   override val lz4JavaGroup = "at.yawk.lz4"
+  override val servletSourceDir: String = "scala-spark4"
   override val sparkColumnarShuffleVersion: String = "4"
   override val paranamerVersionOverride: Option[String] = Some("2.8.3")
 }
@@ -1059,15 +1069,19 @@ trait SparkClientProjects {
 
   val includeColumnarShuffle: Boolean = true
 
+  // Mirrors Maven's `servlet.source.dir`: Spark 3.x uses javax.servlet,
+  // Spark 4.x uses jakarta.servlet.
+  val servletSourceDir: String = "scala-spark3"
+
   def modules: Seq[Project] = {
-    val seq = Seq(sparkCommon, sparkClient, sparkIt, sparkGroup, sparkClientShade)
+    val seq = Seq(sparkCommon, sparkClient, sparkClientUi, sparkIt, sparkGroup, sparkClientShade)
     if (includeColumnarShuffle) seq ++ Seq(sparkColumnarCommon, sparkColumnarShuffle) else seq
   }
 
   // for test only, don't use this group for any other projects
   lazy val sparkGroup = {
     val p = (project withId "celeborn-spark-group")
-      .aggregate(sparkCommon, sparkClient, sparkIt)
+      .aggregate(sparkCommon, sparkClient, sparkClientUi, sparkIt)
     if (includeColumnarShuffle) {
       p.aggregate(sparkColumnarCommon, sparkColumnarShuffle)
     } else {
@@ -1106,6 +1120,21 @@ trait SparkClientProjects {
         dependencyOverrides ++= paranamerVersionOverride
           .map(v => Seq("com.thoughtworks.paranamer" % "paranamer" % v))
           .getOrElse(Seq.empty)
+      )
+  }
+
+  def sparkClientUi: Project = {
+    Project("celeborn-client-spark-3-ui", file("client-spark/spark-3-ui"))
+      .dependsOn(sparkClient)
+      .settings (
+        commonSettings,
+        libraryDependencies ++= Seq(
+          "org.apache.spark" %% "spark-core" % sparkVersion % "provided",
+          Dependencies.javaxServletApi % "provided",
+          Dependencies.jakartaServletApi % "provided"
+        ) ++ commonUnitTestDependencies,
+        // Mirrors Maven's build-helper-maven-plugin `add-servlet-source` execution.
+        Compile / unmanagedSourceDirectories += baseDirectory.value / "src" / "main" / servletSourceDir
       )
   }
 
@@ -1183,6 +1212,7 @@ trait SparkClientProjects {
   def sparkClientShade: Project = {
     var p = Project(sparkClientShadedProjectName, file(sparkClientShadedProjectPath))
       .dependsOn(sparkClient)
+      .dependsOn(sparkClientUi)
 
     if (includeColumnarShuffle) {
       p = p.dependsOn(sparkColumnarShuffle)

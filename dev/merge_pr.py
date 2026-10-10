@@ -58,18 +58,28 @@ ASF_PASSWORD = os.environ.get("ASF_PASSWORD", "")
 # your own token management.
 JIRA_ACCESS_TOKEN = os.environ.get("JIRA_ACCESS_TOKEN")
 # OAuth key used for issuing requests against the GitHub API. If this is not defined, then requests
-# will be unauthenticated. You should only need to configure this if you find yourself regularly
-# exceeding your IP's unauthenticated request rate limit. You can create an OAuth key at
+# will be unauthenticated, so the merge summary comment is skipped and backport pull requests are
+# left open. You can create an OAuth key at
 # https://github.com/settings/tokens. This script only requires the "public_repo" scope.
 GITHUB_OAUTH_KEY = os.environ.get("GITHUB_OAUTH_KEY")
 
 
 GITHUB_BASE = "https://github.com/apache/celeborn/pull"
+GITHUB_COMMIT_BASE = "https://github.com/apache/celeborn/commit"
 GITHUB_API_BASE = "https://api.github.com/repos/apache/celeborn"
 JIRA_BASE = "https://issues.apache.org/jira/browse"
 JIRA_API_BASE = "https://issues.apache.org/jira"
 # Prefix added to temporary branches
 BRANCH_PREFIX = "PR_TOOL"
+# Branch that GitHub honors the "Closes #N" string on
+DEFAULT_BRANCH = "main"
+
+# The footer merge_pr generates: a "Closes #<pr> from <ref>" line alone on its paragraph,
+# followed by the authors paragraph. Requiring both rejects prose that merely mentions a PR.
+MERGE_FOOTER_RE = re.compile(
+    r"^Closes #(\d+) from \S+\s*$\n\n(?:Lead-authored-by|Authored-by):",
+    re.MULTILINE,
+)
 
 
 def get_json(url):
@@ -90,6 +100,125 @@ def get_json(url):
         sys.exit(-1)
 
 
+def close_pr(pr_num):
+    if not GITHUB_OAUTH_KEY:
+        print("GITHUB_OAUTH_KEY is not set; skipping closing PR #%s." % pr_num)
+        return None
+    url = "%s/pulls/%s" % (GITHUB_API_BASE, pr_num)
+    data = json.dumps({"state": "closed"}).encode("utf-8")
+    request = Request(url, data=data, method="PATCH")
+    request.add_header("Content-Type", "application/json")
+    request.add_header("Accept", "application/vnd.github+json")
+    if GITHUB_OAUTH_KEY:
+        request.add_header("Authorization", "token %s" % GITHUB_OAUTH_KEY)
+    try:
+        return json.load(urlopen(request))
+    except Exception as e:
+        print("Failed to close PR #%s: %s" % (pr_num, e))
+        return None
+
+
+def comment_pr(pr_num, body):
+    url = "%s/issues/%s/comments" % (GITHUB_API_BASE, pr_num)
+    data = json.dumps({"body": body}).encode("utf-8")
+    request = Request(url, data=data, method="POST")
+    request.add_header("Content-Type", "application/json")
+    request.add_header("Accept", "application/vnd.github+json")
+    if GITHUB_OAUTH_KEY:
+        request.add_header("Authorization", "token %s" % GITHUB_OAUTH_KEY)
+    try:
+        return json.load(urlopen(request))
+    except Exception as e:
+        print("Failed to comment on PR #%s: %s" % (pr_num, e))
+        return None
+
+
+def post_merge_comment(pr_num, merged_commits):
+    """Post a comment on the PR recording every branch the change landed on and a
+    link to the resulting commit, so the merge is traceable from the PR page.
+
+    ``merged_commits`` is an ordered list of (branch, commit hash) pairs, the merge
+    sink first followed by each cherry-pick target.
+    """
+    if not merged_commits:
+        return
+    lines = [
+        "- merged into %s %s/%s" % (ref, GITHUB_COMMIT_BASE, commit_hash)
+        for ref, commit_hash in merged_commits
+    ]
+    summary = "**Merge Summary:**\n" + "\n".join(lines)
+    attribution = "*Posted by `merge_pr.py`*"
+    body = "%s\n\n%s" % (summary, attribution)
+    print("\nPosting merge comment on PR #%s:\n\n%s\n%s" % (pr_num, summary, attribution))
+    if not GITHUB_OAUTH_KEY:
+        print("GITHUB_OAUTH_KEY is not set; skipping the merge comment.")
+        return
+    comment_pr(pr_num, body)
+
+
+def has_merge_footer(message, pr_num):
+    """Whether `message` carries the merge footer that `merge_pr` generates for `pr_num`.
+
+    Reads the last "Closes" paragraph, since a body quoting another PR's footer may hold an
+    earlier one. `pr_num` may be an int or a string of digits: callers read it from argv or
+    from the GitHub API, and comparing those two forms directly would never match.
+
+    >>> footer = "Closes #1 from a/b.\\n\\nAuthored-by: A <a@e.org>"
+    >>> has_merge_footer("[CELEBORN-1] Title\\n\\n" + footer, 1)
+    True
+    >>> has_merge_footer("[CELEBORN-1] Title\\n\\n" + footer, "1")
+    True
+    >>> has_merge_footer("[CELEBORN-1] Title\\n\\n" + footer, 2)
+    False
+    >>> has_merge_footer("[CELEBORN-1] Title\\n\\nSee #1 for details.", 1)
+    False
+
+    A cherry-pick keeps the footer, with `-x` provenance appended after it:
+
+    >>> pick = footer + "\\n(cherry picked from commit abc1234)"
+    >>> has_merge_footer("[CELEBORN-1] Title\\n\\n" + pick, 1)
+    True
+
+    A body quoting another PR's complete footer does not shadow the real one:
+
+    >>> quoted = "Reverting:\\n\\n" + footer + "\\n\\nSee above."
+    >>> own = footer.replace("#1", "#2")
+    >>> has_merge_footer("[CELEBORN-2] Later\\n\\n%s\\n\\n%s" % (quoted, own), 1)
+    False
+    """
+    matches = MERGE_FOOTER_RE.findall(message)
+    return bool(matches) and matches[-1] == str(pr_num)
+
+
+def find_merge_commit(pr_num, pr_events):
+    """Return the (hash, message) of the commit that merged `pr_num`, or (None, None).
+
+    Merged pull requests don't appear as merged in the GitHub API; instead, they're closed
+    by committers. GitHub attributes a commit to the `closed` event only when that commit
+    lands on the default branch, because the "Closes #N" string in the commit message is
+    what closes the PR and it is honored only there. A pull request merged into branch-x.y
+    is closed without a commit, so fall back to `referenced` events, which are also raised
+    by any commit merely mentioning the PR; confirm each against the merge footer.
+    """
+
+    def commits_of(event_name):
+        matched = [e for e in pr_events if e["event"] == event_name and e["commit_id"] is not None]
+        return [e["commit_id"] for e in sorted(matched, key=lambda x: x["created_at"])]
+
+    def message_of(commit_hash):
+        return get_json("%s/commits/%s" % (GITHUB_API_BASE, commit_hash))["commit"]["message"]
+
+    closed_commits = commits_of("closed")
+    if closed_commits:
+        return closed_commits[-1], message_of(closed_commits[-1])
+
+    for commit_hash in reversed(commits_of("referenced")):
+        message = message_of(commit_hash)
+        if has_merge_footer(message, pr_num):
+            return commit_hash, message
+    return None, None
+
+
 def fail(msg):
     print(msg)
     clean_up()
@@ -105,7 +234,7 @@ def run_cmd(cmd):
 
 
 def continue_maybe(prompt):
-    result = input("\n%s (y/n): " % prompt)
+    result = input("\n%s (y/N): " % prompt)
     if result.lower() != "y":
         fail("Okay, exiting")
 
@@ -206,6 +335,8 @@ def merge_pr(pr_num, target_ref, title, body, pr_repo_desc):
     return merge_hash
 
 
+# cherry-pick the merge commit into the requested branch and return the
+# (pushed ref, pushed commit hash) pair
 def cherry_pick(pr_num, merge_hash, default_branch):
     pick_ref = input("Enter a branch name [%s]: " % default_branch)
     if pick_ref == "":
@@ -239,7 +370,53 @@ def cherry_pick(pr_num, merge_hash, default_branch):
 
     print("Pull request #%s picked into %s!" % (pr_num, pick_ref))
     print("Pick hash: %s" % pick_hash)
-    return pick_ref
+    return pick_ref, pick_hash
+
+
+def _semver_max_version(names):
+    if not names:
+        return None
+    names = [n for n in names if re.fullmatch(r"\d+\.\d+\.\d+", n)]
+    if not names:
+        return None
+    parsed = [(tuple(int(p) for p in n.split(".")), n) for n in names]
+    return max(parsed)[1]
+
+
+def compute_default_fix_versions(merge_branches, unreleased_version_names):
+    """
+    Compute the suggested fix versions for the merge branches.
+
+    main contributes the greatest unreleased N.0.0, and branch-M.N contributes
+    the greatest unreleased M.N.x version. Duplicate suggestions are collapsed.
+    """
+    default_fix_versions = []
+    for b in merge_branches:
+        if b == DEFAULT_BRANCH:
+            chosen = _semver_max_version(
+                [n for n in unreleased_version_names if re.fullmatch(r"\d+\.0\.0", n)]
+            )
+            if chosen:
+                default_fix_versions.append(chosen)
+            else:
+                print(
+                    "No unreleased N.0.0 fix version found on JIRA for main; "
+                    "enter fix version(s) manually when prompted."
+                )
+        else:
+            prefix = b.replace("branch-", "") + "."
+            chosen = _semver_max_version(
+                [n for n in unreleased_version_names if n.startswith(prefix)]
+            )
+            if chosen:
+                default_fix_versions.append(chosen)
+            else:
+                print(
+                    "Target version for %s is not found on JIRA, it may be archived or "
+                    "not created. Skipping it." % b
+                )
+
+    return list(dict.fromkeys(default_fix_versions))
 
 
 def resolve_jira_issue(merge_branches, comment, default_jira_id=""):
@@ -276,43 +453,12 @@ def resolve_jira_issue(merge_branches, comment, default_jira_id=""):
     versions = [
         x
         for x in versions
-        if not x.raw["released"] and not x.raw["archived"] and re.match(r"\d+\.\d+\.\d+", x.name)
+        if not x.raw["released"] and not x.raw["archived"] and re.fullmatch(r"\d+\.\d+\.\d+", x.name)
     ]
 
-    default_fix_versions = []
-    for b in merge_branches:
-        if b == "main":
-            default_fix_versions.append(versions[0].name)
-        else:
-            found = False
-            found_versions = []
-            for v in versions:
-                if v.name.startswith(b.replace("branch-", "")):
-                    found_versions.append(v.name)
-                    found = True
-            if found:
-                # There might be several unreleased versions for specific branches
-                # For example, assuming
-                # versions = ['4.0.0', '3.5.1', '3.5.0', '3.4.2', '3.3.4', '3.3.3']
-                # we've found two candidates for branch-3.5, we pick the last/smallest one
-                default_fix_versions.append(found_versions[-1])
-            else:
-                print(
-                    "Target version for %s is not found on JIRA, it may be archived or "
-                    "not created. Skipping it." % b
-                )
-
-    for v in default_fix_versions:
-        # Handles the case where we have forked a release branch but not yet made the release.
-        # In this case, if the PR is committed to the main branch and the release branch, we
-        # only consider the release branch to be the fix version. E.g. it is not valid to have
-        # both 1.1.0 and 1.0.0 as fix versions.
-        (major, minor, patch) = v.split(".")
-        if patch == "0":
-            previous = "%s.%s.%s" % (major, int(minor) - 1, 0)
-            if previous in default_fix_versions:
-                default_fix_versions = list(filter(lambda x: x != v, default_fix_versions))
-    default_fix_versions = ",".join(default_fix_versions)
+    default_fix_versions = ",".join(
+        compute_default_fix_versions(merge_branches, [v.name for v in versions])
+    )
 
     available_versions = set(list(map(lambda v: v.name, versions)))
     while True:
@@ -375,7 +521,7 @@ def choose_jira_assignee(issue):
                     annotations.append("Commentor")
                 print("[%d] %s (%s)" % (idx, author.displayName, ",".join(annotations)))
             raw_assignee = input(
-                "Enter number of user, or userid, to assign to (blank to leave unassigned):"
+                "Enter number of user, or userid, to assign to (blank to leave unassigned): "
             )
             if raw_assignee == "":
                 return None
@@ -548,7 +694,7 @@ def main():
         print("I've re-written the title as follows to match the standard format:")
         print("Original: %s" % pr["title"])
         print("Modified: %s" % modified_title)
-        result = input("Would you like to use the modified title? (y/n): ")
+        result = input("Would you like to use the modified title? (y/N): ")
         if result.lower() == "y":
             title = modified_title
             print("Using modified title:")
@@ -568,7 +714,7 @@ def main():
         print(modified_body)
         print("=" * 80)
         print("I've removed the comments from PR template like the above:")
-        result = input("Would you like to use the modified body? (y/n): ")
+        result = input("Would you like to use the modified body? (y/N): ")
         if result.lower() == "y":
             body = modified_body
             print("Using modified body:")
@@ -582,16 +728,9 @@ def main():
     base_ref = pr["head"]["ref"]
     pr_repo_desc = "%s/%s" % (user_login, base_ref)
 
-    # Merged pull requests don't appear as merged in the GitHub API;
-    # Instead, they're closed by committers.
-    merge_commits = [
-        e for e in pr_events if e["event"] == "closed" and e["commit_id"] is not None
-    ]
+    merge_hash, message = find_merge_commit(pr_num, pr_events)
 
-    if merge_commits:
-        merge_hash = merge_commits[0]["commit_id"]
-        message = get_json("%s/commits/%s" % (GITHUB_API_BASE, merge_hash))["commit"]["message"]
-
+    if merge_hash is not None:
         print("Pull request %s has already been merged, assuming you want to backport" % pr_num)
         commit_is_downloaded = (
             run_cmd(["git", "rev-parse", "--quiet", "--verify", "%s^{commit}" % merge_hash]).strip()
@@ -601,7 +740,8 @@ def main():
             fail("Couldn't find any merge commit for #%s, you may need to update HEAD." % pr_num)
 
         print("Found commit %s:\n%s" % (merge_hash, message))
-        cherry_pick(pr_num, merge_hash, next(branch_iter, branch_names[0]))
+        picked = cherry_pick(pr_num, merge_hash, next(branch_iter, branch_names[0]))
+        post_merge_comment(pr_num, [picked])
         sys.exit(0)
 
     if not bool(pr["mergeable"]):
@@ -619,11 +759,30 @@ def main():
 
     merge_hash = merge_pr(pr_num, target_ref, title, body, pr_repo_desc)
 
+    # Ordered (branch, commit hash) pairs for the merge comment: the merge sink first,
+    # then each cherry-pick target as it is picked.
+    merged_commits = [(target_ref, merge_hash)]
+
     pick_prompt = "Would you like to pick %s into another branch?" % merge_hash
-    while input("\n%s (y/n): " % pick_prompt).lower() == "y":
-        merged_refs = merged_refs + [
-            cherry_pick(pr_num, merge_hash, next(branch_iter, branch_names[0]))
-        ]
+    # Post the summary in a finally block: the merge into the target branch has already
+    # been pushed, so aborting a later cherry-pick must not drop that line.
+    try:
+        while input("\n%s (y/N): " % pick_prompt).lower() == "y":
+            picked = cherry_pick(pr_num, merge_hash, next(branch_iter, branch_names[0]))
+            merged_refs = merged_refs + [picked[0]]
+            merged_commits = merged_commits + [picked]
+    finally:
+        # Record what landed first: the merge has already been pushed, so nothing here
+        # may abort the remaining bookkeeping.
+        post_merge_comment(pr_num, merged_commits)
+        # The "Closes #N" string in the commit message auto-closes the PR only when the
+        # commit lands on the default branch, so close pull requests against other
+        # branches through the API. Merges into main are left to GitHub: closing them
+        # here would race its auto-close and replace the commit-linked close event that
+        # find_merge_commit prefers.
+        if target_ref != DEFAULT_BRANCH:
+            print("\nGitHub does not auto-close PRs targeting %s; closing it.\n" % target_ref)
+            close_pr(pr_num)
 
     if asf_jira is not None:
         continue_maybe("Would you like to update an associated JIRA?")

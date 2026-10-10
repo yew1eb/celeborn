@@ -17,11 +17,8 @@
 
 package org.apache.spark.shuffle.celeborn.ui
 
-/** Type alias bridging the servlet API rename between Spark 3.x (javax.servlet)
- *  and Spark 4.x (jakarta.servlet). The matching variant is selected per build
- *  profile (see module pom); UI source code imports TypeAlias._ and references
- *  HttpServletRequest uniformly, keeping a single page source across versions.
- */
-object TypeAlias {
+// Spark 3.x uses javax.servlet. This type alias bridges the API difference
+// so a single CelebornShufflePage.scala compiles for both Spark 3 and Spark 4.
+object SparkServletBridge {
   type HttpServletRequest = javax.servlet.http.HttpServletRequest
 }

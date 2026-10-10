@@ -15,13 +15,27 @@
  * limitations under the License.
  */
 
-package org.apache.spark.shuffle.celeborn.ui
+package org.apache.celeborn.service.deploy.master.slotsalloc;
 
-/** Type alias bridging the servlet API rename between Spark 3.x (javax.servlet)
- *  and Spark 4.x (jakarta.servlet). The matching variant is selected per build
- *  profile (see module pom); UI source code imports TypeAlias._ and references
- *  HttpServletRequest uniformly, keeping a single page source across versions.
+import java.util.List;
+import java.util.Map;
+
+import org.apache.celeborn.common.meta.WorkerInfo;
+
+/**
+ * Computes per-disk slot budgets for {@link SlotsAllocator}. The allocator owns worker placement,
+ * replication, rack awareness, interruption awareness, and best-effort placement after the budgets
+ * are exhausted.
  */
-object TypeAlias {
-  type HttpServletRequest = jakarta.servlet.http.HttpServletRequest
+public interface SlotsAssignStrategy {
+
+  /**
+   * Returns a fresh, mutable budget map for one allocation request. The allocator consumes the
+   * returned budgets while placing partitions.
+   */
+  Map<WorkerInfo, List<UsableDiskInfo>> computeSlotBudgets(
+      List<WorkerInfo> workers,
+      List<Integer> partitionIds,
+      boolean shouldReplicate,
+      int availableStorageTypes);
 }

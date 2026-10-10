@@ -656,6 +656,10 @@ class CelebornConf(loadDefaults: Boolean) extends Cloneable with Logging with Se
   // //////////////////////////////////////////////////////
   //                      Master                         //
   // //////////////////////////////////////////////////////
+  def masterSlotAssignPolicyName: String = get(MASTER_SLOT_ASSIGN_POLICY)
+
+  /** Returns the configured built-in policy. Use `masterSlotAssignPolicyName` for SPI providers. */
+  @deprecated("Use masterSlotAssignPolicyName for SPI provider selection", "1.0.0")
   def masterSlotAssignPolicy: SlotsAssignPolicy =
     SlotsAssignPolicy.valueOf(get(MASTER_SLOT_ASSIGN_POLICY))
 
@@ -684,6 +688,7 @@ class CelebornConf(loadDefaults: Boolean) extends Cloneable with Logging with Se
   def masterSlotAssignExtraSlots: Int = get(MASTER_SLOT_ASSIGN_EXTRA_SLOTS)
   def masterSlotAssignMaxWorkers: Int = get(MASTER_SLOT_ASSIGN_MAX_WORKERS)
   def masterSlotAssignMinWorkers: Int = get(MASTER_SLOT_ASSIGN_MIN_WORKERS)
+  def masterSplitSlotAssignMaxWorkers: Int = get(MASTER_SPLIT_SLOT_ASSIGN_MAX_WORKERS)
   def initialEstimatedPartitionSize: Long = get(ESTIMATED_PARTITION_SIZE_INITIAL_SIZE)
   def estimatedPartitionSizeUpdaterInitialDelay: Long =
     get(ESTIMATED_PARTITION_SIZE_UPDATE_INITIAL_DELAY)
@@ -957,7 +962,8 @@ class CelebornConf(loadDefaults: Boolean) extends Cloneable with Logging with Se
   def clientCommitFilesIgnoreExcludedWorkers: Boolean = get(CLIENT_COMMIT_IGNORE_EXCLUDED_WORKERS)
   def clientShuffleDynamicResourceEnabled: Boolean =
     get(CLIENT_SHUFFLE_DYNAMIC_RESOURCE_ENABLED)
-  def clientShuffleDynamicResourceFactor: Double = get(CLIENT_SHUFFLE_DYNAMIC_RESOURCE_FACTOR)
+  def clientShuffleDynamicResourceUpdateTime: Long =
+    get(CLIENT_SHUFFLE_DYNAMIC_RESOURCE_UPDATE_TIME)
   def appHeartbeatTimeoutMs: Long = get(APPLICATION_HEARTBEAT_TIMEOUT)
   def dfsExpireDirsTimeoutMS: Long = get(DFS_EXPIRE_DIRS_TIMEOUT)
   def appHeartbeatIntervalMs: Long = get(APPLICATION_HEARTBEAT_INTERVAL)
@@ -3102,13 +3108,12 @@ object CelebornConf extends Logging {
       .withAlternative("celeborn.slots.assign.policy")
       .categories("master")
       .version("0.3.0")
-      .doc("Policy for master to assign slots, Celeborn supports two types of policy: roundrobin and loadaware. " +
+      .doc("Policy for master to assign slots. Built-in policies are roundrobin and loadaware. " +
+        "Additional policies can be registered through the SlotsAssignStrategyProvider SPI. " +
         "Loadaware policy will be ignored when `HDFS` is enabled in `celeborn.storage.availableTypes`")
+      .dynamic
       .stringConf
       .transform(_.toUpperCase(Locale.ROOT))
-      .checkValues(Set(
-        SlotsAssignPolicy.ROUNDROBIN.name,
-        SlotsAssignPolicy.LOADAWARE.name))
       .createWithDefault(SlotsAssignPolicy.ROUNDROBIN.name)
 
   val MASTER_SLOT_ASSIGN_INTERRUPTION_AWARE: ConfigEntry[Boolean] =
@@ -3136,8 +3141,10 @@ object CelebornConf extends Logging {
       .categories("master")
       .doc("This configuration is a guidance for load-aware slot allocation algorithm. " +
         "This value is control how many disk groups will be created.")
+      .dynamic
       .version("0.3.0")
       .intConf
+      .checkValue(_ > 0, "Value must be positive")
       .createWithDefault(5)
 
   val MASTER_SLOT_ASSIGN_LOADAWARE_DISKGROUP_GRADIENT: ConfigEntry[Double] =
@@ -3146,8 +3153,12 @@ object CelebornConf extends Logging {
       .categories("master")
       .doc("This value means how many more workload will be placed into a faster disk group " +
         "than a slower group.")
+      .dynamic
       .version("0.3.0")
       .doubleConf
+      .checkValue(
+        value => java.lang.Double.isFinite(value) && value >= 0.0,
+        "Value must be finite and non-negative")
       .createWithDefault(0.1)
 
   val MASTER_SLOT_ASSIGN_LOADAWARE_FLUSHTIME_WEIGHT: ConfigEntry[Double] =
@@ -3156,8 +3167,12 @@ object CelebornConf extends Logging {
       .categories("master")
       .doc(
         "Weight of average flush time when calculating ordering in load-aware assignment strategy")
+      .dynamic
       .version("0.3.0")
       .doubleConf
+      .checkValue(
+        value => java.lang.Double.isFinite(value) && value >= 0.0,
+        "Value must be finite and non-negative")
       .createWithDefault(0)
 
   val MASTER_SLOT_ASSIGN_LOADAWARE_FETCHTIME_WEIGHT: ConfigEntry[Double] =
@@ -3166,8 +3181,12 @@ object CelebornConf extends Logging {
       .categories("master")
       .doc(
         "Weight of average fetch time when calculating ordering in load-aware assignment strategy")
+      .dynamic
       .version("0.3.0")
       .doubleConf
+      .checkValue(
+        value => java.lang.Double.isFinite(value) && value >= 0.0,
+        "Value must be finite and non-negative")
       .createWithDefault(1)
 
   val MASTER_SLOT_ASSIGN_LOADAWARE_ACTIVE_SLOTS_WEIGHT: ConfigEntry[Double] =
@@ -3175,8 +3194,12 @@ object CelebornConf extends Logging {
       .categories("master")
       .doc(
         "Weight of active slots when calculating ordering in load-aware assignment strategy")
+      .dynamic
       .version("0.7.0")
       .doubleConf
+      .checkValue(
+        value => java.lang.Double.isFinite(value) && value >= 0.0,
+        "Value must be finite and non-negative")
       .createWithDefault(0)
 
   val MASTER_SLOT_ASSIGN_EXTRA_SLOTS: ConfigEntry[Int] =
@@ -3204,6 +3227,18 @@ object CelebornConf extends Logging {
       .doc("Min workers that slots of one shuffle should be allocated on. Provided enough workers are available.")
       .intConf
       .createWithDefault(100)
+
+  val MASTER_SPLIT_SLOT_ASSIGN_MAX_WORKERS: ConfigEntry[Int] =
+    buildConf("celeborn.master.splitSlot.assign.maxWorkers")
+      .categories("master")
+      .version("1.0.0")
+      .doc("Maximum workers returned by each dynamic candidate refresh. The request limit is the " +
+        "smaller positive value of this setting and `celeborn.client.slot.assign.maxWorkers`. " +
+        "For replicated shuffle, an effective limit of one is raised to two. Workers already " +
+        "present in a shuffle snapshot are not counted against this limit.")
+      .intConf
+      .checkValue(_ > 0, "Must be positive.")
+      .createWithDefault(500)
 
   val ESTIMATED_PARTITION_SIZE_INITIAL_SIZE: ConfigEntry[Long] =
     buildConf("celeborn.master.estimatedPartitionSize.initialSize")
@@ -5308,7 +5343,7 @@ object CelebornConf extends Logging {
       .version("0.6.0")
       .doc("whether to clean those disk space occupied by shuffles which cannot be fetched")
       .booleanConf
-      .createWithDefault(false)
+      .createWithDefault(true)
 
   val CLIENT_FETCH_CLEAN_FAILED_SHUFFLE_INTERVAL: ConfigEntry[Long] =
     buildConf("celeborn.client.spark.fetch.cleanFailedShuffleInterval")
@@ -5632,21 +5667,24 @@ object CelebornConf extends Logging {
     buildConf("celeborn.client.shuffle.dynamicResourceEnabled")
       .categories("client")
       .version("0.6.0")
-      .doc("When enabled, the ChangePartitionManager will obtain candidate workers from the availableWorkers pool " +
-        "during heartbeats when worker resource change.")
+      .doc("When enabled, ChangePartitionManager refreshes endpoint-ready worker candidates from " +
+        "the Master on demand while handling change-partition requests, and combines them with " +
+        "workers already present in the shuffle snapshot.")
       .booleanConf
       .createWithDefault(false)
 
-  val CLIENT_SHUFFLE_DYNAMIC_RESOURCE_FACTOR: ConfigEntry[Double] =
-    buildConf("celeborn.client.shuffle.dynamicResourceFactor")
+  val CLIENT_SHUFFLE_DYNAMIC_RESOURCE_UPDATE_TIME: ConfigEntry[Long] =
+    buildConf("celeborn.client.shuffle.dynamicResource.updateTime")
       .categories("client")
-      .version("0.6.0")
-      .doc("The ChangePartitionManager will check whether (unavailable workers / shuffle allocated workers) " +
-        "is more than the factor before obtaining candidate workers from the requestSlots RPC response " +
-        s"when `${CLIENT_SHUFFLE_DYNAMIC_RESOURCE_ENABLED.key}` set true")
-      .doubleConf
-      .checkValue(v => v >= 0.0 && v <= 1.0, "Should be in [0.0, 1.0].")
-      .createWithDefault(0.5)
+      .version("1.0.0")
+      .doc(
+        "Minimum interval after a worker-candidate refresh attempt completes before " +
+          s"ChangePartitionManager may try again when `${CLIENT_SHUFFLE_DYNAMIC_RESOURCE_ENABLED.key}` " +
+          "is true. Set to 0 to allow each change-partition handling cycle to refresh when no " +
+          "refresh is already in progress.")
+      .timeConf(TimeUnit.MILLISECONDS)
+      .checkValue(_ >= 0, "Must be non-negative.")
+      .createWithDefaultString("30s")
 
   val CLIENT_PUSH_STAGE_END_TIMEOUT: ConfigEntry[Long] =
     buildConf("celeborn.client.push.stageEnd.timeout")

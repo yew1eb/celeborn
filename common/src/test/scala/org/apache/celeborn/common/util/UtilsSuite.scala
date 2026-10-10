@@ -17,8 +17,10 @@
 
 package org.apache.celeborn.common.util
 
+import java.io.Closeable
 import java.util
 import java.util.Collections
+import java.util.concurrent.atomic.AtomicInteger
 
 import org.scalatest.matchers.must.Matchers.contain
 import org.scalatest.matchers.should.Matchers.convertToAnyShouldWrapper
@@ -27,9 +29,10 @@ import org.apache.celeborn.CelebornFunSuite
 import org.apache.celeborn.common.CelebornConf
 import org.apache.celeborn.common.client.{MasterEndpointResolver, StaticMasterEndpointResolver}
 import org.apache.celeborn.common.exception.CelebornException
-import org.apache.celeborn.common.identity.DefaultIdentityProvider
+import org.apache.celeborn.common.identity.{DefaultIdentityProvider, UserIdentifier}
+import org.apache.celeborn.common.meta.WorkerInfo
 import org.apache.celeborn.common.network.protocol.SerdeVersion
-import org.apache.celeborn.common.protocol.{PartitionLocation, PbReviseLostShuffles, PbReviseLostShufflesResponse, TransportModuleConstants}
+import org.apache.celeborn.common.protocol.{PartitionLocation, PbRequestWorkers, PbRequestWorkersResponse, PbReviseLostShuffles, PbReviseLostShufflesResponse, StorageInfo, TransportModuleConstants}
 import org.apache.celeborn.common.protocol.message.ControlMessages.{GetReducerFileGroupResponse, MapperEnd, ReviseLostShuffles, ReviseLostShufflesResponse}
 import org.apache.celeborn.common.protocol.message.StatusCode
 
@@ -195,6 +198,34 @@ class UtilsSuite extends CelebornFunSuite {
     mapperEnd.bytesWrittenPerPartition.array should contain theSameElementsInOrderAs mapperEndTrans.bytesWrittenPerPartition
   }
 
+  test("PbRequestWorkers messages convert with TransportMessage") {
+    val excludedWorker = new WorkerInfo("host1", 1001, 1002, 1003, 1004)
+    val request = PbRequestWorkers.newBuilder()
+      .setApplicationId("app-1")
+      .setUserIdentifier(
+        PbSerDeUtils.toPbUserIdentifier(new UserIdentifier("tenant", "user")))
+      .setMaxWorkers(10)
+      .setTagsExpr("tag-a,tag-b")
+      .setShouldReplicate(true)
+      .setAvailableStorageTypes(StorageInfo.LOCAL_DISK_MASK)
+      .addExcludedWorkerSet(PbSerDeUtils.toPbWorkerInfo(excludedWorker, true, true))
+      .build()
+    val convertedRequest =
+      Utils.fromTransportMessage(Utils.toTransportMessage(request)).asInstanceOf[PbRequestWorkers]
+    assert(convertedRequest == request)
+
+    val response = PbRequestWorkersResponse.newBuilder()
+      .setStatus(StatusCode.SUCCESS.getValue)
+      .addWorkers(PbSerDeUtils.toPbWorkerInfo(excludedWorker, true, true).toBuilder
+        .setNetworkLocation("/rack-1")
+        .build())
+      .build()
+    val convertedResponse =
+      Utils.fromTransportMessage(Utils.toTransportMessage(response))
+        .asInstanceOf[PbRequestWorkersResponse]
+    assert(convertedResponse == response)
+  }
+
   test("ReviseLostShuffles class convert with pb") {
     val req = ReviseLostShuffles("app-1", util.Arrays.asList[Integer](1, 2, 3), "req-1")
     val reqTrans = Utils.fromTransportMessage(Utils.toTransportMessage(req))
@@ -324,5 +355,36 @@ class UtilsSuite extends CelebornFunSuite {
       celebornConf.identityProviderClass,
       celebornConf)
     assert(testInstance.isInstanceOf[DefaultIdentityProvider])
+  }
+
+  test("tryWithResources should evaluate the resource expression once and close the resource given to the function") {
+    val evaluations = new AtomicInteger(0)
+
+    class Resource extends Closeable {
+      var closed: Boolean = false
+      override def close(): Unit = closed = true
+    }
+
+    val received = Utils.tryWithResources {
+      evaluations.incrementAndGet()
+      new Resource
+    }(res => res)
+
+    assert(evaluations.get() == 1)
+    assert(received.closed)
+
+    var thrownReceived: Resource = null
+    intercept[RuntimeException] {
+      Utils.tryWithResources {
+        evaluations.incrementAndGet()
+        new Resource
+      } { res =>
+        thrownReceived = res
+        throw new RuntimeException("func failed")
+      }
+    }
+    assert(evaluations.get() == 2)
+    assert(thrownReceived.closed)
+    assert(thrownReceived ne received)
   }
 }

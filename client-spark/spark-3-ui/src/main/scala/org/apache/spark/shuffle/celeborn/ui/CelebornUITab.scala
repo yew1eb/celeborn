@@ -17,17 +17,14 @@
 
 package org.apache.spark.shuffle.celeborn.ui
 
-import org.apache.spark.internal.Logging
+import org.apache.spark.shuffle.celeborn.CelebornStatusStore
 import org.apache.spark.ui.{SparkUI, SparkUITab}
 
-/**
- * WebUI tab for Celeborn. Constructing it attaches the page and the tab to the parent UI.
- *  Mirrors Gluten's GlutenSQLTab / Uniffle's ShuffleTab.
- */
-private[celeborn] class CelebornUITab(val statusStore: CelebornStatusStore, sparkUI: SparkUI)
-  extends SparkUITab(sparkUI, "celeborn") with Logging {
+private[celeborn] class CelebornUITab(val store: CelebornStatusStore, sparkUI: SparkUI)
+  extends SparkUITab(sparkUI, "celeborn") {
+
   override val name: String = "Celeborn"
-  val parent: SparkUI = sparkUI
+
   attachPage(new CelebornShufflePage(this))
-  parent.attachTab(this)
+  sparkUI.attachTab(this)
 }

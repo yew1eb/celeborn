@@ -187,17 +187,17 @@ $ ./build/sbt
 You can run a single test suite using the `testOnly` command. For example, to run the `SlotsAllocatorSuiteJ`:
 
 ```
-> testOnly org.apache.celeborn.service.deploy.master.SlotsAllocatorSuiteJ
+> testOnly org.apache.celeborn.service.deploy.master.slotsalloc.SlotsAllocatorSuiteJ
 ```
 The `testOnly` command accepts wildcards; e.g., you can also run the `SlotsAllocatorSuiteJ` with:
 
 ```
 > testOnly *SlotsAllocatorSuiteJ
 ```
-Or you could run all the tests in the `master` package:
+Or you could run all the tests in the `slotsalloc` package:
 
 ```
-> testOnly org.apache.celeborn.service.deploy.master.*
+> testOnly org.apache.celeborn.service.deploy.master.slotsalloc.*
 ```
 If you’d like to run just a single Java test in the `SlotsAllocatorSuiteJ`, e.g., a test that with the name `testAllocateSlotsForSinglePartitionId`, you run the following command in the sbt console:
 
@@ -314,9 +314,9 @@ Publish the shade client for Spark 3.5:
 $ ./build/sbt -Pspark-3.5 celeborn-client-spark-3-shaded/publish
 ```
 
-Publish the shade client for Spark 4.0:
+Publish the shade client for Spark 4.2:
 ```shell
-$ ./build/sbt -Pspark-4.0 celeborn-client-spark-4-shaded/publish
+$ ./build/sbt -Pspark-4.2 celeborn-client-spark-4-shaded/publish
 ```
 
 Publish the shade client for Flink 1.18:

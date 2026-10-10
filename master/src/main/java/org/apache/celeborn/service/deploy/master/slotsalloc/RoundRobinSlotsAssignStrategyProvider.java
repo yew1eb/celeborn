@@ -15,17 +15,20 @@
  * limitations under the License.
  */
 
-package org.apache.spark.shuffle.celeborn.ui
+package org.apache.celeborn.service.deploy.master.slotsalloc;
 
-import org.apache.spark.api.plugin.{DriverPlugin, ExecutorPlugin, SparkPlugin}
+import org.apache.celeborn.common.CelebornConf;
+import org.apache.celeborn.common.protocol.SlotsAssignPolicy;
 
-/**
- * Spark plugin entry point. Enables the Celeborn WebUI tab on the driver only.
- *
- * Usage: set `spark.plugins=org.apache.spark.shuffle.celeborn.ui.CelebornPlugin`.
- */
-class CelebornPlugin extends SparkPlugin {
-  override def driverPlugin(): DriverPlugin = new CelebornDriverPlugin()
+public final class RoundRobinSlotsAssignStrategyProvider implements SlotsAssignStrategyProvider {
 
-  override def executorPlugin(): ExecutorPlugin = null
+  @Override
+  public String getName() {
+    return SlotsAssignPolicy.ROUNDROBIN.name();
+  }
+
+  @Override
+  public SlotsAssignStrategy create(CelebornConf conf) {
+    return new RoundRobinSlotsAssignStrategy();
+  }
 }

@@ -21,6 +21,18 @@ license: |
 
 # Migration Guide
 
+# Upgrading from 0.7 to 1.0
+
+- Since 1.0.0, `celeborn.master.slot.assign.policy` supports custom strategy names registered through
+  the `SlotsAssignStrategyProvider` SPI and can be updated through system-level dynamic
+  configuration. Existing `ROUNDROBIN` and `LOADAWARE` values remain supported and require no
+  migration. See [Slots allocation](./developers/slotsallocation.md#custom-strategies) for details.
+
+- Since 1.0.0, Celeborn removed `celeborn.client.shuffle.dynamicResourceFactor`, which used the
+  unavailable-worker ratio to trigger a refresh. Dynamic worker refresh is now performed on demand
+  while handling change-partition requests and throttled by
+  `celeborn.client.shuffle.dynamicResource.updateTime` (30s by default).
+
 # Upgrading from 0.6 to 0.7
 
 - Since 0.7.0, Celeborn removed `ReleaseSlots`.
@@ -36,6 +48,8 @@ license: |
 - Since 0.7.0, Celeborn removed `celeborn.network.memory.allocator.pooled`. Please use `celeborn.network.memory.allocator.type` instead.
 
 - Since 0.7.0, Celeborn changed the default value of `celeborn.port.maxRetries` from `1` to `16`.
+
+- Since 0.7.0, Celeborn changed the default value of `celeborn.client.spark.fetch.cleanFailedShuffle` from `false` to `true`, which means Celeborn will reclaim shuffle data of `FetchFailed` retried stages at default.
 
 # Upgrading from 0.5 to 0.6
 

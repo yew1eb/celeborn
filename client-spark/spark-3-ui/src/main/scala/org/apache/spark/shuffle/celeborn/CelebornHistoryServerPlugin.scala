@@ -15,38 +15,33 @@
  * limitations under the License.
  */
 
-package org.apache.spark.shuffle.celeborn.ui
+package org.apache.spark.shuffle.celeborn
 
 import org.apache.spark.SparkConf
 import org.apache.spark.scheduler.SparkListener
+import org.apache.spark.shuffle.celeborn.ui.CelebornUITab
 import org.apache.spark.status.{AppHistoryServerPlugin, ElementTrackingStore}
 import org.apache.spark.ui.SparkUI
 
-/**
- * HistoryServer integration. Rebuilds the Celeborn listener from the event log so the
- *  Celeborn tab can be rendered for finished applications. Registered via SPI at
- *  META-INF/services/org.apache.spark.status.AppHistoryServerPlugin.
- */
+/** Registered via SPI at META-INF/services/org.apache.spark.status.AppHistoryServerPlugin. */
 class CelebornHistoryServerPlugin extends AppHistoryServerPlugin {
 
-  /** Rebuild a listener that consumes replayed events into the given store. */
   override def createListeners(
       conf: SparkConf,
       store: ElementTrackingStore): Seq[SparkListener] = {
-    Seq(new CelebornListener(conf, store))
+    val listener = new CelebornListener(store, conf, requirePluginOptIn = true)
+    // Persist the final accumulated values when replay finishes, covering logs
+    // whose last events fall inside the throttle interval and that may lack an
+    // ApplicationEnd event.
+    store.onFlush(listener.flush())
+    Seq(listener)
   }
 
-  /**
-   * Attach the Celeborn tab only if the application actually produced Celeborn data,
-   *  so non-Celeborn apps don't get an empty tab.
-   */
   override def setupUI(ui: SparkUI): Unit = {
     val statusStore = new CelebornStatusStore(ui.store.store)
-    val hasData =
-      statusStore.assignmentInfos().nonEmpty ||
-        statusStore.buildInfo().info.nonEmpty ||
-        !statusStore.fallbackStats().counts.isEmpty
-    if (hasData) {
+    // Only attach the tab for applications that opted in via spark.plugins or
+    // spark.plugins.defaultList.
+    if (statusStore.extensionEnabled()) {
       new CelebornUITab(statusStore, ui)
     }
   }

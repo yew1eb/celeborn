@@ -26,7 +26,7 @@
 
   <artifactId>celeborn-client-spark-3-ui_${scala.binary.version}</artifactId>
   <packaging>jar</packaging>
-  <name>Celeborn Client for Spark 3/4 UI</name>
+  <name>Celeborn Spark UI Plugin</name>
 
   <dependencies>
     <dependency>
@@ -45,8 +45,6 @@
         </exclusion>
       </exclusions>
     </dependency>
-    <!-- scala-xml is brought transitively by spark-core (compile scope);
-         needed for scala.xml.Node in the page render. -->
     <dependency>
       <groupId>javax.servlet</groupId>
       <artifactId>javax.servlet-api</artifactId>
@@ -68,6 +66,25 @@
       <plugin>
         <groupId>com.diffplug.spotless</groupId>
         <artifactId>spotless-maven-plugin</artifactId>
+      </plugin>
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>build-helper-maven-plugin</artifactId>
+        <version>3.6.0</version>
+        <executions>
+          <execution>
+            <id>add-servlet-source</id>
+            <goals>
+              <goal>add-source</goal>
+            </goals>
+            <phase>generate-sources</phase>
+            <configuration>
+              <sources>
+                <source>src/main/${servlet.source.dir}</source>
+              </sources>
+            </configuration>
+          </execution>
+        </executions>
       </plugin>
     </plugins>
   </build>

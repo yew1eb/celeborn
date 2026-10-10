@@ -172,6 +172,34 @@ public abstract class CelebornInputStream extends InputStream {
 
   public abstract int partitionsRead();
 
+  static boolean shouldSkipLocation(
+      boolean rangeReadFilter, int startMapIndex, int endMapIndex, PartitionLocation location) {
+    if (!rangeReadFilter || endMapIndex == Integer.MAX_VALUE) {
+      return false;
+    }
+    RoaringBitmap bitmap = location.getMapIdBitMapIfPresent();
+    if (bitmap == null && location.hasPeer()) {
+      bitmap = location.getPeer().getMapIdBitMapIfPresent();
+    }
+    if (bitmap == null) {
+      // Missing filter metadata cannot prove that this location is irrelevant.
+      return false;
+    }
+    if (startMapIndex >= endMapIndex) {
+      return true;
+    }
+    if (startMapIndex >= 0) {
+      return !bitmap.intersects((long) startMapIndex, (long) endMapIndex);
+    }
+    // Preserve the previous unsigned-int behavior for unexpected negative map indexes.
+    for (int i = startMapIndex; i < endMapIndex; i++) {
+      if (bitmap.contains(i)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   private static final class CelebornInputStreamImpl extends CelebornInputStream {
     private static final Random RAND = new Random();
 
@@ -385,22 +413,8 @@ public abstract class CelebornInputStream extends InputStream {
     }
 
     private boolean skipLocation(int startMapIndex, int endMapIndex, PartitionLocation location) {
-      if (!rangeReadFilter) {
-        return false;
-      }
-      if (endMapIndex == Integer.MAX_VALUE) {
-        return false;
-      }
-      RoaringBitmap bitmap = location.getMapIdBitMap();
-      if (bitmap == null && location.hasPeer()) {
-        bitmap = location.getPeer().getMapIdBitMap();
-      }
-      for (int i = startMapIndex; i < endMapIndex; i++) {
-        if (bitmap.contains(i)) {
-          return false;
-        }
-      }
-      return true;
+      return CelebornInputStream.shouldSkipLocation(
+          rangeReadFilter, startMapIndex, endMapIndex, location);
     }
 
     private Tuple2<PartitionLocation, PbStreamHandler> nextReadableLocation() {
@@ -1100,14 +1114,22 @@ public abstract class CelebornInputStream extends InputStream {
         if (exceptionMaker != null) {
           if (shuffleClient.reportShuffleFetchFailure(appShuffleId, shuffleId, taskId)) {
             /*
-             * [[ExceptionMaker.makeException]], for spark applications with celeborn.client.spark.stageRerun.enabled enabled will result in creating
+             * [[ExceptionMaker.makeFetchFailureException]], for spark applications with celeborn.client.spark.stageRerun.enabled enabled will result in creating
              * a FetchFailedException; and that will make the TaskContext as failed with shuffle fetch issues - see SPARK-19276 for more.
              * Given this, Celeborn can wrap the FetchFailedException with our CelebornIOException
              */
+            String workerHost =
+                Optional.ofNullable(currentReader)
+                    .map(
+                        r ->
+                            Optional.ofNullable(r.getLocation())
+                                .map(l -> l.getHost())
+                                .orElse("unknown"))
+                    .orElse("unknown");
             ioe =
                 new CelebornIOException(
                     exceptionMaker.makeFetchFailureException(
-                        appShuffleId, shuffleId, partitionId, e));
+                        appShuffleId, shuffleId, partitionId, workerHost, e));
           }
         }
         throw ioe;
