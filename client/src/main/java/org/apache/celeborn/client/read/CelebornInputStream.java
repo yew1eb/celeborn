@@ -172,6 +172,15 @@ public abstract class CelebornInputStream extends InputStream {
 
   public abstract int partitionsRead();
 
+  /**
+   * Per-stream read stats, or null for the empty-stream placeholder. Consumers use it to record
+   * read-path time spent outside the input stream itself (e.g. deserialization), so those costs are
+   * attributed to the same stream when the stats are reported on close.
+   */
+  public ReadStreamStats streamStats() {
+    return null;
+  }
+
   static boolean shouldSkipLocation(
       boolean rangeReadFilter, int startMapIndex, int endMapIndex, PartitionLocation location) {
     if (!rangeReadFilter || endMapIndex == Integer.MAX_VALUE) {
@@ -415,6 +424,11 @@ public abstract class CelebornInputStream extends InputStream {
     private boolean skipLocation(int startMapIndex, int endMapIndex, PartitionLocation location) {
       return CelebornInputStream.shouldSkipLocation(
           rangeReadFilter, startMapIndex, endMapIndex, location);
+    }
+
+    @Override
+    public ReadStreamStats streamStats() {
+      return streamStats;
     }
 
     private Tuple2<PartitionLocation, PbStreamHandler> nextReadableLocation() {
@@ -778,7 +792,10 @@ public abstract class CelebornInputStream extends InputStream {
         }
 
         int bytesToRead = Math.min(limit - position, len - readBytes);
+        // Time only the in-memory copy: network wait is already counted as chunk wait time.
+        long copyStart = System.nanoTime();
         System.arraycopy(rawDataBuf, position, b, off + readBytes, bytesToRead);
+        streamStats.addCopyTime(System.nanoTime() - copyStart);
         position += bytesToRead;
         readBytes += bytesToRead;
       }

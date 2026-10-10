@@ -17,7 +17,6 @@
 
 package org.apache.spark.shuffle.celeborn
 
-import org.apache.celeborn.common.protocol.message.{PushWorkerStats, ReadMetrics, WorkerReadCost, WriteMetrics}
 import org.apache.spark.{SparkConf, Success, TaskState}
 import org.apache.spark.executor.TaskMetrics
 import org.apache.spark.internal.config.Status.ASYNC_TRACKING_ENABLED
@@ -30,6 +29,8 @@ import org.junit.Assert.{assertEquals, assertFalse, assertTrue}
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.junit.runners.JUnit4
+
+import org.apache.celeborn.common.protocol.message.{PushWorkerStats, ReadMetrics, WorkerReadCost, WriteMetrics}
 
 @RunWith(classOf[JUnit4])
 class CelebornListenerSuite {
@@ -177,10 +178,16 @@ class CelebornListenerSuite {
     val statusStore1 = new CelebornStatusStore(store1)
     val listener1 = new CelebornListener(store1, new SparkConf(), requirePluginOptIn = true)
     listener1.onOtherEvent(CelebornWriteMetricsEvent(
-      0, new WriteMetrics(1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L),
-      java.util.Collections.emptyList[PushWorkerStats](), 1L))
+      0,
+      new WriteMetrics(1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L),
+      java.util.Collections.emptyList[PushWorkerStats](),
+      1L))
     listener1.onOtherEvent(CelebornShuffleAssignmentEvent(
-      0, 100, java.util.Arrays.asList("host1:9097"), 8, 1L))
+      0,
+      100,
+      java.util.Arrays.asList("host1:9097"),
+      8,
+      1L))
     listener1.onOtherEvent(CelebornBuildInfoEvent(Map("Spark Version" -> "3.5")))
     assertEquals(0L, statusStore1.writeTimes().copyTimeMs)
     assertTrue(statusStore1.assignmentInfos().isEmpty)
@@ -189,8 +196,10 @@ class CelebornListenerSuite {
     // After opt-in: the same events are collected.
     listener1.onEnvironmentUpdate(envUpdate("spark.plugins" -> pluginClass))
     listener1.onOtherEvent(CelebornWriteMetricsEvent(
-      0, new WriteMetrics(1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L),
-      java.util.Collections.emptyList[PushWorkerStats](), 1L))
+      0,
+      new WriteMetrics(1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L),
+      java.util.Collections.emptyList[PushWorkerStats](),
+      1L))
     assertEquals(1L, statusStore1.writeTimes().copyTimeMs)
   }
 
@@ -201,7 +210,8 @@ class CelebornListenerSuite {
     val listener = new CelebornListener(store, new SparkConf())
 
     listener.onOtherEvent(CelebornWriteMetricsEvent(
-      0, new WriteMetrics(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 90L, 1000L),
+      0,
+      new WriteMetrics(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 90L, 1000L),
       java.util.Arrays.asList(
         new PushWorkerStats("host1:9097", 10L, 1000L, 2000000L, 1L, 2L, 3L, 4L, ""),
         new PushWorkerStats("host2:9097", 20L, 2000L, 4000000L, 0L, 1L, 0L, 1L, "boom")),
@@ -226,12 +236,15 @@ class CelebornListenerSuite {
     assertEquals(20L, workers("host2:9097"))
     // Merging a second event for the same worker accumulates instead of replacing.
     listener.onOtherEvent(CelebornWriteMetricsEvent(
-      0, new WriteMetrics(1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L),
+      0,
+      new WriteMetrics(1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L),
       java.util.Arrays.asList(new PushWorkerStats("host1:9097", 5L, 0L, 0L, 0L, 0L, 0L, 0L, "")),
       2L))
     listener.flush()
-    assertEquals(15L, statusStore.perWorkerWriteStats().find(_.workerId == "host1:9097")
-      .map(_.pushCount).getOrElse(0L))
+    assertEquals(
+      15L,
+      statusStore.perWorkerWriteStats().find(_.workerId == "host1:9097")
+        .map(_.pushCount).getOrElse(0L))
   }
 
   @Test
@@ -276,7 +289,11 @@ class CelebornListenerSuite {
 
     (1 to 4).foreach { i =>
       listener.onOtherEvent(CelebornShuffleAssignmentEvent(
-        i, 100 + i, java.util.Arrays.asList(s"host$i:9097"), 8, i.toLong))
+        i,
+        100 + i,
+        java.util.Arrays.asList(s"host$i:9097"),
+        8,
+        i.toLong))
     }
     // The addTrigger evicts the oldest rows (smallest appShuffleId) once the count
     // exceeds the retained threshold of 2.
@@ -301,17 +318,25 @@ class CelebornListenerSuite {
     listener.onEnvironmentUpdate(envUpdate("spark.plugins" -> pluginClass))
     listener.onOtherEvent(CelebornBuildInfoEvent(Map("Spark Version" -> "3.5.8")))
     listener.onOtherEvent(CelebornShuffleAssignmentEvent(
-      0, 100, java.util.Arrays.asList("host1:9097", "host2:9097"), 16, 1L))
+      0,
+      100,
+      java.util.Arrays.asList("host1:9097", "host2:9097"),
+      16,
+      1L))
     listener.onOtherEvent(CelebornFallbackEvent(
-      java.util.Collections.singletonMap("pushTimeout", 2L: java.lang.Long), 1L))
+      java.util.Collections.singletonMap("pushTimeout", 2L: java.lang.Long),
+      1L))
     listener.onOtherEvent(CelebornReassignEvent(partitionSplit = true, false, false, 1L))
     listener.onOtherEvent(CelebornWriteMetricsEvent(
-      0, new WriteMetrics(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L, 10L),
+      0,
+      new WriteMetrics(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L, 10L),
       java.util.Arrays.asList(new PushWorkerStats("host1:9097", 1L, 10L, 100L, 0L, 0L, 0L, 0L, "")),
       1L))
     listener.onOtherEvent(CelebornReadMetricsEvent(
-      0, new ReadMetrics(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L, 10L),
-      java.util.Arrays.asList(new WorkerReadCost("host1:9097", 1L, 10L, 100L, 100L)), 1L))
+      0,
+      new ReadMetrics(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L, 10L),
+      java.util.Arrays.asList(new WorkerReadCost("host1:9097", 1L, 10L, 100L, 100L)),
+      1L))
     listener.onTaskEnd(newTaskEnd(100L, 10L, 1L, 5L))
     listener.onApplicationEnd(SparkListenerApplicationEnd(1L))
 

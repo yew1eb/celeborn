@@ -31,7 +31,7 @@ import org.apache.commons.lang3.tuple.Pair
 import org.apache.spark.{Aggregator, InterruptibleIterator, ShuffleDependency, TaskContext}
 import org.apache.spark.celeborn.ExceptionMakerHelper
 import org.apache.spark.internal.Logging
-import org.apache.spark.serializer.SerializerInstance
+import org.apache.spark.serializer.{DeserializationStream, SerializerInstance}
 import org.apache.spark.shuffle.{FetchFailedException, ShuffleReader, ShuffleReadMetricsReporter}
 import org.apache.spark.shuffle.celeborn.CelebornShuffleReader.streamCreatorPool
 import org.apache.spark.util.CompletionIterator
@@ -39,7 +39,7 @@ import org.apache.spark.util.collection.ExternalSorter
 
 import org.apache.celeborn.client.{ClientUtils, ShuffleClient}
 import org.apache.celeborn.client.ShuffleClientImpl.ReduceFileGroups
-import org.apache.celeborn.client.read.{CelebornInputStream, MetricsCallback}
+import org.apache.celeborn.client.read.{CelebornInputStream, MetricsCallback, ReadStreamStats}
 import org.apache.celeborn.client.security.CryptoHandler
 import org.apache.celeborn.common.CelebornConf
 import org.apache.celeborn.common.exception.{CelebornBroadcastException, CelebornIOException, CelebornRuntimeException, PartitionUnRetryAbleException}
@@ -517,7 +517,11 @@ class CelebornShuffleReader[K, C](
     }).filter {
       case (_, inputStream) => inputStream != CelebornInputStream.empty()
     }.map { case (partitionId, inputStream) =>
-      (partitionId, serializerInstance.deserializeStream(inputStream).asKeyValueIterator)
+      val rawStream = serializerInstance.deserializeStream(inputStream)
+      val stats = inputStream.streamStats()
+      val timedStream =
+        if (stats != null) new TimedDeserializationStream(rawStream, stats) else rawStream
+      (partitionId, timedStream.asKeyValueIterator)
     }.flatMap { case (partitionId, iter) =>
       try {
         iter
@@ -642,6 +646,27 @@ class CelebornShuffleReader[K, C](
 
   def newSerializerInstance(dep: ShuffleDependency[K, _, C]): SerializerInstance = {
     dep.serializer.newInstance()
+  }
+
+  /**
+   * Deserialization happens lazily while the key/value iterator is consumed, so timing only
+   * the `deserializeStream` construction would report ~0. Wrap the stream and time each
+   * `readObject` call (`readKey`/`readValue` delegate to it), attributing the cost to the
+   * stream's ReadStreamStats so it is reported when the stream closes.
+   */
+  private class TimedDeserializationStream(
+      delegate: DeserializationStream,
+      stats: ReadStreamStats)
+    extends DeserializationStream {
+
+    override def readObject[T]()(implicit ct: scala.reflect.ClassTag[T]): T = {
+      val start = System.nanoTime()
+      val result = delegate.readObject[T]()
+      stats.addDeserializeTime(System.nanoTime() - start)
+      result
+    }
+
+    override def close(): Unit = delegate.close()
   }
 }
 
