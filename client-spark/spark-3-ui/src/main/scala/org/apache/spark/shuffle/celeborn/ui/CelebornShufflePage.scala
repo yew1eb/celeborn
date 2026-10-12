@@ -21,22 +21,27 @@ import scala.collection.JavaConverters._
 import scala.xml.Node
 
 import org.apache.spark.internal.Logging
+import org.apache.spark.shuffle.celeborn.CelebornStatusStore
 import org.apache.spark.shuffle.celeborn.ui.SparkServletBridge.HttpServletRequest
 import org.apache.spark.ui.{UIUtils, WebUIPage}
 import org.apache.spark.util.Utils
 
 /**
  * Page rendered under the Celeborn tab. Uses [[SparkServletBridge]] to bridge the
- *  javax.servlet (Spark 3.x) / jakarta.servlet (Spark 4.x) parameter type.
+ *  javax.servlet (Spark 3.x) / jakarta.servlet (Spark 4.x) parameter type. The content
+ *  sections are built by the companion object's buildContent so they can be unit-tested
+ *  against an in-memory store without a live SparkUI or servlet request.
  */
 private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
   extends WebUIPage("") with Logging {
 
-  private val statusStore = parent.store
-
   override def render(request: HttpServletRequest): Seq[Node] = {
     try {
-      renderBody(request)
+      UIUtils.headerSparkPage(
+        request,
+        "Celeborn Shuffle Service",
+        CelebornShufflePage.buildContent(parent.store),
+        parent)
     } catch {
       case e: Throwable =>
         logError("Failed to render Celeborn Shuffle page", e)
@@ -54,8 +59,12 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
         UIUtils.headerSparkPage(request, "Celeborn Shuffle Service", errorContent, parent)
     }
   }
+}
 
-  private def renderBody(request: HttpServletRequest): Seq[Node] = {
+private[celeborn] object CelebornShufflePage {
+
+  /** Renders everything below the Spark UI header: stat cards, summary, sections. */
+  def buildContent(statusStore: CelebornStatusStore): Seq[Node] = {
     val assignments = statusStore.assignmentInfos()
     val properties = statusStore.celebornProperties()
     val reassign = statusStore.reassignStats()
@@ -442,7 +451,7 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
         {collapsible("fallback", "Shuffle Fallback", fallbackTable)}
       </div>
 
-    UIUtils.headerSparkPage(request, "Celeborn Shuffle Service", content, parent)
+    content
   }
 
   /** A summary stat tile, mirroring Uniffle's dashboard headline cards (no external CSS). */

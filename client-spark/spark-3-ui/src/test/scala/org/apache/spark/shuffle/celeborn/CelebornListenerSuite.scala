@@ -278,6 +278,58 @@ class CelebornListenerSuite {
   }
 
   @Test
+  def readMetricsEventAggregatedPerShuffle(): Unit = {
+    val store = new InMemoryStore()
+    val statusStore = new CelebornStatusStore(store)
+    val listener = new CelebornListener(store, new SparkConf())
+
+    // Two events for shuffle 0 (accumulate) and one for shuffle 1. ReadMetrics field order:
+    // decompressTimeMs, chunkWaitTimeMs, deserializeTimeMs, copyTimeMs, ...
+    listener.onOtherEvent(CelebornReadMetricsEvent(
+      0,
+      new ReadMetrics(1L, 2L, 3L, 4L, 0L, 0L, 0L, 0L, 0L, 0L),
+      java.util.Arrays.asList(new WorkerReadCost("host1:9097", 10L, 1000L, 100L, 100L)),
+      1L))
+    listener.onOtherEvent(CelebornReadMetricsEvent(
+      1,
+      new ReadMetrics(5L, 6L, 7L, 8L, 0L, 0L, 0L, 0L, 0L, 0L),
+      java.util.Arrays.asList(new WorkerReadCost("host2:9097", 20L, 2000L, 100L, 100L)),
+      2L))
+    listener.onOtherEvent(CelebornReadMetricsEvent(
+      0,
+      new ReadMetrics(11L, 12L, 13L, 14L, 0L, 0L, 0L, 0L, 0L, 0L),
+      java.util.Arrays.asList(new WorkerReadCost("host1:9097", 5L, 500L, 100L, 100L)),
+      3L))
+    listener.flush()
+
+    val metrics = statusStore.aggregatedReadMetrics().metrics
+    assertEquals(2, metrics.size())
+    val shuffle0 = metrics.get(0)
+    assertEquals(1500L, shuffle0.bytesRead)
+    assertEquals(15L, shuffle0.chunkCount)
+    // fetchTimeMs sums chunk wait + decompress + deserialize + copy across both events.
+    assertEquals((1 + 2 + 3 + 4) + (11 + 12 + 13 + 14), shuffle0.fetchTimeMs)
+    val shuffle1 = metrics.get(1)
+    assertEquals(2000L, shuffle1.bytesRead)
+    assertEquals(20L, shuffle1.chunkCount)
+    assertEquals(5 + 6 + 7 + 8, shuffle1.fetchTimeMs)
+  }
+
+  @Test
+  def aggregatedReadMetricsEmptyWhenNoReadEvents(): Unit = {
+    val store = new InMemoryStore()
+    val statusStore = new CelebornStatusStore(store)
+    // Reading before any flush must not throw and must return an empty map (the page
+    // renders before the first flush on a live application).
+    assertTrue(statusStore.aggregatedReadMetrics().metrics.isEmpty)
+
+    val listener = new CelebornListener(store, new SparkConf())
+    listener.onTaskEnd(newTaskEnd(100L, 10L, 1L, 5L))
+    listener.flush()
+    assertTrue(statusStore.aggregatedReadMetrics().metrics.isEmpty)
+  }
+
+  @Test
   def retainedShufflesEvictsOldestAssignments(): Unit = {
     val conf = new SparkConf()
       .set(ASYNC_TRACKING_ENABLED, false)
@@ -350,6 +402,10 @@ class CelebornListenerSuite {
     assertEquals(2L, statusStore.writeTimes().serializeTimeMs)
     assertEquals(3L, statusStore.readTimes().deserializeTimeMs)
     assertEquals(100L, statusStore.aggregatedTaskInfo().shuffleWriteBytes)
+    // The replayed read event rebuilds the per-shuffle read aggregation as well.
+    assertEquals(10L, statusStore.aggregatedReadMetrics().metrics.get(0).bytesRead)
+    assertEquals(1L, statusStore.aggregatedReadMetrics().metrics.get(0).chunkCount)
+    assertEquals(10L, statusStore.aggregatedReadMetrics().metrics.get(0).fetchTimeMs)
     tracking.close(false)
   }
 }
