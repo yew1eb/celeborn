@@ -64,6 +64,11 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
     val perWorkerStats = statusStore.perWorkerWriteStats()
     val readTimes = statusStore.readTimes()
     val perWorkerReadStats = statusStore.perWorkerReadStats()
+    // Entities persisted by the listener but rendered only by the enhanced page:
+    // build/version info, per-policy fallback counts and per-shuffle write metrics.
+    val buildInfo = statusStore.buildInfo()
+    val fallback = statusStore.fallbackStats()
+    val perShuffleWrite = statusStore.aggregatedWriteMetrics()
 
     // --- Summary derived from onTaskEnd TaskMetrics (plan A: no executor->driver metric RPC) ---
     val writeBytes = taskInfo.shuffleWriteBytes
@@ -97,7 +102,13 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
           <li>Shuffle Adjustments: partitionSplit={reassign.partitionSplit},
             reviveTriggered={reassign.reviveTriggered}, stageRetry={reassign.stageRetry}</li>
           <li>
+            <a href="#build-info">Celeborn Build Information</a>
+          </li>
+          <li>
             <a href="#properties">Celeborn Properties</a> ({properties.info.length} entries)
+          </li>
+          <li>
+            <a href="#per-shuffle">Per-Shuffle Metrics</a> ({perShuffleWrite.metrics.size} shuffles)
           </li>
           <li>
             <a href="#throughput">Shuffle Throughput</a>
@@ -117,8 +128,80 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
           <li>
             <a href="#assignments">Shuffle Assignments</a> ({assignments.length} shuffles)
           </li>
+          <li>
+            <a href="#fallback">Shuffle Fallback</a> ({fallback.counts.size} policies)
+          </li>
         </ul>
       </div>
+
+    // Build info uses the same two-column listing as the properties section; both are
+    // Seq[(String, String)] key/value summaries written once at startup.
+    val buildInfoTable = UIUtils.listingTable(
+      propertyHeader,
+      propertyRow,
+      buildInfo.info,
+      fixedWidth = true)
+
+    // Fallback counts are a policy -> count snapshot; sorted by policy name for a
+    // stable display. An empty map still renders the section (with a placeholder row)
+    // so the anchor stays valid.
+    val fallbackRows = fallback.counts.asScala.toSeq.sortBy(_._1).map { case (policy, count) =>
+      <tr>
+        <td>{policy}</td>
+        <td>{count.toString}</td>
+      </tr>
+    }
+    val fallbackTable =
+      <table class="table table-bordered table-striped table-sm">
+        <thead>
+          <tr>
+            <th>Fallback Policy</th>
+            <th>Count</th>
+          </tr>
+        </thead>
+        <tbody>
+          {
+        if (fallbackRows.isEmpty) {
+          <tr>
+            <td>No fallback recorded.</td>
+            <td></td>
+          </tr>
+        } else {
+          fallbackRows
+        }
+      }
+        </tbody>
+      </table>
+
+    // Per-shuffle write metrics joined with nothing yet (read side arrives in a later
+    // stage); derived columns are pure client-side math over the stored aggregates.
+    val perShuffleWriteRows = perShuffleWrite.metrics.asScala.toSeq.sortBy(_._1).map {
+      case (shuffleId, m) =>
+        <tr>
+          <td>{shuffleId}</td>
+          <td>{Utils.bytesToString(m.bytesWritten)}</td>
+          <td>{m.recordsWritten}</td>
+          <td>{Utils.msDurationToString(m.writeTimeMs)}</td>
+          <td>{pct(m.bytesWritten, writeBytes)}</td>
+          <td>{mbps(m.bytesWritten, m.writeTimeMs)}</td>
+        </tr>
+    }
+    val perShuffleWriteTable =
+      <table class="table table-bordered table-striped table-sm">
+        <thead>
+          <tr>
+            <th>Shuffle Id</th>
+            <th>Write Bytes</th>
+            <th>Records</th>
+            <th>Write Time</th>
+            <th>% of Total Write</th>
+            <th>Write Speed (MB/s)</th>
+          </tr>
+        </thead>
+        <tbody>
+          {perShuffleWriteRows}
+        </tbody>
+      </table>
 
     val propertiesTable = UIUtils.listingTable(
       propertyHeader,
@@ -176,29 +259,20 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
         </tbody>
       </table>
 
-    val writeTimesFields = Seq(
-      "Serialize" -> Utils.msDurationToString(writeTimes.serializeTimeMs),
-      "Copy" -> Utils.msDurationToString(writeTimes.copyTimeMs),
-      "Queue Wait" -> Utils.msDurationToString(writeTimes.queueWaitTimeMs),
-      "Background Compress" -> Utils.msDurationToString(writeTimes.compressTimeMs),
-      "Background Queue Stall" -> Utils.msDurationToString(writeTimes.queueStallTimeMs),
-      "Background Inflight Wait" -> Utils.msDurationToString(writeTimes.inflightWaitTimeMs),
-      "Drain Wait" -> Utils.msDurationToString(writeTimes.drainWaitTimeMs),
-      "Max Push RTT" -> Utils.msDurationToString(writeTimes.maxPushRttMs),
-      "Slow Push" -> writeTimes.slowPushCount.toString)
-    val writeTimesTable =
-      <table class="table table-bordered table-striped table-sm">
-        <thead>
-          <tr>
-            <th></th>{writeTimesFields.map { case (n, _) => <th>{n}</th> }}
-          </tr>
-        </thead>
-        <tbody>
-          <tr>
-            <th>Duration</th>{writeTimesFields.map { case (_, d) => <td>{d}</td> }}
-          </tr>
-        </tbody>
-      </table>
+    // Vertical Metric | Duration | Count layout so timing breakdowns and occurrence
+    // counts stay in separate columns instead of a single mixed "Duration" row
+    // (mirrors Uniffle's per-metric rows).
+    val writeTimesRows = Seq(
+      ("Serialize", Utils.msDurationToString(writeTimes.serializeTimeMs), "–"),
+      ("Copy", Utils.msDurationToString(writeTimes.copyTimeMs), "–"),
+      ("Queue Wait", Utils.msDurationToString(writeTimes.queueWaitTimeMs), "–"),
+      ("Background Compress", Utils.msDurationToString(writeTimes.compressTimeMs), "–"),
+      ("Background Queue Stall", Utils.msDurationToString(writeTimes.queueStallTimeMs), "–"),
+      ("Background Inflight Wait", Utils.msDurationToString(writeTimes.inflightWaitTimeMs), "–"),
+      ("Drain Wait", Utils.msDurationToString(writeTimes.drainWaitTimeMs), "–"),
+      ("Max Push RTT", Utils.msDurationToString(writeTimes.maxPushRttMs), "–"),
+      ("Slow Push", "–", writeTimes.slowPushCount.toString))
+    val writeTimesTable = timesTable(writeTimesRows)
 
     val perWorkerRows = perWorkerStats.map { s =>
       <tr>
@@ -236,27 +310,20 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
         </tbody>
       </table>
 
-    val readTimesFields = Seq(
-      "Chunk Wait" -> Utils.msDurationToString(readTimes.chunkWaitTimeMs),
-      "Decompress" -> Utils.msDurationToString(readTimes.decompressTimeMs),
-      "Deserialize" -> Utils.msDurationToString(readTimes.deserializeTimeMs),
-      "Copy" -> Utils.msDurationToString(readTimes.copyTimeMs),
-      "Retry Wait" -> Utils.msDurationToString(readTimes.retryWaitTimeMs),
-      "Max Chunk RTT" -> Utils.msDurationToString(readTimes.maxChunkRttMs),
-      "Slow Chunk" -> readTimes.slowChunkCount.toString)
-    val readTimesTable =
-      <table class="table table-bordered table-striped table-sm">
-        <thead>
-          <tr>
-            <th></th>{readTimesFields.map { case (n, _) => <th>{n}</th> }}
-          </tr>
-        </thead>
-        <tbody>
-          <tr>
-            <th>Duration</th>{readTimesFields.map { case (_, d) => <td>{d}</td> }}
-          </tr>
-        </tbody>
-      </table>
+    // All 10 read-side fields, including retry/peer-switch/exclude counts that the
+    // previous single-row layout dropped.
+    val readTimesRows = Seq(
+      ("Chunk Wait", Utils.msDurationToString(readTimes.chunkWaitTimeMs), "–"),
+      ("Decompress", Utils.msDurationToString(readTimes.decompressTimeMs), "–"),
+      ("Deserialize", Utils.msDurationToString(readTimes.deserializeTimeMs), "–"),
+      ("Copy", Utils.msDurationToString(readTimes.copyTimeMs), "–"),
+      ("Retry Wait", Utils.msDurationToString(readTimes.retryWaitTimeMs),
+        s"retries: ${readTimes.retryCount}"),
+      ("Peer Switch", "–", readTimes.peerSwitchCount.toString),
+      ("Exclude", "–", readTimes.excludeCount.toString),
+      ("Max Chunk RTT", Utils.msDurationToString(readTimes.maxChunkRttMs), "–"),
+      ("Slow Chunk", "–", readTimes.slowChunkCount.toString))
+    val readTimesTable = timesTable(readTimesRows)
 
     val perWorkerReadRows = perWorkerReadStats.map { s =>
       <tr>
@@ -305,8 +372,12 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
           }
         """)
       }</script>
+        <a name="build-info"></a>
+        {collapsible("build-info", "Celeborn Build Information", buildInfoTable)}
         <a name="properties"></a>
         {collapsible("celeborn-properties", "Celeborn Properties", propertiesTable)}
+        <a name="per-shuffle"></a>
+        {collapsible("per-shuffle", "Per-Shuffle Metrics", perShuffleWriteTable)}
         <a name="throughput"></a>
         {collapsible("throughput", "Shuffle Throughput", throughputTable)}
         <a name="write-times"></a>
@@ -319,9 +390,34 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
         {collapsible("shuffle-read-servers", "Shuffle Read Servers", perWorkerReadTable)}
         <a name="assignments"></a>
         {collapsible("assignments", "Shuffle Assignments", assignmentTable)}
+        <a name="fallback"></a>
+        {collapsible("fallback", "Shuffle Fallback", fallbackTable)}
       </div>
 
     UIUtils.headerSparkPage(request, "Celeborn Shuffle Service", content, parent)
+  }
+
+  /** A vertical Metric | Duration | Count table for the write/read timing breakdowns. */
+  private def timesTable(rows: Seq[(String, String, String)]): Seq[Node] = {
+    val rowXml = rows.map { case (name, duration, count) =>
+      <tr>
+        <td>{name}</td>
+        <td>{duration}</td>
+        <td>{count}</td>
+      </tr>
+    }
+    <table class="table table-bordered table-striped table-sm">
+      <thead>
+        <tr>
+          <th>Metric</th>
+          <th>Duration</th>
+          <th>Count</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rowXml}
+      </tbody>
+    </table>
   }
 
   /** A collapsible section (default collapsed), mirroring Uniffle's collapse-table pattern. */
