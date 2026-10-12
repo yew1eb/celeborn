@@ -69,6 +69,7 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
     val buildInfo = statusStore.buildInfo()
     val fallback = statusStore.fallbackStats()
     val perShuffleWrite = statusStore.aggregatedWriteMetrics()
+    val perShuffleRead = statusStore.aggregatedReadMetrics()
 
     // --- Summary derived from onTaskEnd TaskMetrics (plan A: no executor->driver metric RPC) ---
     val writeBytes = taskInfo.shuffleWriteBytes
@@ -80,18 +81,26 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
       if (ms <= 0) "N/A" else f"${bytes.toDouble / 1000.0 / 1000.0 / (ms.toDouble / 1000.0)}%.2f"
     def pct(part: Long, total: Long): String =
       if (total <= 0) "N/A" else f"${part.toDouble * 100.0 / total.toDouble}%.1f%%"
+    val compressionRatio: String =
+      if (writeBytes > 0) f"${writeTimes.uncompressedBytes.toDouble / writeBytes.toDouble}%.2f"
+      else "N/A"
+
+    // Per-shuffle join: assignments (primary side) outer-joined with the write and read
+    // metric maps on the shuffle id. Assignments can be evicted by retainedShuffles while
+    // the metric aggregations (keyed by shuffleId, not row-capped) are still present, so
+    // metric-only ids are kept as rows with default columns instead of being dropped.
+    val writeMetrics = perShuffleWrite.metrics.asScala
+    val readMetrics = perShuffleRead.metrics.asScala
+    val assignmentIds = assignments.map(_.appShuffleId).toSet
+    val perShuffleIds =
+      (assignmentIds ++ (writeMetrics.keySet ++ readMetrics.keySet)).toSeq.sorted
 
     val summary: Seq[Node] =
       <div>
         <ul class="list-unstyled">
           <li>Total Shuffle Write Bytes: {Utils.bytesToString(writeBytes)}</li>
           <li>Total Shuffle Read Bytes: {Utils.bytesToString(readBytes)}</li>
-          <li>Compression Ratio:
-            {
-        if (writeBytes > 0)
-          f"${writeTimes.uncompressedBytes.toDouble / writeBytes.toDouble}%.2f"
-        else "N/A"
-      }
+          <li>Compression Ratio: {compressionRatio}
             (uncompressed {Utils.bytesToString(writeTimes.uncompressedBytes)}
             / compressed {Utils.bytesToString(writeBytes)})</li>
           <li>Client Observed Write Speed: {mbps(writeBytes, writeMs)} MB/s</li>
@@ -108,7 +117,7 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
             <a href="#properties">Celeborn Properties</a> ({properties.info.length} entries)
           </li>
           <li>
-            <a href="#per-shuffle">Per-Shuffle Metrics</a> ({perShuffleWrite.metrics.size} shuffles)
+            <a href="#per-shuffle">Per-Shuffle Details</a> ({perShuffleIds.size} shuffles)
           </li>
           <li>
             <a href="#throughput">Shuffle Throughput</a>
@@ -132,6 +141,26 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
             <a href="#fallback">Shuffle Fallback</a> ({fallback.counts.size} policies)
           </li>
         </ul>
+      </div>
+
+    // Uniffle-style summary cards: headline numbers rendered as tiles above the detail
+    // sections. Only Spark UI's own grid classes are used (row-fluid/span2, valid through
+    // Spark 3.5); on Spark 4.x (Bootstrap 5) the unknown classes degrade to a vertical
+    // stack, which stays readable without shipping any extra CSS/JS.
+    val workerCount =
+      (perWorkerStats.map(_.workerId) ++ perWorkerReadStats.map(_.workerId)).toSet.size
+    val fallbackShuffleTotal = fallback.counts.asScala.values.map(_.toLong).sum
+    val summaryCards: Seq[Node] =
+      <div class="row-fluid">
+        {Seq(
+          ("Shuffles", perShuffleIds.size.toString),
+          ("Workers", workerCount.toString),
+          ("Total Write Bytes", Utils.bytesToString(writeBytes)),
+          ("Total Read Bytes", Utils.bytesToString(readBytes)),
+          ("Compression Ratio", compressionRatio),
+          ("Fallback Shuffles", fallbackShuffleTotal.toString)).map { case (label, value) =>
+          statTile(label, value)
+        }}
       </div>
 
     // Build info uses the same two-column listing as the properties section; both are
@@ -173,33 +202,46 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
         </tbody>
       </table>
 
-    // Per-shuffle write metrics joined with nothing yet (read side arrives in a later
-    // stage); derived columns are pure client-side math over the stored aggregates.
-    val perShuffleWriteRows = perShuffleWrite.metrics.asScala.toSeq.sortBy(_._1).map {
-      case (shuffleId, m) =>
-        <tr>
-          <td>{shuffleId}</td>
-          <td>{Utils.bytesToString(m.bytesWritten)}</td>
-          <td>{m.recordsWritten}</td>
-          <td>{Utils.msDurationToString(m.writeTimeMs)}</td>
-          <td>{pct(m.bytesWritten, writeBytes)}</td>
-          <td>{mbps(m.bytesWritten, m.writeTimeMs)}</td>
-        </tr>
+    // Per-Shuffle Details: assignments outer-joined with per-shuffle write and read metrics,
+    // with client-side derived columns (% of total write, write/read speed) in the style of
+    // Uniffle's per-application table. Rows are sorted by shuffle id (default ordering).
+    val perShuffleRows = perShuffleIds.map { shuffleId =>
+      val assignment = assignments.find(_.appShuffleId == shuffleId)
+      val w = writeMetrics.get(shuffleId)
+      val r = readMetrics.get(shuffleId)
+      <tr>
+        <td>{shuffleId}</td>
+        <td>{assignment.fold("N/A")(_.celebornShuffleId.toString)}</td>
+        <td>{assignment.fold("N/A")(_.numPartitions.toString)}</td>
+        <td>{assignment.fold("N/A")(_.workers.asScala.size.toString)}</td>
+        <td>{w.fold("N/A")(m => Utils.bytesToString(m.bytesWritten))}</td>
+        <td>{w.fold("N/A")(m => pct(m.bytesWritten, writeBytes))}</td>
+        <td>{w.fold("N/A")(m => mbps(m.bytesWritten, m.writeTimeMs))}</td>
+        <td>{w.fold("N/A")(_.recordsWritten.toString)}</td>
+        <td>{w.fold("N/A")(m => Utils.msDurationToString(m.writeTimeMs))}</td>
+        <td>{r.fold("N/A")(m => Utils.bytesToString(m.bytesRead))}</td>
+        <td>{r.fold("N/A")(m => mbps(m.bytesRead, m.fetchTimeMs))}</td>
+      </tr>
     }
-    val perShuffleWriteTable =
+    val perShuffleTable =
       <table class="table table-bordered table-striped table-sm">
         <thead>
           <tr>
-            <th>Shuffle Id</th>
+            <th>App Shuffle Id</th>
+            <th>Celeborn Shuffle Id</th>
+            <th>Partitions</th>
+            <th>Workers Count</th>
             <th>Write Bytes</th>
-            <th>Records</th>
-            <th>Write Time</th>
             <th>% of Total Write</th>
             <th>Write Speed (MB/s)</th>
+            <th>Records</th>
+            <th>Write Time</th>
+            <th>Read Bytes</th>
+            <th>Read Speed (MB/s)</th>
           </tr>
         </thead>
         <tbody>
-          {perShuffleWriteRows}
+          {perShuffleRows}
         </tbody>
       </table>
 
@@ -215,7 +257,7 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
         <td>{a.celebornShuffleId}</td>
         <td>{a.workers.asScala.mkString(", ")}</td>
         <td>{a.numPartitions}</td>
-        <td>{new java.util.Date(a.timestamp).toString}</td>
+        <td>{UIUtils.formatDate(new java.util.Date(a.timestamp))}</td>
       </tr>
     }
     val assignmentTable =
@@ -274,20 +316,23 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
       ("Slow Push", "–", writeTimes.slowPushCount.toString))
     val writeTimesTable = timesTable(writeTimesRows)
 
-    val perWorkerRows = perWorkerStats.map { s =>
+    // Sorted by push bytes (descending) so the busiest workers surface first, mirroring
+    // Uniffle's sortable node list with a server-side default ordering.
+    val perWorkerRows = perWorkerStats.sortBy(-_.pushBytes).map { s =>
+      val totalPushRttMs = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(s.totalPushRttNanos)
+      val avgPushRttMs =
+        if (s.pushCount > 0) f"${totalPushRttMs.toDouble / s.pushCount}%.2f" else "N/A"
       <tr>
         <td>{s.workerId}</td>
         <td>{Utils.bytesToString(s.pushBytes)}</td>
         <td>{s.pushCount}</td>
-        <td>{
-        Utils.msDurationToString(
-          java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(s.totalPushRttNanos))
-      }</td>
+        <td>{Utils.msDurationToString(totalPushRttMs)}</td>
+        <td>{avgPushRttMs}</td>
         <td>{s.softSplitCount}</td>
         <td>{s.hardSplitCount}</td>
         <td>{s.primaryCongestedCount}</td>
         <td>{s.replicaCongestedCount}</td>
-        <td>{s.lastPushFailureReason}</td>
+        <td>{Option(s.lastPushFailureReason).getOrElse("")}</td>
       </tr>
     }
     val perWorkerTable =
@@ -298,6 +343,7 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
             <th>Push Bytes</th>
             <th>Push Count</th>
             <th>Total Push RTT</th>
+            <th>Avg Push RTT (ms)</th>
             <th>Soft Split</th>
             <th>Hard Split</th>
             <th>Primary Congested</th>
@@ -325,19 +371,19 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
       ("Slow Chunk", "–", readTimes.slowChunkCount.toString))
     val readTimesTable = timesTable(readTimesRows)
 
-    val perWorkerReadRows = perWorkerReadStats.map { s =>
+    // Sorted by read bytes (descending), same default-ordering rationale as the write table.
+    val perWorkerReadRows = perWorkerReadStats.sortBy(-_.bytes).map { s =>
+      val totalRttMs = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(s.totalRttNanos)
+      val maxRttMs = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(s.maxRttNanos)
+      val avgRttMs =
+        if (s.chunkCount > 0) f"${totalRttMs.toDouble / s.chunkCount}%.2f" else "N/A"
       <tr>
         <td>{s.workerId}</td>
         <td>{s.chunkCount}</td>
         <td>{Utils.bytesToString(s.bytes)}</td>
-        <td>{
-        Utils.msDurationToString(
-          java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(s.totalRttNanos))
-      }</td>
-        <td>{
-        Utils.msDurationToString(
-          java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(s.maxRttNanos))
-      }</td>
+        <td>{Utils.msDurationToString(totalRttMs)}</td>
+        <td>{avgRttMs}</td>
+        <td>{Utils.msDurationToString(maxRttMs)}</td>
       </tr>
     }
     val perWorkerReadTable =
@@ -348,6 +394,7 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
             <th>Chunk Count</th>
             <th>Read Bytes</th>
             <th>Total RTT</th>
+            <th>Avg RTT (ms)</th>
             <th>Max RTT</th>
           </tr>
         </thead>
@@ -358,6 +405,7 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
 
     val content: Seq[Node] =
       <div>
+        {summaryCards}
         <span>{summary}</span>
         <script type="text/javascript">{
         scala.xml.Unparsed("""
@@ -377,7 +425,7 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
         <a name="properties"></a>
         {collapsible("celeborn-properties", "Celeborn Properties", propertiesTable)}
         <a name="per-shuffle"></a>
-        {collapsible("per-shuffle", "Per-Shuffle Metrics", perShuffleWriteTable)}
+        {collapsible("per-shuffle", "Per-Shuffle Details", perShuffleTable)}
         <a name="throughput"></a>
         {collapsible("throughput", "Shuffle Throughput", throughputTable)}
         <a name="write-times"></a>
@@ -396,6 +444,13 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
 
     UIUtils.headerSparkPage(request, "Celeborn Shuffle Service", content, parent)
   }
+
+  /** A summary stat tile, mirroring Uniffle's dashboard headline cards (no external CSS). */
+  private def statTile(label: String, value: String): Node =
+    <div class="span2">
+      <h5>{label}</h5>
+      <div><strong>{value}</strong></div>
+    </div>
 
   /** A vertical Metric | Duration | Count table for the write/read timing breakdowns. */
   private def timesTable(rows: Seq[(String, String, String)]): Seq[Node] = {
