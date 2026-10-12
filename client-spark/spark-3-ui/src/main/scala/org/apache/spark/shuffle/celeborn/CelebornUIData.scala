@@ -85,6 +85,27 @@ private[celeborn] class AggregatedShuffleWriteMetric(
   def this() = this(0L, 0L, 0L)
 }
 
+/** Per-shuffle read metrics aggregated from CelebornReadMetricsEvent. Keyed by shuffleId. */
+private[celeborn] class CelebornAggregatedReadMetricsUIData(
+    val metrics: java.util.Map[Int, AggregatedShuffleReadMetric]) {
+  @JsonIgnore
+  @KVIndex
+  def id: String = classOf[CelebornAggregatedReadMetricsUIData].getName
+}
+
+/**
+ * Per-shuffle read metrics: bytes/chunks come from the event's WorkerReadCost entries,
+ *  fetchTimeMs sums the read-path timing breakdown (chunk wait + decompress +
+ *  deserialize + copy). Mutable fields updated by the single status-queue thread;
+ *  serialized as a snapshot. Mirrors [[AggregatedShuffleWriteMetric]].
+ */
+private[celeborn] class AggregatedShuffleReadMetric(
+    var bytesRead: Long,
+    var chunkCount: Long,
+    var fetchTimeMs: Long) {
+  def this() = this(0L, 0L, 0L)
+}
+
 /**
  * Aggregated write-path timing breakdown (ms) across all tasks, mirroring Uniffle's
  *  ShuffleWriteTimes. Singleton, overwritten on each CelebornWriteMetricsEvent.

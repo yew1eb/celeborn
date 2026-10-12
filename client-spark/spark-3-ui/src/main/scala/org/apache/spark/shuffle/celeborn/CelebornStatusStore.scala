@@ -165,6 +165,19 @@ private[celeborn] class CelebornStatusStore(store: KVStore) {
     }
   }
 
+  /** Per-shuffle read metrics snapshot, or empty if none recorded. */
+  def aggregatedReadMetrics(): CelebornAggregatedReadMetricsUIData = {
+    val kClass = classOf[CelebornAggregatedReadMetricsUIData]
+    try {
+      store.read(kClass, kClass.getName)
+    } catch {
+      case _: NoSuchElementException =>
+        new CelebornAggregatedReadMetricsUIData(new java.util.HashMap[
+          Int,
+          AggregatedShuffleReadMetric]())
+    }
+  }
+
   private def viewToSeq[T](view: KVStoreView[T]): Seq[T] = {
     import scala.collection.JavaConverters._
     org.apache.spark.util.Utils.tryWithResource(view.closeableIterator())(iter =>

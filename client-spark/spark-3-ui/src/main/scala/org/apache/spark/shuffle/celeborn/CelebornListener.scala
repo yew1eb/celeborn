@@ -63,6 +63,10 @@ private[celeborn] class CelebornListener(
   // Per-shuffle write aggregation (key = shuffleDepId, only ShuffleMapStage has one).
   private val perShuffleWrite =
     new java.util.concurrent.ConcurrentHashMap[Int, AggregatedShuffleWriteMetric]
+  // Per-shuffle read aggregation (key = shuffleId from CelebornReadMetricsEvent), so the
+  // read side can be joined with perShuffleWrite on the per-shuffle UI table.
+  private val perShuffleRead =
+    new java.util.concurrent.ConcurrentHashMap[Int, AggregatedShuffleReadMetric]
   // Aggregated write-path timing breakdown (ms) from CelebornWriteMetricsEvent. Uses AtomicLong
   // so concurrent events on the status queue accumulate safely.
   private val aggCopyTimeMs = new AtomicLong(0L)
@@ -274,6 +278,17 @@ private[celeborn] class CelebornListener(
         val acc = perWorkerReadStats.computeIfAbsent(w.workerId, _ => new PerWorkerReadAccumulator)
         acc.merge(w)
       }
+      // Per-shuffle read aggregation: bytes/chunks from WorkerReadCost, fetch time from
+      // the read-path timing breakdown. Same accumulation pattern as perShuffleWrite.
+      val shuffleRead = perShuffleRead.computeIfAbsent(
+        e.shuffleId,
+        _ => new AggregatedShuffleReadMetric(0L, 0L, 0L))
+      shuffleRead.fetchTimeMs +=
+        rm.chunkWaitTimeMs + rm.decompressTimeMs + rm.deserializeTimeMs + rm.copyTimeMs
+      e.workerReadCosts.asScala.foreach { w =>
+        shuffleRead.bytesRead += w.bytes
+        shuffleRead.chunkCount += w.chunkCount
+      }
       mayUpdate()
     case _ => // ignore unknown events
   }
@@ -313,6 +328,14 @@ private[celeborn] class CelebornListener(
           new AggregatedShuffleWriteMetric(v.bytesWritten, v.recordsWritten, v.writeTimeMs))
       }
       kvstore.write(new CelebornAggregatedWriteMetricsUIData(writeSnapshot))
+      // Read-side counterpart of writeSnapshot, keyed by shuffleId.
+      val readSnapshot = new java.util.HashMap[Int, AggregatedShuffleReadMetric]()
+      perShuffleRead.asScala.foreach { case (k, v) =>
+        readSnapshot.put(
+          k,
+          new AggregatedShuffleReadMetric(v.bytesRead, v.chunkCount, v.fetchTimeMs))
+      }
+      kvstore.write(new CelebornAggregatedReadMetricsUIData(readSnapshot))
       kvstore.write(AggregatedTaskInfoUIData(
         totalWriteBytes.get(),
         totalWriteTimeMs.get(),
