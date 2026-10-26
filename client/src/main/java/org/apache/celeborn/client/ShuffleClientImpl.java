@@ -44,6 +44,7 @@ import org.slf4j.LoggerFactory;
 import org.apache.celeborn.client.compress.Compressor;
 import org.apache.celeborn.client.read.CelebornInputStream;
 import org.apache.celeborn.client.read.MetricsCallback;
+import org.apache.celeborn.client.read.ReadStreamStats;
 import org.apache.celeborn.client.security.CryptoHandler;
 import org.apache.celeborn.common.CelebornConf;
 import org.apache.celeborn.common.exception.CelebornBroadcastException;
@@ -1919,6 +1920,33 @@ public class ShuffleClientImpl extends ShuffleClient {
       }
     } finally {
       pushStates.remove(mapKey);
+    }
+  }
+
+  @Override
+  public void reportReadMetrics(int shuffleId, ReadStreamStats stats) {
+    if (!conf.clientSparkUIEnabled() || stats == null || lifecycleManagerRef == null) {
+      return;
+    }
+    try {
+      ReadMetrics readMetrics =
+          new ReadMetrics(
+              stats.getChunkWaitTimeMs(),
+              stats.getDecompressTimeMs(),
+              stats.getDeserializeTimeMs(),
+              stats.getCopyTimeMs(),
+              stats.getRetryCount(),
+              stats.getRetryWaitTimeMs(),
+              stats.getPeerSwitchCount(),
+              stats.getExcludeCount(),
+              stats.getMaxChunkRttMs());
+      lifecycleManagerRef.askSync(
+          new ReportShuffleReadMetrics(shuffleId, readMetrics, SerdeVersion.V1),
+          rpcMaxRetries,
+          rpcRetryWait,
+          ClassTag$.MODULE$.apply(ReportShuffleReadMetricsResponse.class));
+    } catch (Exception e) {
+      logger.warn("Failed to report read metrics for shuffle " + shuffleId, e);
     }
   }
 

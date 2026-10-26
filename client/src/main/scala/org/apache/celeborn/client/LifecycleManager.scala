@@ -39,7 +39,7 @@ import com.google.common.annotations.VisibleForTesting
 import com.google.common.cache.{Cache, CacheBuilder}
 
 import org.apache.celeborn.client.LifecycleManager.{ShuffleAllocatedWorkers, ShuffleFailedWorkers}
-import org.apache.celeborn.client.listener.{MapperEndCallback, ShuffleAssignmentListener, WorkerStatusListener}
+import org.apache.celeborn.client.listener.{MapperEndCallback, ReadMetricsCallback, ShuffleAssignmentListener, WorkerStatusListener}
 import org.apache.celeborn.common.{CelebornConf, CommitMetadata}
 import org.apache.celeborn.common.CelebornConf.ACTIVE_STORAGE_TYPES
 import org.apache.celeborn.common.client.{ApplicationInfoProvider, MasterClient}
@@ -570,6 +570,14 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
       } else {
         context.reply(PbSerDeUtils.toPbApplicationMeta(applicationMeta))
       }
+
+    case ReportShuffleReadMetrics(shuffleId, readMetrics, serdeVersion) =>
+      // Forward read-path metrics to the driver-side UI listener (registered by
+      // SparkShuffleManager). No aggregation here — the listener accumulates.
+      readMetricsCallback.foreach { cb =>
+        cb.onReadMetrics(shuffleId, readMetrics)
+      }
+      context.reply(ReportShuffleReadMetricsResponse(StatusCode.SUCCESS, serdeVersion))
   }
 
   private def handleReducerPartitionEnd(
@@ -2211,6 +2219,14 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
   @volatile private var mapperEndCallback: Option[MapperEndCallback] = None
   def registerMapperEndCallback(callback: MapperEndCallback): Unit = {
     mapperEndCallback = Some(callback)
+  }
+
+  // Fired from the ReportShuffleReadMetrics handler, carrying shuffleId + read-path timing
+  // breakdown. The driver-side SparkShuffleManager registers a ReadMetricsCallback that
+  // posts a CelebornReadMetricsEvent to the Spark listener bus for the UI.
+  @volatile private var readMetricsCallback: Option[ReadMetricsCallback] = None
+  def registerReadMetricsCallback(callback: ReadMetricsCallback): Unit = {
+    readMetricsCallback = Some(callback)
   }
 
   def registerAppShuffleDeterminate(appShuffleId: Int, determinate: Boolean): Unit = {

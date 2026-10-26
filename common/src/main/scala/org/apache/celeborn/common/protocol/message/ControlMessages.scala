@@ -241,6 +241,30 @@ object ControlMessages extends Logging {
 
   case class ReadReducerPartitionEndResponse(status: StatusCode) extends MasterMessage
 
+  // Read-path timing breakdown for the UI, mirrors PbReadMetrics. Reported from the
+  // executor (CelebornInputStream close) via the ReportShuffleReadMetrics RPC when
+  // celeborn.client.spark.ui.enabled is true.
+  case class ReadMetrics(
+      chunkWaitTimeMs: Long,
+      decompressTimeMs: Long,
+      deserializeTimeMs: Long,
+      copyTimeMs: Long,
+      retryCount: Long,
+      retryWaitTimeMs: Long,
+      peerSwitchCount: Long,
+      excludeCount: Long,
+      maxChunkRttMs: Long)
+
+  // Read-path metrics reported from the executor to the driver for the UI.
+  case class ReportShuffleReadMetrics(
+      shuffleId: Int,
+      readMetrics: ReadMetrics,
+      serdeVersion: SerdeVersion)
+    extends MasterMessage
+
+  case class ReportShuffleReadMetricsResponse(status: StatusCode, serdeVersion: SerdeVersion)
+    extends MasterMessage
+
   case class GetReducerFileGroup(
       shuffleId: Int,
       isSegmentGranularityVisible: Boolean,
@@ -783,6 +807,32 @@ object ControlMessages extends Logging {
         .build().toByteArray
       new TransportMessage(MessageType.MAPPER_END_RESPONSE, payload, serdeVersion)
 
+    case ReportShuffleReadMetrics(shuffleId, readMetrics, serdeVersion) =>
+      val rm = readMetrics
+      val payload = PbReportShuffleReadMetrics.newBuilder()
+        .setShuffleId(shuffleId)
+        .setMetrics(PbReadMetrics.newBuilder()
+          .setChunkWaitTimeMs(rm.chunkWaitTimeMs)
+          .setDecompressTimeMs(rm.decompressTimeMs)
+          .setDeserializeTimeMs(rm.deserializeTimeMs)
+          .setCopyTimeMs(rm.copyTimeMs)
+          .setRetryCount(rm.retryCount)
+          .setRetryWaitTimeMs(rm.retryWaitTimeMs)
+          .setPeerSwitchCount(rm.peerSwitchCount)
+          .setExcludeCount(rm.excludeCount)
+          .setMaxChunkRttMs(rm.maxChunkRttMs))
+        .build().toByteArray
+      new TransportMessage(MessageType.REPORT_SHUFFLE_READ_METRICS, payload, serdeVersion)
+
+    case ReportShuffleReadMetricsResponse(status, serdeVersion) =>
+      val payload = PbReportShuffleReadMetricsResponse.newBuilder()
+        .setStatus(status.getValue)
+        .build().toByteArray
+      new TransportMessage(
+        MessageType.REPORT_SHUFFLE_READ_METRICS_RESPONSE,
+        payload,
+        serdeVersion)
+
     case GetReducerFileGroup(shuffleId, isSegmentGranularityVisible, serdeVersion) =>
       val payload = PbGetReducerFileGroup.newBuilder()
         .setShuffleId(shuffleId)
@@ -1306,6 +1356,29 @@ object ControlMessages extends Logging {
         val pbMapperEndResponse = PbMapperEndResponse.parseFrom(message.getPayload)
         MapperEndResponse(
           StatusCode.fromValue(pbMapperEndResponse.getStatus),
+          message.getSerdeVersion)
+
+      case REPORT_SHUFFLE_READ_METRICS_VALUE =>
+        val pb = PbReportShuffleReadMetrics.parseFrom(message.getPayload)
+        val rm = pb.getMetrics
+        ReportShuffleReadMetrics(
+          pb.getShuffleId,
+          ReadMetrics(
+            rm.getChunkWaitTimeMs,
+            rm.getDecompressTimeMs,
+            rm.getDeserializeTimeMs,
+            rm.getCopyTimeMs,
+            rm.getRetryCount,
+            rm.getRetryWaitTimeMs,
+            rm.getPeerSwitchCount,
+            rm.getExcludeCount,
+            rm.getMaxChunkRttMs),
+          message.getSerdeVersion)
+
+      case REPORT_SHUFFLE_READ_METRICS_RESPONSE_VALUE =>
+        val pb = PbReportShuffleReadMetricsResponse.parseFrom(message.getPayload)
+        ReportShuffleReadMetricsResponse(
+          StatusCode.fromValue(pb.getStatus),
           message.getSerdeVersion)
 
       case GET_REDUCER_FILE_GROUP_VALUE =>

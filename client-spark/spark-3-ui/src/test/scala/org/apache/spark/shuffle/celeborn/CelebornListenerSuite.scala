@@ -81,6 +81,77 @@ class CelebornListenerSuite {
   }
 
   @Test
+  def readMetricsEventAggregatedToReadTimes(): Unit = {
+    val store = new InMemoryStore()
+    val statusStore = new CelebornStatusStore(store)
+    val listener = new CelebornListener(store, new SparkConf())
+
+    listener.onOtherEvent(new CelebornReadMetricsEvent(
+      0, 100L, 40L, 30L, 20L, 2L, 50L, 1L, 3L, 500L))
+    // A second stream of the same shuffle: durations and counts accumulate, the max
+    // chunk RTT keeps the larger value.
+    listener.onOtherEvent(new CelebornReadMetricsEvent(0, 25L, 10L, 5L, 5L, 1L, 25L, 0L, 1L, 800L))
+    listener.flush()
+
+    val readTimes = statusStore.readTimes()
+    assertEquals(125L, readTimes.chunkWaitTimeMs)
+    assertEquals(50L, readTimes.decompressTimeMs)
+    assertEquals(35L, readTimes.deserializeTimeMs)
+    assertEquals(25L, readTimes.copyTimeMs)
+    assertEquals(3L, readTimes.retryCount)
+    assertEquals(75L, readTimes.retryWaitTimeMs)
+    assertEquals(1L, readTimes.peerSwitchCount)
+    assertEquals(4L, readTimes.excludeCount)
+    assertEquals(800L, readTimes.maxChunkRttMs)
+  }
+
+  @Test
+  def readTimesEmptyWhenNoReadEvents(): Unit = {
+    val store = new InMemoryStore()
+    val statusStore = new CelebornStatusStore(store)
+    val listener = new CelebornListener(store, new SparkConf())
+    listener.flush()
+
+    val readTimes = statusStore.readTimes()
+    assertEquals(0L, readTimes.chunkWaitTimeMs)
+    assertEquals(0L, readTimes.maxChunkRttMs)
+    assertEquals(0L, readTimes.retryCount)
+  }
+
+  @Test
+  def readMetricsEventJsonRoundtrip(): Unit = {
+    // SparkListenerEvent carries @JsonTypeInfo(property = "Event"), so the event log
+    // records the class name and History Server replay can restore the event.
+    val mapper = new ObjectMapper()
+    val event = new CelebornReadMetricsEvent(1, 100L, 40L, 30L, 20L, 2L, 50L, 1L, 3L, 500L)
+    val json = mapper.writeValueAsString(event)
+    assertTrue(json.contains(
+      s""""Event":"${classOf[CelebornReadMetricsEvent].getName}"""))
+    val restored = mapper
+      .readValue(json, classOf[SparkListenerEvent])
+      .asInstanceOf[CelebornReadMetricsEvent]
+    assertEquals(1, restored.getShuffleId)
+    assertEquals(100L, restored.getChunkWaitTimeMs)
+    assertEquals(40L, restored.getDecompressTimeMs)
+    assertEquals(30L, restored.getDeserializeTimeMs)
+    assertEquals(20L, restored.getCopyTimeMs)
+    assertEquals(2L, restored.getRetryCount)
+    assertEquals(50L, restored.getRetryWaitTimeMs)
+    assertEquals(1L, restored.getPeerSwitchCount)
+    assertEquals(3L, restored.getExcludeCount)
+    assertEquals(500L, restored.getMaxChunkRttMs)
+
+    // Event logs written before a field existed still deserialize (missing -> 0).
+    val legacy = mapper.readValue(
+      s"""{"Event":"${classOf[CelebornReadMetricsEvent].getName}",""" +
+        """"shuffleId":1,"chunkWaitTimeMs":100}""",
+      classOf[SparkListenerEvent])
+      .asInstanceOf[CelebornReadMetricsEvent]
+    assertEquals(100L, legacy.getChunkWaitTimeMs)
+    assertEquals(0L, legacy.getDeserializeTimeMs)
+  }
+
+  @Test
   def shuffleWriteMetricsCountEveryAttempt(): Unit = {
     val store = new InMemoryStore()
     val statusStore = new CelebornStatusStore(store)

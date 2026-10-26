@@ -93,6 +93,27 @@ private[celeborn] class CelebornExtensionEnabledUIData {
   def id: String = classOf[CelebornExtensionEnabledUIData].getName
 }
 
+/**
+ * Application-wide read-path timing breakdown aggregated from
+ * [[CelebornReadMetricsEvent]] reports, rendered as the "Shuffle Read Times" section.
+ * All-zero for event logs recorded by older versions.
+ */
+private[celeborn] case class CelebornReadTimesUIData(
+    chunkWaitTimeMs: Long,
+    decompressTimeMs: Long,
+    deserializeTimeMs: Long,
+    copyTimeMs: Long,
+    retryCount: Long,
+    retryWaitTimeMs: Long,
+    peerSwitchCount: Long,
+    excludeCount: Long,
+    maxChunkRttMs: Long) {
+
+  @JsonIgnore
+  @KVIndex
+  def id: String = classOf[CelebornReadTimesUIData].getName
+}
+
 private[celeborn] class CelebornStatusStore(store: KVStore) {
 
   def aggregatedTaskInfo(): AggregatedTaskInfoUIData = {
@@ -144,6 +165,15 @@ private[celeborn] class CelebornStatusStore(store: KVStore) {
       true
     } catch {
       case _: NoSuchElementException => false
+    }
+  }
+
+  def readTimes(): CelebornReadTimesUIData = {
+    val kClass = classOf[CelebornReadTimesUIData]
+    try {
+      store.read(kClass, kClass.getName)
+    } catch {
+      case _: NoSuchElementException => CelebornReadTimesUIData(0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L)
     }
   }
 }

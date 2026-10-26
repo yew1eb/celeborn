@@ -58,6 +58,18 @@ private[celeborn] class CelebornListener(
   // compression ratio uses a single attempt set.
   private val totalCompressedWriteBytes = new AtomicLong(0L)
 
+  // Read-path timing breakdown from CelebornReadMetricsEvent (per reduce stream),
+  // accumulated application-wide for the "Shuffle Read Times" section.
+  private val totalChunkWaitTimeMs = new AtomicLong(0L)
+  private val totalDecompressTimeMs = new AtomicLong(0L)
+  private val totalDeserializeTimeMs = new AtomicLong(0L)
+  private val totalCopyTimeMs = new AtomicLong(0L)
+  private val totalRetryCount = new AtomicLong(0L)
+  private val totalRetryWaitTimeMs = new AtomicLong(0L)
+  private val totalPeerSwitchCount = new AtomicLong(0L)
+  private val totalExcludeCount = new AtomicLong(0L)
+  private val totalMaxChunkRttMs = new AtomicLong(0L)
+
   private val lastUpdateTimestamp = new AtomicLong(-1L)
   private val updateIntervalMillis = 5000L
 
@@ -104,6 +116,19 @@ private[celeborn] class CelebornListener(
       if (pluginEnabled) {
         totalUncompressedWriteBytes.addAndGet(e.getUncompressedBytesWritten)
         totalCompressedWriteBytes.addAndGet(e.getCompressedBytesWritten)
+        mayUpdate()
+      }
+    case e: CelebornReadMetricsEvent =>
+      if (pluginEnabled) {
+        totalChunkWaitTimeMs.addAndGet(e.getChunkWaitTimeMs)
+        totalDecompressTimeMs.addAndGet(e.getDecompressTimeMs)
+        totalDeserializeTimeMs.addAndGet(e.getDeserializeTimeMs)
+        totalCopyTimeMs.addAndGet(e.getCopyTimeMs)
+        totalRetryCount.addAndGet(e.getRetryCount)
+        totalRetryWaitTimeMs.addAndGet(e.getRetryWaitTimeMs)
+        totalPeerSwitchCount.addAndGet(e.getPeerSwitchCount)
+        totalExcludeCount.addAndGet(e.getExcludeCount)
+        totalMaxChunkRttMs.accumulateAndGet(e.getMaxChunkRttMs, math.max)
         mayUpdate()
       }
     case e: CelebornShuffleAssignmentEvent => onShuffleAssignment(e)
@@ -211,6 +236,16 @@ private[celeborn] class CelebornListener(
         totalTaskDurationMs.get(),
         totalUncompressedWriteBytes.get(),
         totalCompressedWriteBytes.get()))
+      kvstore.write(CelebornReadTimesUIData(
+        totalChunkWaitTimeMs.get(),
+        totalDecompressTimeMs.get(),
+        totalDeserializeTimeMs.get(),
+        totalCopyTimeMs.get(),
+        totalRetryCount.get(),
+        totalRetryWaitTimeMs.get(),
+        totalPeerSwitchCount.get(),
+        totalExcludeCount.get(),
+        totalMaxChunkRttMs.get()))
     } catch {
       case e: Exception =>
         logWarning("Failed to flush CelebornListener aggregations", e)
