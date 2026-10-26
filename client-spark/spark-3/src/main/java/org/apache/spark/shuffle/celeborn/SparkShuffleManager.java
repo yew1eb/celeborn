@@ -212,6 +212,25 @@ public class SparkShuffleManager implements ShuffleManager {
                                 metrics.compressedBytesWritten()));
                   }
                 });
+            lifecycleManager.registerReadMetricsCallback(
+                (shuffleId, readMetrics) -> {
+                  SparkContext sc = SparkContext$.MODULE$.getActive().getOrElse(() -> null);
+                  if (sc != null) {
+                    sc.listenerBus()
+                        .post(
+                            new CelebornReadMetricsEvent(
+                                shuffleId,
+                                readMetrics.chunkWaitTimeMs(),
+                                readMetrics.decompressTimeMs(),
+                                readMetrics.deserializeTimeMs(),
+                                readMetrics.copyTimeMs(),
+                                readMetrics.retryCount(),
+                                readMetrics.retryWaitTimeMs(),
+                                readMetrics.peerSwitchCount(),
+                                readMetrics.excludeCount(),
+                                readMetrics.maxChunkRttMs()));
+                  }
+                });
           }
           if (celebornConf.clientStageRerunEnabled()) {
             MapOutputTrackerMaster mapOutputTracker =

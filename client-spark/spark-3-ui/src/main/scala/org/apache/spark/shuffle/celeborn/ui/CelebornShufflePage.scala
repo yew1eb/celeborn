@@ -60,6 +60,7 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
     val workerRows = workerSlots.workerSlots.toSeq.map { case (worker, slots) =>
       (worker, workerSlots.workerShuffles.getOrElse(worker, 0), slots)
     }.sortBy { case (worker, _, slots) => (-slots, worker) }
+    val readTimes = store.readTimes()
 
     val writeBytes = taskInfo.shuffleWriteBytes
     val readBytes = taskInfo.shuffleReadBytes
@@ -163,9 +164,35 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
       fixedWidth = true,
       headerClasses = headerClasses)
 
+    // All read-side fields, including retry/peer-switch/exclude counts.
+    val readTimesRows = Seq(
+      ("Chunk Wait", Utils.msDurationToString(readTimes.chunkWaitTimeMs), "–"),
+      ("Decompress", Utils.msDurationToString(readTimes.decompressTimeMs), "–"),
+      ("Deserialize", Utils.msDurationToString(readTimes.deserializeTimeMs), "–"),
+      ("Copy", Utils.msDurationToString(readTimes.copyTimeMs), "–"),
+      (
+        "Retry Wait",
+        Utils.msDurationToString(readTimes.retryWaitTimeMs),
+        s"retries: ${readTimes.retryCount}"),
+      ("Peer Switch", "–", readTimes.peerSwitchCount.toString),
+      ("Exclude", "–", readTimes.excludeCount.toString),
+      ("Max Chunk RTT", Utils.msDurationToString(readTimes.maxChunkRttMs), "–"))
+    val readTimesTable = timesTable(readTimesRows)
+
     val content =
       <span>
         {summary}
+        <span class="collapse-aggregated-celebornReadTimes collapse-table"
+            onClick="collapseTable('collapse-aggregated-celebornReadTimes',
+            'aggregated-celebornReadTimes')">
+          <h4>
+            <span class="collapse-table-arrow arrow-closed"></span>
+            <a>Shuffle Read Times</a>
+          </h4>
+        </span>
+        <div class="aggregated-celebornReadTimes collapsible-table collapsed">
+          {readTimesTable}
+        </div>
         <span class="collapse-aggregated-celebornShuffleAssignments collapse-table"
             onClick="collapseTable('collapse-aggregated-celebornShuffleAssignments',
             'aggregated-celebornShuffleAssignments')">
@@ -246,4 +273,27 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
       <td>{kv._1}</td>
       <td>{kv._2}</td>
     </tr>
+
+  /** A vertical Metric | Duration | Count table for the read timing breakdown. */
+  private def timesTable(rows: Seq[(String, String, String)]): Seq[Node] = {
+    val rowXml = rows.map { case (name, duration, count) =>
+      <tr>
+        <td>{name}</td>
+        <td>{duration}</td>
+        <td>{count}</td>
+      </tr>
+    }
+    <table class="table table-bordered table-striped table-sm">
+      <thead>
+        <tr>
+          <th>Metric</th>
+          <th>Duration</th>
+          <th>Count</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rowXml}
+      </tbody>
+    </table>
+  }
 }

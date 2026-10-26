@@ -36,6 +36,7 @@ import org.slf4j.LoggerFactory;
 
 import org.apache.celeborn.client.read.CelebornInputStream;
 import org.apache.celeborn.client.read.MetricsCallback;
+import org.apache.celeborn.client.read.ReadStreamStats;
 import org.apache.celeborn.client.security.CryptoHandler;
 import org.apache.celeborn.common.CelebornConf;
 import org.apache.celeborn.common.exception.CelebornIOException;
@@ -395,6 +396,9 @@ public abstract class ShuffleClient {
   public abstract void readReducerPartitionEnd(
       int shuffleId, int partitionId, int startMapIndex, int endMapIndex, int crc32, long bytes)
       throws IOException;
+
+  /** Report read-path metrics to the driver for the UI (no-op when UI disabled). */
+  public abstract void reportReadMetrics(int shuffleId, ReadStreamStats stats);
 
   // Report partition locations written by the completed map task of MapPartition Shuffle Type.
   public abstract void mapPartitionMapperEnd(

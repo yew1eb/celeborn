@@ -27,9 +27,11 @@ import org.scalatest.concurrent.Futures.{interval, timeout}
 import org.scalatest.time.SpanSugar.convertIntToGrainOfTime
 
 import org.apache.celeborn.client.{LifecycleManager, WithShuffleClientSuite}
+import org.apache.celeborn.client.read.ReadStreamStats
 import org.apache.celeborn.common.CelebornConf
 import org.apache.celeborn.common.identity.UserIdentifier
 import org.apache.celeborn.common.protocol.message.ControlMessages.MapperMetrics
+import org.apache.celeborn.common.protocol.message.ControlMessages.ReadMetrics
 import org.apache.celeborn.common.protocol.message.StatusCode
 import org.apache.celeborn.service.deploy.MiniClusterFeature
 
@@ -206,6 +208,45 @@ class LifecycleManagerSuite extends WithShuffleClientSuite with MiniClusterFeatu
 
     // The callback runs synchronously before the RPC reply.
     assert(reported.asScala.toList == List((100L, 40L)))
+  }
+
+  test("CELEBORN-2502: read metrics callback receives per-stream stats via real RPC") {
+    prepareService()
+    val shuffleId = nextShuffleId
+    val numMappers = 8
+    val numPartitions = 9
+
+    val reported = new util.concurrent.ConcurrentLinkedQueue[ReadMetrics]()
+    lifecycleManager.registerReadMetricsCallback((_, readMetrics) => reported.add(readMetrics))
+
+    // Register a REDUCE-partition shuffle.
+    shuffleClient.getPartitionLocation(shuffleId, numMappers, numPartitions)
+
+    val stats = new ReadStreamStats()
+    stats.addChunkWaitTime(50L * 1000000L)
+    stats.addDecompressTime(10L * 1000000L)
+    stats.addDeserializeTime(30L * 1000000L)
+    stats.addCopyTime(5L * 1000000L)
+    stats.incRetryCount()
+    stats.addRetryWaitTime(25L)
+    stats.incPeerSwitchCount()
+    stats.incExcludeCount()
+    stats.recordChunkRtt(500L * 1000000L)
+
+    shuffleClient.reportReadMetrics(shuffleId, stats)
+
+    // The callback runs synchronously before the RPC reply.
+    assert(reported.asScala.toList.size == 1)
+    val rm = reported.peek()
+    assert(rm.chunkWaitTimeMs == 50L)
+    assert(rm.decompressTimeMs == 10L)
+    assert(rm.deserializeTimeMs == 30L)
+    assert(rm.copyTimeMs == 5L)
+    assert(rm.retryCount == 1L)
+    assert(rm.retryWaitTimeMs == 25L)
+    assert(rm.peerSwitchCount == 1L)
+    assert(rm.excludeCount == 1L)
+    assert(rm.maxChunkRttMs == 500L)
   }
 
   override def afterAll(): Unit = {
