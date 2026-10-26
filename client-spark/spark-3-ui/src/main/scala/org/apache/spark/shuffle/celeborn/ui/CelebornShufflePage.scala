@@ -54,6 +54,7 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
     val taskInfo = store.aggregatedTaskInfo()
     val properties = store.celebornProperties()
     val buildInfo = store.buildInfo()
+    val writeTimes = store.writeTimes()
 
     val writeBytes = taskInfo.shuffleWriteBytes
     val readBytes = taskInfo.shuffleReadBytes
@@ -121,9 +122,32 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
       fixedWidth = true,
       headerClasses = headerClasses)
 
+    // Vertical Metric | Duration layout for the write-path timing breakdown.
+    val writeTimesRows = Seq(
+      ("Serialize", Utils.msDurationToString(writeTimes.serializeTimeMs)),
+      ("Copy", Utils.msDurationToString(writeTimes.copyTimeMs)),
+      ("Queue Wait", Utils.msDurationToString(writeTimes.queueWaitTimeMs)),
+      ("Background Compress", Utils.msDurationToString(writeTimes.compressTimeMs)),
+      ("Background Queue Stall", Utils.msDurationToString(writeTimes.queueStallTimeMs)),
+      ("Background Inflight Wait", Utils.msDurationToString(writeTimes.inflightWaitTimeMs)),
+      ("Drain Wait", Utils.msDurationToString(writeTimes.drainWaitTimeMs)),
+      ("Max Push RTT", Utils.msDurationToString(writeTimes.maxPushRttMs)))
+    val writeTimesTable = timesTable(writeTimesRows)
+
     val content =
       <span>
         {summary}
+        <span class="collapse-aggregated-celebornWriteTimes collapse-table"
+            onClick="collapseTable('collapse-aggregated-celebornWriteTimes',
+            'aggregated-celebornWriteTimes')">
+          <h4>
+            <span class="collapse-table-arrow arrow-closed"></span>
+            <a>Shuffle Write Times</a>
+          </h4>
+        </span>
+        <div class="aggregated-celebornWriteTimes collapsible-table collapsed">
+          {writeTimesTable}
+        </div>
         <span class="collapse-aggregated-celebornBuildInfo collapse-table"
             onClick="collapseTable('collapse-aggregated-celebornBuildInfo',
             'aggregated-celebornBuildInfo')">
@@ -159,4 +183,25 @@ private[celeborn] class CelebornShufflePage(parent: CelebornUITab)
       <td>{kv._1}</td>
       <td>{kv._2}</td>
     </tr>
+
+  /** A vertical Metric | Duration table for the write timing breakdown. */
+  private def timesTable(rows: Seq[(String, String)]): Seq[Node] = {
+    val rowXml = rows.map { case (name, duration) =>
+      <tr>
+        <td>{name}</td>
+        <td>{duration}</td>
+      </tr>
+    }
+    <table class="table table-bordered table-striped table-sm">
+      <thead>
+        <tr>
+          <th>Metric</th>
+          <th>Duration</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rowXml}
+      </tbody>
+    </table>
+  }
 }

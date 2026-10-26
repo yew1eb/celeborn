@@ -21,7 +21,10 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.LongAdder;
 
 import org.apache.commons.lang3.tuple.Pair;
 
@@ -41,10 +44,93 @@ public class PushState {
 
   private final Map<String, LocationPushFailedBatches> failedBatchMap;
 
+  // Per map task write path stats, used to diagnose slow shuffle write.
+  // Time a mapper thread is blocked by the push queue backpressure (DataPusher.addTask).
+  private final LongAdder queueWaitTimeNanos = new LongAdder();
+  // Time push threads are blocked by the in-flight limit (limitMaxInFlight).
+  private final LongAdder inflightWaitTimeNanos = new LongAdder();
+  // Time mapperEnd waits for all in-flight batches to be done (limitZeroInFlight).
+  private final LongAdder drainWaitTimeNanos = new LongAdder();
+  // Time push thread stalls in DataPushQueue.takePushTasks because no target worker
+  // has remaining push allowance (per-worker in-flight limit reached).
+  private final LongAdder queueStallTimeNanos = new LongAdder();
+  // CPU cost of compressing push data (ShuffleClientImpl.pushOrMergeData).
+  private final LongAdder compressTimeNanos = new LongAdder();
+  // CPU cost of serializing records in the engine shuffle writer.
+  private final LongAdder serializeTimeNanos = new LongAdder();
+  // CPU cost of copying serialized records into the push buffer (writer write0 / fastWrite0).
+  private final LongAdder copyTimeNanos = new LongAdder();
+  // Max round-trip time of a single push.
+  private final AtomicLong maxPushRttNanos = new AtomicLong(0);
+
   public PushState(CelebornConf conf) {
     pushBufferMaxSize = conf.clientPushBufferMaxSize();
     inFlightRequestTracker = new InFlightRequestTracker(conf, this);
     failedBatchMap = JavaUtils.newConcurrentHashMap();
+  }
+
+  public void addQueueWaitTime(long nanos) {
+    queueWaitTimeNanos.add(nanos);
+  }
+
+  public void addInflightWaitTime(long nanos) {
+    inflightWaitTimeNanos.add(nanos);
+  }
+
+  public void addDrainWaitTime(long nanos) {
+    drainWaitTimeNanos.add(nanos);
+  }
+
+  public void addQueueStallTime(long nanos) {
+    queueStallTimeNanos.add(nanos);
+  }
+
+  public void addCompressTime(long nanos) {
+    compressTimeNanos.add(nanos);
+  }
+
+  public void addSerializeTime(long nanos) {
+    serializeTimeNanos.add(nanos);
+  }
+
+  public void addCopyTime(long nanos) {
+    copyTimeNanos.add(nanos);
+  }
+
+  public void recordPushRtt(long rttNanos) {
+    maxPushRttNanos.accumulateAndGet(rttNanos, Math::max);
+  }
+
+  public long getQueueWaitTimeMs() {
+    return TimeUnit.NANOSECONDS.toMillis(queueWaitTimeNanos.sum());
+  }
+
+  public long getInflightWaitTimeMs() {
+    return TimeUnit.NANOSECONDS.toMillis(inflightWaitTimeNanos.sum());
+  }
+
+  public long getDrainWaitTimeMs() {
+    return TimeUnit.NANOSECONDS.toMillis(drainWaitTimeNanos.sum());
+  }
+
+  public long getQueueStallTimeMs() {
+    return TimeUnit.NANOSECONDS.toMillis(queueStallTimeNanos.sum());
+  }
+
+  public long getCompressTimeMs() {
+    return TimeUnit.NANOSECONDS.toMillis(compressTimeNanos.sum());
+  }
+
+  public long getSerializeTimeMs() {
+    return TimeUnit.NANOSECONDS.toMillis(serializeTimeNanos.sum());
+  }
+
+  public long getCopyTimeMs() {
+    return TimeUnit.NANOSECONDS.toMillis(copyTimeNanos.sum());
+  }
+
+  public long getMaxPushRttMs() {
+    return TimeUnit.NANOSECONDS.toMillis(maxPushRttNanos.get());
   }
 
   public void cleanup() {

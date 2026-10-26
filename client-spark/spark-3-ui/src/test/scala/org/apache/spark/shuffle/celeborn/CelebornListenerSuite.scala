@@ -80,6 +80,70 @@ class CelebornListenerSuite {
   }
 
   @Test
+  def aggregateWriteTimesFromMapperMetricsEvents(): Unit = {
+    val store = new InMemoryStore()
+    val statusStore = new CelebornStatusStore(store)
+    val listener = new CelebornListener(store, new SparkConf())
+
+    listener.onOtherEvent(new CelebornMapperMetricsEvent(
+      0, 100L, 40L, 11L, 22L, 33L, 44L, 55L, 66L, 77L, 88L))
+    listener.onOtherEvent(new CelebornMapperMetricsEvent(
+      0, 250L, 94L, 1L, 2L, 3L, 4L, 5L, 6L, 7L, 9L))
+    listener.flush()
+
+    val writeTimes = statusStore.writeTimes()
+    assertEquals(12L, writeTimes.serializeTimeMs)
+    assertEquals(24L, writeTimes.copyTimeMs)
+    assertEquals(36L, writeTimes.compressTimeMs)
+    assertEquals(48L, writeTimes.queueWaitTimeMs)
+    assertEquals(60L, writeTimes.queueStallTimeMs)
+    assertEquals(72L, writeTimes.inflightWaitTimeMs)
+    assertEquals(84L, writeTimes.drainWaitTimeMs)
+    // maxPushRtt takes the maximum across mapper attempts, not the sum.
+    assertEquals(88L, writeTimes.maxPushRttMs)
+  }
+
+  @Test
+  def writeTimesDefaultToZeroBeforeAnyFlush(): Unit = {
+    val store = new InMemoryStore()
+    val statusStore = new CelebornStatusStore(store)
+    assertEquals(CelebornWriteTimesUIData(), statusStore.writeTimes())
+  }
+
+  @Test
+  def mapperMetricsEventTimingsJsonRoundtrip(): Unit = {
+    // Event logs written by versions before the timing fields existed deserialize
+    // with zeroed timings, and full events round-trip losslessly.
+    val mapper = new ObjectMapper()
+    val legacy = mapper.readValue(
+      s"""{"Event":"${classOf[CelebornMapperMetricsEvent].getName}",""" +
+        """"shuffleId":1,"uncompressedBytesWritten":1024,"compressedBytesWritten":512}""",
+      classOf[SparkListenerEvent])
+      .asInstanceOf[CelebornMapperMetricsEvent]
+    assertEquals(1024L, legacy.getUncompressedBytesWritten)
+    assertEquals(0L, legacy.getSerializeTimeMs)
+    assertEquals(0L, legacy.getMaxPushRttMs)
+
+    val event =
+      new CelebornMapperMetricsEvent(1, 1024L, 512L, 11L, 22L, 33L, 44L, 55L, 66L, 77L, 88L)
+    val restored = mapper
+      .readValue(mapper.writeValueAsString(event), classOf[SparkListenerEvent])
+      .asInstanceOf[CelebornMapperMetricsEvent]
+    assertEquals(11L, restored.getSerializeTimeMs)
+    assertEquals(22L, restored.getCopyTimeMs)
+    assertEquals(33L, restored.getCompressTimeMs)
+    assertEquals(44L, restored.getQueueWaitTimeMs)
+    assertEquals(55L, restored.getQueueStallTimeMs)
+    assertEquals(66L, restored.getInflightWaitTimeMs)
+    assertEquals(77L, restored.getDrainWaitTimeMs)
+    assertEquals(88L, restored.getMaxPushRttMs)
+
+    // The 3-arg constructor (old call sites) still compiles and zero-fills timings.
+    val legacyCtor = new CelebornMapperMetricsEvent(1, 1024L, 512L)
+    assertEquals(0L, legacyCtor.getSerializeTimeMs)
+  }
+
+  @Test
   def shuffleWriteMetricsCountEveryAttempt(): Unit = {
     val store = new InMemoryStore()
     val statusStore = new CelebornStatusStore(store)

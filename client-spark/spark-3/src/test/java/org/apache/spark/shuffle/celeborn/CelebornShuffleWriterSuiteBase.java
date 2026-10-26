@@ -306,6 +306,11 @@ public abstract class CelebornShuffleWriterSuiteBase {
     assertEquals(expectedCompressedBytes, mapperMetrics.compressedBytesWritten());
     assertTrue(expectedCompressedBytes <= totalBytesPushed);
 
+    // The writer flushes serialize/copy timings into PushState at close; they are
+    // nanosecond-granular sums converted to ms, so only non-negativity is asserted.
+    assertTrue(pushState.getSerializeTimeMs() >= 0);
+    assertTrue(pushState.getCopyTimeMs() >= 0);
+
     Map<Integer, List<byte[]>> crcData = client.getCrcDataByPartition(mapKey);
     Map<Integer, List<byte[]>> pushData = client.getPushDataByPartition(mapKey);
 

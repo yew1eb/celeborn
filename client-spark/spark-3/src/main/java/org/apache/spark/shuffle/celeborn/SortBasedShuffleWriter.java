@@ -49,6 +49,7 @@ import org.apache.celeborn.common.CelebornConf;
 import org.apache.celeborn.common.exception.CelebornIOException;
 import org.apache.celeborn.common.protocol.message.ControlMessages.MapperMetrics;
 import org.apache.celeborn.common.util.Utils;
+import org.apache.celeborn.common.write.PushState;
 
 @Private
 public class SortBasedShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
@@ -82,6 +83,11 @@ public class SortBasedShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
 
   // Giant-record bytes pushed directly, bypassing the pusher's uncompressed counter.
   private long giantRecordBytesWritten = 0;
+
+  // CPU cost of serializing records in write0, flushed into PushState at close.
+  private long serializeTimeNanos = 0;
+  // CPU cost of copying serialized records (giant record path), flushed into PushState at close.
+  private long copyTimeNanos = 0;
 
   /**
    * Are we in the process of stopping? Because map tasks can call stop() with success = true and
@@ -281,12 +287,14 @@ public class SortBasedShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
       if (serializedRecordSize > pushBufferMaxSize) {
         byte[] giantBuffer = new byte[serializedRecordSize];
         Platform.putInt(giantBuffer, Platform.BYTE_ARRAY_OFFSET, Integer.reverseBytes(rowSize));
+        long copyStartNanos = System.nanoTime();
         Platform.copyMemory(
             row.getBaseObject(),
             row.getBaseOffset(),
             giantBuffer,
             Platform.BYTE_ARRAY_OFFSET + 4,
             rowSize);
+        copyTimeNanos += System.nanoTime() - copyStartNanos;
         pushGiantRecord(partitionId, giantBuffer, serializedRecordSize);
       } else {
         boolean success =
@@ -320,9 +328,11 @@ public class SortBasedShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
       final K key = record._1();
       final int partitionId = partitioner.getPartition(key);
       serBuffer.reset();
+      long serializeStartNanos = System.nanoTime();
       serOutputStream.writeKey(key, OBJECT_CLASS_TAG);
       serOutputStream.writeValue(record._2(), OBJECT_CLASS_TAG);
       serOutputStream.flush();
+      serializeTimeNanos += System.nanoTime() - serializeStartNanos;
 
       final int serializedRecordSize = serBuffer.size();
       assert (serializedRecordSize > 0);
@@ -384,6 +394,16 @@ public class SortBasedShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
   }
 
   private void close(boolean iteratorHasNext) throws IOException {
+    // Flush the writer-side timings into PushState before mapperEnd, which reads and
+    // then removes it from ShuffleClientImpl.
+    PushState pushState =
+        shuffleClient.getPushState(Utils.makeMapKey(shuffleId, mapId, encodedAttemptId));
+    if (serializeTimeNanos > 0) {
+      pushState.addSerializeTime(serializeTimeNanos);
+    }
+    if (copyTimeNanos > 0) {
+      pushState.addCopyTime(copyTimeNanos);
+    }
     logger.info("Memory used {}", Utils.bytesToString(pusher.getUsed()));
     long pushStartTime = System.nanoTime();
     pusher.pushData(false);

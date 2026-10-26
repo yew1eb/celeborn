@@ -204,7 +204,15 @@ public class SparkShuffleManager implements ShuffleManager {
                             new CelebornMapperMetricsEvent(
                                 shuffleId,
                                 metrics.uncompressedBytesWritten(),
-                                metrics.compressedBytesWritten()));
+                                metrics.compressedBytesWritten(),
+                                metrics.serializeTimeMs(),
+                                metrics.copyTimeMs(),
+                                metrics.compressTimeMs(),
+                                metrics.queueWaitTimeMs(),
+                                metrics.queueStallTimeMs(),
+                                metrics.inflightWaitTimeMs(),
+                                metrics.drainWaitTimeMs(),
+                                metrics.maxPushRttMs()));
                   }
                 });
           }

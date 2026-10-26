@@ -391,6 +391,17 @@ message PbMapperMetrics {
   int64 uncompressedBytesWritten = 1;
   // Bytes pushed after compression/encryption; 0 means not reported.
   int64 compressedBytesWritten = 2;
+  // Write-path timing breakdown (ms) for the UI. 0 means not reported
+  // (older clients). Collected by PushState and the Spark shuffle writers.
+  int64 serializeTimeMs = 3;
+  int64 copyTimeMs = 4;
+  int64 compressTimeMs = 5;
+  int64 queueWaitTimeMs = 6;
+  int64 queueStallTimeMs = 7;
+  int64 inflightWaitTimeMs = 8;
+  int64 drainWaitTimeMs = 9;
+  // Max round-trip time of a single push, in ms.
+  int64 maxPushRttMs = 10;
 }
 
 message PbMapperEnd {

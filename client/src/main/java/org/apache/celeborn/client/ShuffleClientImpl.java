@@ -1099,7 +1099,9 @@ public class ShuffleClientImpl extends ShuffleClient {
     if (shuffleCompressionEnabled && !skipCompress) {
       // compress data
       final Compressor compressor = compressorThreadLocal.get();
+      long compressStartNanos = System.nanoTime();
       compressor.compress(data, offset, length);
+      pushState.addCompressTime(System.nanoTime() - compressStartNanos);
 
       data = compressor.getCompressedBuffer();
       offset = 0;
@@ -1137,6 +1139,7 @@ public class ShuffleClientImpl extends ShuffleClient {
 
       // add inFlight requests
       pushState.addBatch(nextBatchId, body.length, loc.hostAndPushPort());
+      final long pushStartTime = System.nanoTime();
 
       // build PushData request
       NettyManagedBuffer buffer = new NettyManagedBuffer(Unpooled.wrappedBuffer(body));
@@ -1190,6 +1193,7 @@ public class ShuffleClientImpl extends ShuffleClient {
 
             @Override
             public void onSuccess(ByteBuffer response) {
+              pushState.recordPushRtt(System.nanoTime() - pushStartTime);
               if (response.remaining() > 0) {
                 byte reason = response.get();
                 if (reason == StatusCode.SOFT_SPLIT.getValue()) {
@@ -1531,6 +1535,7 @@ public class ShuffleClientImpl extends ShuffleClient {
     int groupedBatchId = pushState.nextBatchId();
     int groupedBatchBytesSize = batches.stream().mapToInt(batch -> batch.body.length).sum();
     pushState.addBatch(groupedBatchId, groupedBatchBytesSize, hostPort);
+    final long pushStartTime = System.nanoTime();
 
     final int numBatches = batches.size();
     final Integer[] partitionIds = new Integer[numBatches];
@@ -1609,6 +1614,7 @@ public class ShuffleClientImpl extends ShuffleClient {
         new RpcResponseCallback() {
           @Override
           public void onSuccess(ByteBuffer response) {
+            pushState.recordPushRtt(System.nanoTime() - pushStartTime);
             byte reason = response.get();
             if (reason == StatusCode.HARD_SPLIT.getValue()
                 || reason == StatusCode.SOFT_SPLIT.getValue()) {
@@ -1897,6 +1903,23 @@ public class ShuffleClientImpl extends ShuffleClient {
       long[] bytesPerPartition =
           pushState.getBytesWrittenPerPartition(shuffleIntegrityCheckEnabled, numPartitions);
 
+      // Merge the writer-reported byte counts with the write-path timings collected
+      // in PushState. limitZeroInFlight above has drained all in-flight batches, so
+      // drainWait and the push RTTs are complete at this point.
+      MapperMetrics reported = metrics == null ? new MapperMetrics(0L, 0L) : metrics;
+      MapperMetrics metricsWithTimings =
+          new MapperMetrics(
+              reported.uncompressedBytesWritten(),
+              reported.compressedBytesWritten(),
+              pushState.getSerializeTimeMs(),
+              pushState.getCopyTimeMs(),
+              pushState.getCompressTimeMs(),
+              pushState.getQueueWaitTimeMs(),
+              pushState.getQueueStallTimeMs(),
+              pushState.getInflightWaitTimeMs(),
+              pushState.getDrainWaitTimeMs(),
+              pushState.getMaxPushRttMs());
+
       MapperEndResponse response =
           lifecycleManagerRef.askSync(
               new MapperEnd(
@@ -1910,7 +1933,7 @@ public class ShuffleClientImpl extends ShuffleClient {
                   crc32PerPartition,
                   bytesPerPartition,
                   SerdeVersion.V1,
-                  metrics == null ? new MapperMetrics(0L, 0L) : metrics),
+                  metricsWithTimings),
               rpcMaxRetries,
               rpcRetryWait,
               ClassTag$.MODULE$.apply(MapperEndResponse.class));

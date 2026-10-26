@@ -54,6 +54,17 @@ private[celeborn] class CelebornListener(
   // compression ratio uses a single attempt set.
   private val totalCompressedWriteBytes = new AtomicLong(0L)
 
+  // Write-path timings reported through MapperEnd; summed across mapper attempts
+  // except maxPushRttMs, which keeps the maximum across attempts.
+  private val aggSerializeTimeMs = new AtomicLong(0L)
+  private val aggCopyTimeMs = new AtomicLong(0L)
+  private val aggCompressTimeMs = new AtomicLong(0L)
+  private val aggQueueWaitTimeMs = new AtomicLong(0L)
+  private val aggQueueStallTimeMs = new AtomicLong(0L)
+  private val aggInflightWaitTimeMs = new AtomicLong(0L)
+  private val aggDrainWaitTimeMs = new AtomicLong(0L)
+  private val aggMaxPushRttMs = new AtomicLong(0L)
+
   private val lastUpdateTimestamp = new AtomicLong(-1L)
   private val updateIntervalMillis = 5000L
 
@@ -93,6 +104,14 @@ private[celeborn] class CelebornListener(
       if (pluginEnabled) {
         totalUncompressedWriteBytes.addAndGet(e.getUncompressedBytesWritten)
         totalCompressedWriteBytes.addAndGet(e.getCompressedBytesWritten)
+        aggSerializeTimeMs.addAndGet(e.getSerializeTimeMs)
+        aggCopyTimeMs.addAndGet(e.getCopyTimeMs)
+        aggCompressTimeMs.addAndGet(e.getCompressTimeMs)
+        aggQueueWaitTimeMs.addAndGet(e.getQueueWaitTimeMs)
+        aggQueueStallTimeMs.addAndGet(e.getQueueStallTimeMs)
+        aggInflightWaitTimeMs.addAndGet(e.getInflightWaitTimeMs)
+        aggDrainWaitTimeMs.addAndGet(e.getDrainWaitTimeMs)
+        aggMaxPushRttMs.accumulateAndGet(e.getMaxPushRttMs, math.max)
         mayUpdate()
       }
     case _ =>
@@ -167,6 +186,15 @@ private[celeborn] class CelebornListener(
         totalTaskDurationMs.get(),
         totalUncompressedWriteBytes.get(),
         totalCompressedWriteBytes.get()))
+      kvstore.write(CelebornWriteTimesUIData(
+        aggSerializeTimeMs.get(),
+        aggCopyTimeMs.get(),
+        aggCompressTimeMs.get(),
+        aggQueueWaitTimeMs.get(),
+        aggQueueStallTimeMs.get(),
+        aggInflightWaitTimeMs.get(),
+        aggDrainWaitTimeMs.get(),
+        aggMaxPushRttMs.get()))
     } catch {
       case e: Exception =>
         logWarning("Failed to flush CelebornListener aggregations", e)

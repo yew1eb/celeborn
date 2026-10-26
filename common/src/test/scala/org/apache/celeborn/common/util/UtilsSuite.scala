@@ -202,6 +202,53 @@ class UtilsSuite extends CelebornFunSuite {
     mapperEnd.bytesWrittenPerPartition.array should contain theSameElementsInOrderAs mapperEndTrans.bytesWrittenPerPartition
   }
 
+  test("MapperEnd write-time metrics convert with pb") {
+    val mapperEnd =
+      MapperEnd(
+        1,
+        1,
+        1,
+        2,
+        1,
+        Collections.emptyMap(),
+        1,
+        Array.emptyIntArray,
+        Array.emptyLongArray,
+        SerdeVersion.V1,
+        MapperMetrics(123456L, 789L, 11L, 22L, 33L, 44L, 55L, 66L, 77L, 88L))
+    val mapperEndTrans =
+      Utils.fromTransportMessage(Utils.toTransportMessage(mapperEnd)).asInstanceOf[MapperEnd]
+    assert(mapperEnd.metrics == mapperEndTrans.metrics)
+  }
+
+  test("MapperEnd legacy metrics convert with pb") {
+    // 2-arg constructor (Java call sites) must round-trip with zeroed timing fields.
+    val mapperEnd =
+      MapperEnd(
+        1,
+        1,
+        1,
+        2,
+        1,
+        Collections.emptyMap(),
+        1,
+        Array.emptyIntArray,
+        Array.emptyLongArray,
+        SerdeVersion.V1,
+        new MapperMetrics(123456L, 789L))
+    val mapperEndTrans =
+      Utils.fromTransportMessage(Utils.toTransportMessage(mapperEnd)).asInstanceOf[MapperEnd]
+    assert(mapperEnd.metrics == mapperEndTrans.metrics)
+    assert(mapperEndTrans.metrics.serializeTimeMs == 0L)
+    assert(mapperEndTrans.metrics.copyTimeMs == 0L)
+    assert(mapperEndTrans.metrics.compressTimeMs == 0L)
+    assert(mapperEndTrans.metrics.queueWaitTimeMs == 0L)
+    assert(mapperEndTrans.metrics.queueStallTimeMs == 0L)
+    assert(mapperEndTrans.metrics.inflightWaitTimeMs == 0L)
+    assert(mapperEndTrans.metrics.drainWaitTimeMs == 0L)
+    assert(mapperEndTrans.metrics.maxPushRttMs == 0L)
+  }
+
   test("PbRequestWorkers messages convert with TransportMessage") {
     val excludedWorker = new WorkerInfo("host1", 1001, 1002, 1003, 1004)
     val request = PbRequestWorkers.newBuilder()

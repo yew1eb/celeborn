@@ -35,6 +35,17 @@ public class CelebornMapperMetricsEvent implements SparkListenerEvent {
   // Bytes pushed after compression/encryption; 0 means not reported.
   private long compressedBytesWritten;
 
+  // Write-path timing breakdown (ms); 0 means not reported (older clients).
+  private long serializeTimeMs;
+  private long copyTimeMs;
+  private long compressTimeMs;
+  private long queueWaitTimeMs;
+  private long queueStallTimeMs;
+  private long inflightWaitTimeMs;
+  private long drainWaitTimeMs;
+  // Max round-trip time of a single push, in ms.
+  private long maxPushRttMs;
+
   public CelebornMapperMetricsEvent() {}
 
   public CelebornMapperMetricsEvent(
@@ -42,6 +53,31 @@ public class CelebornMapperMetricsEvent implements SparkListenerEvent {
     this.shuffleId = shuffleId;
     this.uncompressedBytesWritten = uncompressedBytesWritten;
     this.compressedBytesWritten = compressedBytesWritten;
+  }
+
+  public CelebornMapperMetricsEvent(
+      int shuffleId,
+      long uncompressedBytesWritten,
+      long compressedBytesWritten,
+      long serializeTimeMs,
+      long copyTimeMs,
+      long compressTimeMs,
+      long queueWaitTimeMs,
+      long queueStallTimeMs,
+      long inflightWaitTimeMs,
+      long drainWaitTimeMs,
+      long maxPushRttMs) {
+    this.shuffleId = shuffleId;
+    this.uncompressedBytesWritten = uncompressedBytesWritten;
+    this.compressedBytesWritten = compressedBytesWritten;
+    this.serializeTimeMs = serializeTimeMs;
+    this.copyTimeMs = copyTimeMs;
+    this.compressTimeMs = compressTimeMs;
+    this.queueWaitTimeMs = queueWaitTimeMs;
+    this.queueStallTimeMs = queueStallTimeMs;
+    this.inflightWaitTimeMs = inflightWaitTimeMs;
+    this.drainWaitTimeMs = drainWaitTimeMs;
+    this.maxPushRttMs = maxPushRttMs;
   }
 
   public int getShuffleId() {
@@ -66,6 +102,70 @@ public class CelebornMapperMetricsEvent implements SparkListenerEvent {
 
   public void setCompressedBytesWritten(long compressedBytesWritten) {
     this.compressedBytesWritten = compressedBytesWritten;
+  }
+
+  public long getSerializeTimeMs() {
+    return serializeTimeMs;
+  }
+
+  public void setSerializeTimeMs(long serializeTimeMs) {
+    this.serializeTimeMs = serializeTimeMs;
+  }
+
+  public long getCopyTimeMs() {
+    return copyTimeMs;
+  }
+
+  public void setCopyTimeMs(long copyTimeMs) {
+    this.copyTimeMs = copyTimeMs;
+  }
+
+  public long getCompressTimeMs() {
+    return compressTimeMs;
+  }
+
+  public void setCompressTimeMs(long compressTimeMs) {
+    this.compressTimeMs = compressTimeMs;
+  }
+
+  public long getQueueWaitTimeMs() {
+    return queueWaitTimeMs;
+  }
+
+  public void setQueueWaitTimeMs(long queueWaitTimeMs) {
+    this.queueWaitTimeMs = queueWaitTimeMs;
+  }
+
+  public long getQueueStallTimeMs() {
+    return queueStallTimeMs;
+  }
+
+  public void setQueueStallTimeMs(long queueStallTimeMs) {
+    this.queueStallTimeMs = queueStallTimeMs;
+  }
+
+  public long getInflightWaitTimeMs() {
+    return inflightWaitTimeMs;
+  }
+
+  public void setInflightWaitTimeMs(long inflightWaitTimeMs) {
+    this.inflightWaitTimeMs = inflightWaitTimeMs;
+  }
+
+  public long getDrainWaitTimeMs() {
+    return drainWaitTimeMs;
+  }
+
+  public void setDrainWaitTimeMs(long drainWaitTimeMs) {
+    this.drainWaitTimeMs = drainWaitTimeMs;
+  }
+
+  public long getMaxPushRttMs() {
+    return maxPushRttMs;
+  }
+
+  public void setMaxPushRttMs(long maxPushRttMs) {
+    this.maxPushRttMs = maxPushRttMs;
   }
 
   @Override

@@ -36,6 +36,26 @@ private[celeborn] case class AggregatedTaskInfoUIData(
   def id: String = classOf[AggregatedTaskInfoUIData].getName
 }
 
+/**
+ * Write-path timings reported through MapperEnd, summed across mapper attempts except
+ * maxPushRttMs which keeps the maximum. All fields default to 0 so records written by
+ * older versions (or a missing record) read back as "not reported".
+ */
+private[celeborn] case class CelebornWriteTimesUIData(
+    serializeTimeMs: Long = 0L,
+    copyTimeMs: Long = 0L,
+    compressTimeMs: Long = 0L,
+    queueWaitTimeMs: Long = 0L,
+    queueStallTimeMs: Long = 0L,
+    inflightWaitTimeMs: Long = 0L,
+    drainWaitTimeMs: Long = 0L,
+    maxPushRttMs: Long = 0L) {
+
+  @JsonIgnore
+  @KVIndex
+  def id: String = classOf[CelebornWriteTimesUIData].getName
+}
+
 private[celeborn] class CelebornPropertiesUIData(
     val info: Seq[(String, String)]) {
 
@@ -74,6 +94,15 @@ private[celeborn] class CelebornStatusStore(store: KVStore) {
       store.read(kClass, kClass.getName)
     } catch {
       case _: NoSuchElementException => AggregatedTaskInfoUIData(0L, 0L, 0L, 0L, 0L, 0L)
+    }
+  }
+
+  def writeTimes(): CelebornWriteTimesUIData = {
+    val kClass = classOf[CelebornWriteTimesUIData]
+    try {
+      store.read(kClass, kClass.getName)
+    } catch {
+      case _: NoSuchElementException => CelebornWriteTimesUIData()
     }
   }
 

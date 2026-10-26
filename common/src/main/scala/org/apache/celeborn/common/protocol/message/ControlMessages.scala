@@ -212,7 +212,20 @@ object ControlMessages extends Logging {
   // Extensible per-mapper metrics carried by MapperEnd, mirrors PbMapperMetrics.
   case class MapperMetrics(
       uncompressedBytesWritten: Long = 0L,
-      compressedBytesWritten: Long = 0L)
+      compressedBytesWritten: Long = 0L,
+      serializeTimeMs: Long = 0L,
+      copyTimeMs: Long = 0L,
+      compressTimeMs: Long = 0L,
+      queueWaitTimeMs: Long = 0L,
+      queueStallTimeMs: Long = 0L,
+      inflightWaitTimeMs: Long = 0L,
+      drainWaitTimeMs: Long = 0L,
+      maxPushRttMs: Long = 0L) {
+    // Java call sites (Spark writers, DummyShuffleClient) construct the bytes-only
+    // metrics; the timing fields are enriched by ShuffleClientImpl from PushState.
+    def this(uncompressedBytesWritten: Long, compressedBytesWritten: Long) =
+      this(uncompressedBytesWritten, compressedBytesWritten, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L)
+  }
 
   case class MapperEnd(
       shuffleId: Int,
@@ -773,7 +786,15 @@ object ControlMessages extends Logging {
           java.lang.Long.valueOf).toSeq.asJava)
         .setMetrics(PbMapperMetrics.newBuilder()
           .setUncompressedBytesWritten(metrics.uncompressedBytesWritten)
-          .setCompressedBytesWritten(metrics.compressedBytesWritten))
+          .setCompressedBytesWritten(metrics.compressedBytesWritten)
+          .setSerializeTimeMs(metrics.serializeTimeMs)
+          .setCopyTimeMs(metrics.copyTimeMs)
+          .setCompressTimeMs(metrics.compressTimeMs)
+          .setQueueWaitTimeMs(metrics.queueWaitTimeMs)
+          .setQueueStallTimeMs(metrics.queueStallTimeMs)
+          .setInflightWaitTimeMs(metrics.inflightWaitTimeMs)
+          .setDrainWaitTimeMs(metrics.drainWaitTimeMs)
+          .setMaxPushRttMs(metrics.maxPushRttMs))
         .build().toByteArray
       new TransportMessage(MessageType.MAPPER_END, payload, serdeVersion)
 
@@ -1287,7 +1308,15 @@ object ControlMessages extends Logging {
           message.getSerdeVersion,
           MapperMetrics(
             pbMapperEnd.getMetrics.getUncompressedBytesWritten,
-            pbMapperEnd.getMetrics.getCompressedBytesWritten))
+            pbMapperEnd.getMetrics.getCompressedBytesWritten,
+            pbMapperEnd.getMetrics.getSerializeTimeMs,
+            pbMapperEnd.getMetrics.getCopyTimeMs,
+            pbMapperEnd.getMetrics.getCompressTimeMs,
+            pbMapperEnd.getMetrics.getQueueWaitTimeMs,
+            pbMapperEnd.getMetrics.getQueueStallTimeMs,
+            pbMapperEnd.getMetrics.getInflightWaitTimeMs,
+            pbMapperEnd.getMetrics.getDrainWaitTimeMs,
+            pbMapperEnd.getMetrics.getMaxPushRttMs))
 
       case READ_REDUCER_PARTITION_END_VALUE =>
         val pbReadReducerPartitionEnd = PbReadReducerPartitionEnd.parseFrom(message.getPayload)

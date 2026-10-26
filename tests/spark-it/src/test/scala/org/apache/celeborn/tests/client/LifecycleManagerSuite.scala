@@ -183,6 +183,43 @@ class LifecycleManagerSuite extends WithShuffleClientSuite with MiniClusterFeatu
     assert(reported.asScala.toList == List((100L, 40L)))
   }
 
+  test("mapper end callback carries write-path timings from PushState") {
+    prepareService()
+    val numMappers = 8
+    val numPartitions = 9
+    val shuffleId = nextShuffleId
+    val mapId = 2
+    val attemptId = 0
+
+    val reported = new util.concurrent.ConcurrentLinkedQueue[MapperMetrics]()
+    lifecycleManager.registerMapperEndCallback((_, _, _, metrics) => reported.add(metrics))
+
+    // Register a REDUCE-partition shuffle, then seed PushState like the writers do.
+    shuffleClient.getPartitionLocation(shuffleId, numMappers, numPartitions)
+    val pushState =
+      shuffleClient.getPushState(org.apache.celeborn.common.util.Utils.makeMapKey(
+        shuffleId, mapId, attemptId))
+    pushState.addSerializeTime(11 * 1000000L)
+    pushState.addCopyTime(22 * 1000000L)
+    pushState.addCompressTime(33 * 1000000L)
+    pushState.addQueueWaitTime(44 * 1000000L)
+    pushState.addQueueStallTime(55 * 1000000L)
+    pushState.addInflightWaitTime(66 * 1000000L)
+    pushState.addDrainWaitTime(77 * 1000000L)
+    pushState.recordPushRtt(88 * 1000000L)
+
+    shuffleClient.mapperEnd(
+      shuffleId,
+      mapId,
+      attemptId,
+      numMappers,
+      numPartitions,
+      new MapperMetrics(100L, 40L))
+
+    assert(reported.asScala.toList == List(MapperMetrics(
+      100L, 40L, 11L, 22L, 33L, 44L, 55L, 66L, 77L, 88L)))
+  }
+
   override def afterAll(): Unit = {
     logInfo("all test complete , stop celeborn mini cluster")
     shutdownMiniCluster()

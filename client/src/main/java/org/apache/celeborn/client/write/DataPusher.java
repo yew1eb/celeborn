@@ -153,6 +153,7 @@ public class DataPusher {
 
   public void addTask(int partitionId, byte[] buffer, int size)
       throws IOException, InterruptedException {
+    long startTimeNanos = System.nanoTime();
     client.computeBatchCRC(shuffleId, mapId, attemptId, partitionId, buffer, 0, size);
     try {
       PushTask task = null;
@@ -170,6 +171,9 @@ public class DataPusher {
       logger.error("DataPusher thread interrupted while adding push task.");
       pushThread.interrupt();
       throw e;
+    } finally {
+      // Record the time the mapper thread is blocked by the push queue backpressure.
+      pushState.addQueueWaitTime(System.nanoTime() - startTimeNanos);
     }
   }
 
