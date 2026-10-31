@@ -1,6 +1,6 @@
 # [CELEBORN-2465][SPARK] Proactively unregister shuffles on SQL query completion
 
-> Status: Proposal (no code changes) · Jira: [CELEBORN-2465](https://issues.apache.org/jira/browse/CELEBORN-2465) · Baseline: Celeborn 0.7.0-SNAPSHOT · Related: [TODOList.md §2.6](TODOList.md)
+> Status: Proposal (no code changes) · Jira: [CELEBORN-2465](https://issues.apache.org/jira/browse/CELEBORN-2465) · Baseline: Celeborn 0.7.0-SNAPSHOT · Related: [TODOList.md §1.4](TODOList.md)
 
 ## Problem
 

@@ -1,8 +1,8 @@
 # Celeborn 调研知识库 · 索引
 
-> 本仓库根目录是 Apache Celeborn 的调研 / 分析工作区。**本文件是唯一入口**：按目的导航 + 文档地图 + 待办清单 + 维护约定。
+> 本仓库根目录是 Apache Celeborn 的调研 / 分析工作区。**本文件是唯一入口**：按目的导航 + 文档地图 + 维护约定。
 > 基线：Apache Celeborn 0.7.0-SNAPSHOT（分支 `ai-1`）｜ 最后更新：2026-10-31
-> 新增、合并或删除文档前，请先读 §3 维护约定。
+> 新增、合并或删除文档前，请先读 §2 维护约定。
 
 ---
 
@@ -79,105 +79,7 @@
 
 ---
 
-## 2. 待办
-
-> 优先级（P0/P1/P2）只在 [performance-optimization-analysis.md](performance-optimization-analysis.md) §11 定义，本节与各文档只引用、不重复定义阈值。
-> 细节与证据以来源文档为准；完成后勾选。
-
-### 2.1 生产集群配置与优化（Worker 内存/资源）
-
-来源：[worker-memory-and-optimization.md](worker-memory-and-optimization.md)（根因见第一部分，清单见第二部分）
-
-**P0**
-
-- [ ] 开启 `worker.pushdata.mergeBuffer`（纯配置，缓解小 push 钉 chunk 的堆外碎片；上游 CELEBORN-2152 已合入 0.6.2）
-- [ ] 修正 `resume(0.2) < readBufferRatio(0.35)` 配置冲突（纯配置，消除「永远无法 resume」风险）
-- [ ] `ReadBufferDispatcher` 误用 pooled heap buffer → 一行改 `directBuffer`（读 buffer 池从堆内挪回堆外配额体系；main 未修，可提 JIRA）
-
-**P1**
-
-- [ ] onTrim 加排序/限量/closed 剔除：泄压效率↑、小写 IO 放大↓（main 未做）
-- [ ] cleanup 单 Runnable → 分片到 64 线程池：大批量过期清理吞吐数量级提升（main 未做）
-- [ ] per-writer 轻量化组合拳（3.4KB→~1.5KB）：113K writer 场景省 ~200MB 堆，部分跟踪上游 PR #3825
-
-**P2**（归组，逐项见第二部分 §4.2/§5/§6）：lazy takeBuffer + idle flush、metrics 写入侧固定 flusher key + metricName 缓存、committedFileInfos dirty-only 落盘、fetch/push 应答 header duplicate churn（~11% alloc）。
-
-另：CELEBORN-2301（fetch 零拷贝）上游已合入、生产 0.6.2.2 未含 → [ ] 待回 port。
-
-### 2.2 社区贡献：Metrics/Grafana
-
-来源：[celeborn-community-and-ci.md](celeborn-community-and-ci.md) §3
-
-**P0（确定性 bug，1~10 行改动，适合第一批 PR）**
-
-- [ ] P0-1 `addHistogram` 用裸 name 注册进 Dropwizard，所有 label 变体共享同一 Histogram，且 `removeMetric` 永远删不掉（AbstractSource.scala:208-215，1 行修）
-- [ ] P0-2 `RpcMetricsTracker.close()` 移除 gauge/timer 时缺 `NAME_LABEL`，key 不匹配 → 移除是空操作，dispatcher/endpoint 生命周期泄漏
-- [ ] P0-3 `getAllMetricsNum` 漏统计 histogram，容量告警数值偏低（补 `namedHistogram.size()`）
-- [ ] P0-4 Grafana 面板引用不存在的 `metrics_LocalFetchChunkTime_Max`，永久 No data → 改 `metrics_FetchLocalChunkTime_Max`
-- [ ] P0-5 `docs/monitoring.md` 记录幽灵指标 `RatisApplyCompletedIndexDiff`（代码中只有 `RatisApplyCompletedIndex`）：删文档行 + 删面板（或真正实现 diff 指标）
-
-**P1**（9 项，归组）：杠杆最高 —— 扩展 `dev/lint_grafana.py`（补 unit/description/gridPos 检查 + pin CI linter 版本）；其余含 3 组复制粘贴重复面板、RPC timer 单位 ns↔ms 显示差 10⁶、172/194 面板缺 role 过滤、命名三种风格并存、`MessageWithHeader` 裸字符串等，逐项见 §3.2。
-
-**P2**（6 个设计级缺陷，归组）：`getMetrics` 破坏性读取、无界 in-flight timer map、metricsCleaner 单线程池泄漏、label 值未转义、client 无 MetricsSystem、Quota/S3/OSS 无指标 —— 均建议先发 dev@ 讨论再动手。
-
-### 2.3 社区贡献：Auth/SASL（11 个 PR 候选）
-
-来源：[celeborn-community-and-ci.md](celeborn-community-and-ci.md) §4。推荐起步顺序：PR-2 → PR-1 → PR-3。
-
-- [ ] PR-2 在 worker replicate port 启用 SASL（Worker.scala:251-252 一行漏传 `getServerBootstraps`，端到端可复现的鉴权绕过）
-- [ ] PR-1 修复 checkAuth 在 clientId 为 null 时 fail-open（整个按应用鉴权模型的根，17 处调用；依赖 PR-2 先行）
-- [ ] PR-3 增加 auth metrics + 失败日志（纯增量、零兼容风险，运维刚需）
-
-其余 8 项（PR-4~PR-11：补 auth 文档消除 7 个孤儿配置、SASL negotiation timeout 死字段、`SaslTimeoutException` 修或删、ApplicationLost 时清除 worker secret、auth 测试套件 15 项、registration secret 校验、SASL 机制可配置化 CELEBORN-1158、secret 查询移出 Netty event loop）逐项见 §4.2/§4.3。
-
-### 2.4 社区贡献：代码 TODO（6 项推荐）
-
-来源：[celeborn-community-and-ci.md](celeborn-community-and-ci.md) §2（其余 28 项暂缓见 §2.3）
-
-- [ ] ⭐⭐⭐ 修复 `ThreadStackTrace.toString` 丢弃 `blockedByThreadId` 结果的真 bug（顺手兑现 TODO，十几行，<0.5 天，评审风险最低，建议第一发）
-- [ ] ⭐⭐⭐ `TagsManager.getTagStore` 每次调用重建 ConcurrentHashMap（性能 + 双 store 一致性隐患，1~2 天；动手前先邮件列表确认方案 A/B）
-- [ ] ⭐⭐⭐ 服务端校验 `AuthenticationInitiationRequest`（安全加固：版本/authEnabled/机制列表均未校验，1~2 天）
-- [ ] ⭐⭐（归组）：清理 `RegistrationClientBootstrap` 过时 TODO（可与上一项同 PR）、Kerberos name rules 可配置化（`SpnegoAuthenticationHandler` 硬编码 `"DEFAULT"`）、`shuffleToCompletedMappers` 换原生 Int→Int 结构（备选，需 JMH 证明收益）
-
-### 2.5 社区贡献：CI 优化
-
-来源：[celeborn-community-and-ci.md](celeborn-community-and-ci.md) §5.4
-
-- [ ] C1 MiniClusterFeature 固定 sleep → 条件等待（收益最大：每触集群 suite 省 15-20s，单次 CI 省 5-7 分钟）
-- [ ] C2 修复 LifecycleManager 泄漏（改动最小：消 1/3 日志噪声（591×2 条 ERROR），适合作为首个贡献）
-- [ ] C3 缓存 Maven 本体（CI 提速，~20 job × 25s~2min，有 cb086f2ca 先例背书，审议阻力最小）
-- [ ] C4 修复 S3 e2e 测试在 CI 从未真正执行（7 个 s3 用例恒 CANCELED，正确性问题，建议先发 JIRA/邮件列表讨论）
-
-次级候选（C5，见 §5.4）：Maven 并行构建（-T 1C）、ShuffleFallbackSuite 起停挪回 beforeAll/afterAll、UnregisterShuffleSuite eventually 窗口收紧、CommitFilesSuite 调小 retryWait、spark4 job 含 spark-3 模块单测。
-
-来自 [celeborn-community-and-ci.md](celeborn-community-and-ci.md) §5.2（2026-10-29 Test-with-SBT 日志，job 绿色）：
-
-- [ ] 🔴 ReusedExchangeSuite 期间 worker push server 出现 Netty ByteBuf LEAK（epoll 接收 buffer 未 release，疑似真 bug）：先加 `-Dio.netty.leakDetection.level=paranoid` 复跑该 suite 确认可复现性
-- [ ] 升级弃用的 actions：`setup-java@v5`、checkout/cache 的 Node 24 兼容版本
-- [ ] WorkerStatusTracker ERROR 消息以换行开头导致空首行（×14）：改单行格式，可作社区小 PR
-- [ ] Jersey WADL WARNING ×39（每次起 HTTP 服务一条）：禁用 WadlFeature 或补 JAXB 依赖，消噪声
-
-### 2.6 设计提案推进状态
-
-| 提案 | 状态 | 下一步 |
-|------|------|--------|
-| [queryEndShuffleCleanup](issue-query-end-shuffle-cleanup.md)（CELEBORN-2465） | 仅提案，未落地代码 | 提 PR（opt-in 配置 + SQLExecutionEnd 监听） |
-| [Overlapping 压缩/解压](overlapping-compression-decompression-design.md) | 调研与设计完成，无代码改动 | P0 ThreadSafety 改造起步 → P1 读路径 → P2 写路径 → P3 加密兼容/压测 |
-| [自适应分区写并行度](dynamic-partition-write-parallelism-design.md) | Phase 1.3 已实现（分支 `parallel-partition-write`） | spark-it 集成测试 + 故障注入 + 真实集群灰度 |
-| [CongestionControl App 粒度扩展](congestion-control-analysis-and-design.md) | 得物内部分支 `feature/app-level-congestion-control`（v0.6.2-based） | 内部推进 |
-| [Batched Heartbeat Raft Writes](cip-master-ha-heartbeat-batch.md)（CELEBORN-2429） | CIP Draft（分支 `CELEBORN-2429`，默认关闭的纯增量设计） | 草案评审 → 实现 |
-
-### 2.7 进行时：集群高峰期自动降级控制
-
-来源：[cluster-degradation-control-design.md](cluster-degradation-control-design.md)（2026-10-27 立项）
-
-- [ ] **生产观察期（→2026-11-13）**：只开 CongestionControl 开关、不配水位线（零限速风险），经现有 CongestionRelatives 大盘实测写入速率分布，产出水位线建议值（与开发并行）
-- [ ] 开发（→11-06）→ 联调（→11-13）→ 测试（→11-20）→ 灰度（→12-04）→ 全量上线与调参（→12-18）
-- Phase 2（磁盘水位直读 / master 中心化决策）为下一期演进，与本方案叠加
-
----
-
-## 3. 文档维护约定
+## 2. 文档维护约定
 
 1. **新增**：先在上表对应分类登记（文档名 + 内容一句话 + 基线/日期），再写正文；文件名统一 kebab-case。
 2. **头部必填**：每篇正文前 8 行内给出 `> 基线（版本/分支/commit）｜ 整理日期 ｜ 状态 ｜ 来源或合并说明`。
