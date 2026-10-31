@@ -11,14 +11,13 @@
 | 我想… | 去这里 |
 |---|---|
 | 快速了解 Celeborn 整体架构 | [ARCHITECTURE_ANALYSIS.md](ARCHITECTURE_ANALYSIS.md)（约 30 分钟） |
-| 看某个模块**源码级**怎么跑 | §1.1 源码阅读系列（9 篇，按模块划分，均带行号） |
-| 找能改的代码 / 能提社区的 PR | [performance-optimization-analysis.md](performance-optimization-analysis.md) §11 优先级矩阵 + §1.5 社区贡献 |
+| 看某个模块**源码级**怎么跑 | §1.1 源码阅读系列（10 篇，按模块划分，均带行号） |
+| 找能改的代码 / 能提社区的 PR | [performance-optimization-analysis.md](performance-optimization-analysis.md) §11 优先级矩阵 + [celeborn-community-and-ci.md](celeborn-community-and-ci.md) §2~§4 |
 | 搞懂 Spark 侧读写**到底慢在哪** | [celeborn-shuffle-pipeline.md](celeborn-shuffle-pipeline.md)（流程图）+ [spark-shuffle-thread-model-and-metrics.md](spark-shuffle-thread-model-and-metrics.md)（线程模型与指标口径） |
 | 查某个配置键 | [celeborn-conf-functional-map.md](celeborn-conf-functional-map.md)（人工精选导读）；全量权威见 `docs/configuration/` |
 | 写设计 / 提案 / 立项 | §1.4 设计文档与提案（6 篇） |
 | 看生产问题的实证证据 | [production-performance-analysis.md](production-performance-analysis.md)（火焰图/heapdump）、[worker-memory-and-optimization.md](worker-memory-and-optimization.md)（内存根因） |
-| 配监控 / 告警 | [celeborn-alerting-and-monitoring.md](celeborn-alerting-and-monitoring.md) |
-| 跟进 CI 问题 | [CI-issues.md](CI-issues.md) |
+| 跟进 CI 问题 / 优化 CI | [celeborn-community-and-ci.md](celeborn-community-and-ci.md) §5 |
 
 ---
 
@@ -67,28 +66,13 @@
 | [cip-master-ha-heartbeat-batch.md](cip-master-ha-heartbeat-batch.md) | **CIP 草案：Batched Heartbeat Raft Writes**（CELEBORN-2429）：HA 下心跳是最高频 raft 写（生产峰值 ~97 entries/s），提案批量化削减条目数 | 📝 Draft EN（分支 `CELEBORN-2429`） |
 | [issue-query-end-shuffle-cleanup.md](issue-query-end-shuffle-cleanup.md) | **CELEBORN-2465 提案**：SQL query 结束时主动 unregister shuffle（opt-in 配置 + SQLExecutionEnd 监听） | 📝 仅提案，未落地 EN |
 
-### 1.5 社区贡献（3 篇）
+### 1.5 社区贡献与 CI（1 篇）
 
 | 文档 | 内容 |
 |---|---|
-| [celeborn-todo-analysis.md](celeborn-todo-analysis.md) | 全仓 34 处 TODO 的社区贡献机会评估：模块分布、三维定级（难度/影响面/贡献度）、6 项推荐 + 28 项暂缓 + 建议 PR 顺序 |
-| [celeborn-metrics-grafana-community-contributions.md](celeborn-metrics-grafana-community-contributions.md) | Metrics/Grafana 20 个可提交点：P0 确定性 bug ×5 / P1 质量一致性 ×9 / P2 设计级缺陷 ×6，行号逐条核实 |
-| [celeborn-auth-sasl-analysis.md](celeborn-auth-sasl-analysis.md) | Auth/SASL 20+ 改进点，11 个可独立成 PR 的候选（推荐 PR-2→PR-1→PR-3），含端到端可复现的鉴权绕过 |
+| [celeborn-community-and-ci.md](celeborn-community-and-ci.md) | 合并篇：代码 TODO 6 项推荐（34 处全量评估）+ Metrics/Grafana 20 个可提交点（P0 5 / P1 9 / P2 6）+ Auth/SASL 11 个 PR 候选 + CI 问题台账（P1-P11）与 5 项优化提案；含跨方向提交顺序 |
 
-### 1.6 CI（2 篇）
-
-| 文档 | 内容 |
-|---|---|
-| [CI-issues.md](CI-issues.md) | **CI 日志问题台账**（活文档）：日志索引 + 跨 job 问题清单（P1-P11）+ 各 job 预期 ERROR 归类 + 追加模板 |
-| [celeborn-ci-spark42-analysis.md](celeborn-ci-spark42-analysis.md) | CI（Spark 4.2）单 job 深度分析：44 分钟时间线分解 + P1-P5 提速提案（条件等待/泄漏修复/缓存 Maven/S3 e2e 未真正执行） |
-
-### 1.7 监控与告警（1 篇）
-
-| 文档 | 内容 |
-|---|---|
-| [celeborn-alerting-and-monitoring.md](celeborn-alerting-and-monitoring.md) | 第一部分：Spark 任务告警全景（EDS 通道 + Celeborn，Mermaid）+ 已上线规则表；第二部分：磁盘余量异常波动监控设计（同环比/周同比、Recording/Alert Rules、Grafana 面板） |
-
-### 1.8 配置参考（1 篇）
+### 1.6 配置参考（1 篇）
 
 | 文档 | 内容 |
 |---|---|
@@ -123,7 +107,7 @@
 
 ### 2.2 社区贡献：Metrics/Grafana
 
-来源：[celeborn-metrics-grafana-community-contributions.md](celeborn-metrics-grafana-community-contributions.md)
+来源：[celeborn-community-and-ci.md](celeborn-community-and-ci.md) §3
 
 **P0（确定性 bug，1~10 行改动，适合第一批 PR）**
 
@@ -133,23 +117,23 @@
 - [ ] P0-4 Grafana 面板引用不存在的 `metrics_LocalFetchChunkTime_Max`，永久 No data → 改 `metrics_FetchLocalChunkTime_Max`
 - [ ] P0-5 `docs/monitoring.md` 记录幽灵指标 `RatisApplyCompletedIndexDiff`（代码中只有 `RatisApplyCompletedIndex`）：删文档行 + 删面板（或真正实现 diff 指标）
 
-**P1**（9 项，归组）：杠杆最高 —— 扩展 `dev/lint_grafana.py`（补 unit/description/gridPos 检查 + pin CI linter 版本）；其余含 3 组复制粘贴重复面板、RPC timer 单位 ns↔ms 显示差 10⁶、172/194 面板缺 role 过滤、命名三种风格并存、`MessageWithHeader` 裸字符串等，逐项见原文。
+**P1**（9 项，归组）：杠杆最高 —— 扩展 `dev/lint_grafana.py`（补 unit/description/gridPos 检查 + pin CI linter 版本）；其余含 3 组复制粘贴重复面板、RPC timer 单位 ns↔ms 显示差 10⁶、172/194 面板缺 role 过滤、命名三种风格并存、`MessageWithHeader` 裸字符串等，逐项见 §3.2。
 
 **P2**（6 个设计级缺陷，归组）：`getMetrics` 破坏性读取、无界 in-flight timer map、metricsCleaner 单线程池泄漏、label 值未转义、client 无 MetricsSystem、Quota/S3/OSS 无指标 —— 均建议先发 dev@ 讨论再动手。
 
 ### 2.3 社区贡献：Auth/SASL（11 个 PR 候选）
 
-来源：[celeborn-auth-sasl-analysis.md](celeborn-auth-sasl-analysis.md)。推荐起步顺序：PR-2 → PR-1 → PR-3。
+来源：[celeborn-community-and-ci.md](celeborn-community-and-ci.md) §4。推荐起步顺序：PR-2 → PR-1 → PR-3。
 
 - [ ] PR-2 在 worker replicate port 启用 SASL（Worker.scala:251-252 一行漏传 `getServerBootstraps`，端到端可复现的鉴权绕过）
 - [ ] PR-1 修复 checkAuth 在 clientId 为 null 时 fail-open（整个按应用鉴权模型的根，17 处调用；依赖 PR-2 先行）
 - [ ] PR-3 增加 auth metrics + 失败日志（纯增量、零兼容风险，运维刚需）
 
-其余 8 项（PR-4~PR-11：补 auth 文档消除 7 个孤儿配置、SASL negotiation timeout 死字段、`SaslTimeoutException` 修或删、ApplicationLost 时清除 worker secret、auth 测试套件 15 项、registration secret 校验、SASL 机制可配置化 CELEBORN-1158、secret 查询移出 Netty event loop）逐项见原文。
+其余 8 项（PR-4~PR-11：补 auth 文档消除 7 个孤儿配置、SASL negotiation timeout 死字段、`SaslTimeoutException` 修或删、ApplicationLost 时清除 worker secret、auth 测试套件 15 项、registration secret 校验、SASL 机制可配置化 CELEBORN-1158、secret 查询移出 Netty event loop）逐项见 §4.2/§4.3。
 
 ### 2.4 社区贡献：代码 TODO（6 项推荐）
 
-来源：[celeborn-todo-analysis.md](celeborn-todo-analysis.md) §3（其余 28 项暂缓清单见原文 §4）
+来源：[celeborn-community-and-ci.md](celeborn-community-and-ci.md) §2（其余 28 项暂缓见 §2.3）
 
 - [ ] ⭐⭐⭐ 修复 `ThreadStackTrace.toString` 丢弃 `blockedByThreadId` 结果的真 bug（顺手兑现 TODO，十几行，<0.5 天，评审风险最低，建议第一发）
 - [ ] ⭐⭐⭐ `TagsManager.getTagStore` 每次调用重建 ConcurrentHashMap（性能 + 双 store 一致性隐患，1~2 天；动手前先邮件列表确认方案 A/B）
@@ -158,16 +142,16 @@
 
 ### 2.5 社区贡献：CI 优化
 
-来源：[celeborn-ci-spark42-analysis.md](celeborn-ci-spark42-analysis.md)
+来源：[celeborn-community-and-ci.md](celeborn-community-and-ci.md) §5.4
 
-- [ ] P1 MiniClusterFeature 固定 sleep → 条件等待（收益最大：每触集群 suite 省 15-20s，单次 CI 省 5-7 分钟）
-- [ ] P2 修复 LifecycleManager 泄漏（改动最小：消 1/3 日志噪声（591×2 条 ERROR），适合作为首个贡献）
-- [ ] P3 缓存 Maven 本体（CI 提速，~20 job × 25s~2min，有 cb086f2ca 先例背书，审议阻力最小）
-- [ ] P4 修复 S3 e2e 测试在 CI 从未真正执行（7 个 s3 用例恒 CANCELED，正确性问题，建议先发 JIRA/邮件列表讨论）
+- [ ] C1 MiniClusterFeature 固定 sleep → 条件等待（收益最大：每触集群 suite 省 15-20s，单次 CI 省 5-7 分钟）
+- [ ] C2 修复 LifecycleManager 泄漏（改动最小：消 1/3 日志噪声（591×2 条 ERROR），适合作为首个贡献）
+- [ ] C3 缓存 Maven 本体（CI 提速，~20 job × 25s~2min，有 cb086f2ca 先例背书，审议阻力最小）
+- [ ] C4 修复 S3 e2e 测试在 CI 从未真正执行（7 个 s3 用例恒 CANCELED，正确性问题，建议先发 JIRA/邮件列表讨论）
 
-次级候选（P5，见原文）：Maven 并行构建（-T 1C）、ShuffleFallbackSuite 起停挪回 beforeAll/afterAll、UnregisterShuffleSuite eventually 窗口收紧、CommitFilesSuite 调小 retryWait、spark4 job 含 spark-3 模块单测。
+次级候选（C5，见 §5.4）：Maven 并行构建（-T 1C）、ShuffleFallbackSuite 起停挪回 beforeAll/afterAll、UnregisterShuffleSuite eventually 窗口收紧、CommitFilesSuite 调小 retryWait、spark4 job 含 spark-3 模块单测。
 
-来自 [CI-issues.md](CI-issues.md)（2026-10-29 Test-with-SBT 日志，job 绿色）：
+来自 [celeborn-community-and-ci.md](celeborn-community-and-ci.md) §5.2（2026-10-29 Test-with-SBT 日志，job 绿色）：
 
 - [ ] 🔴 ReusedExchangeSuite 期间 worker push server 出现 Netty ByteBuf LEAK（epoll 接收 buffer 未 release，疑似真 bug）：先加 `-Dio.netty.leakDetection.level=paranoid` 复跑该 suite 确认可复现性
 - [ ] 升级弃用的 actions：`setup-java@v5`、checkout/cache 的 Node 24 兼容版本
