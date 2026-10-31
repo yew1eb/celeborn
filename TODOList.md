@@ -13,7 +13,7 @@
 | 快速了解 Celeborn 整体架构 | [ARCHITECTURE_ANALYSIS.md](ARCHITECTURE_ANALYSIS.md)（约 30 分钟） |
 | 看某个模块**源码级**怎么跑 | §1.1 源码阅读系列（10 篇，按模块划分，均带行号） |
 | 找能改的代码 / 能提社区的 PR | [performance-optimization-analysis.md](performance-optimization-analysis.md) §11 优先级矩阵 + [celeborn-community-and-ci.md](celeborn-community-and-ci.md) §2~§4 |
-| 搞懂 Spark 侧读写**到底慢在哪** | [celeborn-shuffle-pipeline.md](celeborn-shuffle-pipeline.md)（流程图）+ [spark-shuffle-thread-model-and-metrics.md](spark-shuffle-thread-model-and-metrics.md)（线程模型与指标口径） |
+| 搞懂 Spark 侧读写**到底慢在哪** | [celeborn-shuffle-pipeline.md](celeborn-shuffle-pipeline.md)（流程图 + 第四部分线程模型与指标口径） |
 | 查某个配置键 | [celeborn-conf-functional-map.md](celeborn-conf-functional-map.md)（人工精选导读）；全量权威见 `docs/configuration/` |
 | 写设计 / 提案 / 立项 | §1.4 设计文档与提案（6 篇） |
 | 看生产问题的实证证据 | [production-performance-analysis.md](production-performance-analysis.md)（火焰图/heapdump）、[worker-memory-and-optimization.md](worker-memory-and-optimization.md)（内存根因） |
@@ -48,12 +48,11 @@
 | [production-performance-analysis.md](production-performance-analysis.md) | 生产实证分析：Worker/Master CPU 火焰图 + Heapdump，含跨组件共性发现 | 生产 0.6.2.x，行号已对 0.7.0-SNAPSHOT 核实 / 2026-08-05 📊 |
 | [worker-memory-and-optimization.md](worker-memory-and-optimization.md) | **Worker 高内存水位根因 + 优化清单**：第一部分根因（无界缓冲驻留 + writer 生命周期），第二部分增量优化（P0-P2、CELEBORN-2301 回 port） | 生产 0.6.2.2 / 2026-09-13 profile 📊 |
 
-### 1.3 Spark 侧链路与指标（2 篇）
+### 1.3 Spark 侧链路与指标（1 篇）
 
 | 文档 | 内容 | 基线 / 更新 |
 |---|---|---|
-| [celeborn-shuffle-pipeline.md](celeborn-shuffle-pipeline.md) | 读写链路 Mermaid 流程图（14 张）：写侧拓扑/泳道/三级反压/CPU 争抢/耗时归属，读侧拓扑/泳道/失败重试/耗时归属，第三部分与 Spark 原生 SortShuffleWriter、BlockStoreShuffleReader 对比 | `celeborn-ai` 工作树 / 2026-08-05 |
-| [spark-shuffle-thread-model-and-metrics.md](spark-shuffle-thread-model-and-metrics.md) | Spark task 侧线程模型（DataPusher / WorkerPartitionReader，行号级）+ 生产指标归因 + Spark UI Write/Read Times 逐字段审计与缺口清单（W1-W7/R1-R3/D1-D2） | `parallel-partition-write` 分支 / 2026-08-09~10 |
+| [celeborn-shuffle-pipeline.md](celeborn-shuffle-pipeline.md) | 读写链路 Mermaid 流程图（14 张）+ 线程模型与指标口径：写侧拓扑/泳道/三级反压/CPU 争抢/耗时归属，读侧拓扑/泳道/失败重试/耗时归属，第三部分与 Spark 原生 SortShuffleWriter、BlockStoreShuffleReader 对比，第四部分 DataPusher/WorkerPartitionReader 线程模型、生产指标归因、Write/Read Times 逐字段审计与缺口（W1-W7/R1-R3/D1-D2） | `celeborn-ai` 工作树 / 2026-08-05；第四部分基于 `parallel-partition-write` 分支 / 2026-08-09~10 |
 
 ### 1.4 设计文档与提案（6 篇）
 

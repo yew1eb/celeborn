@@ -4,7 +4,7 @@
 > 覆盖模块：`client/src/main/java/org/apache/celeborn/client/`、`client/src/main/java/org/apache/celeborn/client/read/`、`common/src/main/java/org/apache/celeborn/common/write/`
 > 核心文件：`ShuffleClient.java`、`ShuffleClientImpl.java`、`ReviveManager.java`、`read/CelebornInputStream.java`、`read/WorkerPartitionReader.java`、`read/DfsPartitionReader.java`、`read/LocalPartitionReader.java`、`common/write/PushState.java`、`common/write/InFlightRequestTracker.java`、`common/write/DataBatches.java`
 
-**边界说明**：控制平面（`LifecycleManager` 的 `offerAndReserveSlots` / StageEnd / Commit / ChangePartitionManager 内部实现）已由 [client-control-plane-deep-dive.md](./client-control-plane-deep-dive.md) 覆盖，本文只写数据面，LM 侧仅描述接口边界。写路径在 Executor 内的线程模型（`DataPusher`、Writer 线程、压缩等）已由 [celeborn-shuffle-pipeline.md](./celeborn-shuffle-pipeline.md) 与 [spark-shuffle-thread-model-and-metrics.md](./spark-shuffle-thread-model-and-metrics.md) 覆盖，本文不重复展开。
+**边界说明**：控制平面（`LifecycleManager` 的 `offerAndReserveSlots` / StageEnd / Commit / ChangePartitionManager 内部实现）已由 [client-control-plane-deep-dive.md](./client-control-plane-deep-dive.md) 覆盖，本文只写数据面，LM 侧仅描述接口边界。写路径在 Executor 内的线程模型（`DataPusher`、Writer 线程、压缩等）已由 [celeborn-shuffle-pipeline.md](./celeborn-shuffle-pipeline.md) 第四部分覆盖，本文不重复展开。
 
 ---
 
@@ -599,7 +599,7 @@ DFS 读路径消费端慢于读取时，fetch 线程忙轮询退避，每个 chu
 ### 9.2 延伸阅读
 
 - [client-control-plane-deep-dive.md](./client-control-plane-deep-dive.md) — 本文所有 RPC 在 LifecycleManager 侧的处理（Revive 重分配、Commit、StageEnd）
-- [celeborn-shuffle-pipeline.md](./celeborn-shuffle-pipeline.md) / [spark-shuffle-thread-model-and-metrics.md](./spark-shuffle-thread-model-and-metrics.md) — 写路径在 Executor 内的线程模型与 `DataPusher`
+- [celeborn-shuffle-pipeline.md](./celeborn-shuffle-pipeline.md) — 写路径在 Executor 内的线程模型与 `DataPusher`（第四部分）
 - [network-and-protocol-deep-dive.md](./network-and-protocol-deep-dive.md) — `PushData`/`PushMergedData`/`fetchChunk` 的底层 Netty 协议
 - [docs/developers/shuffleclient.md](./docs/developers/shuffleclient.md) — 官方数据面设计（Push/Merge、Split、Read）
 - [docs/developers/faulttolerant.md](./docs/developers/faulttolerant.md) — 官方容错设计（Revive、BatchRevive、Fetch 重试、Exactly-Once）
