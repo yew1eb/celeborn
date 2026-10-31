@@ -12,7 +12,7 @@
 |---|---|
 | 快速了解 Celeborn 整体架构 | [ARCHITECTURE_ANALYSIS.md](ARCHITECTURE_ANALYSIS.md)（约 30 分钟） |
 | 看某个模块**源码级**怎么跑 | §1.1 源码阅读系列（10 篇，按模块划分，均带行号） |
-| 找能改的代码 / 能提社区的 PR | [performance-optimization-analysis.md](performance-optimization-analysis.md) §11 优先级矩阵 + [celeborn-community-and-ci.md](celeborn-community-and-ci.md) §2~§4 |
+| 找能改的代码 / 能提社区的 PR | [performance-optimization-analysis.md](performance-optimization-analysis.md) §11 优先级矩阵 + [celeborn-community-and-ci.md](celeborn-community-and-ci.md) §2~§4（TODO / Metrics / Auth / CI）+ [celeborn-community-backlog.md](celeborn-community-backlog.md)（其余 21 篇的模块篇清单） |
 | 搞懂 Spark 侧读写**到底慢在哪** | [celeborn-shuffle-pipeline.md](celeborn-shuffle-pipeline.md)（流程图 + 第四部分线程模型与指标口径） |
 | 查某个配置键 | [celeborn-conf-functional-map.md](celeborn-conf-functional-map.md)（人工精选导读）；全量权威见 `docs/configuration/` |
 | 写设计 / 提案 / 立项 | §1.4 设计文档与提案（6 篇） |
@@ -65,11 +65,12 @@
 | [cip-master-ha-heartbeat-batch.md](cip-master-ha-heartbeat-batch.md) | **CIP 草案：Batched Heartbeat Raft Writes**（CELEBORN-2429）：HA 下心跳是最高频 raft 写（生产峰值 ~97 entries/s），提案批量化削减条目数 | 📝 Draft EN（分支 `CELEBORN-2429`） |
 | [issue-query-end-shuffle-cleanup.md](issue-query-end-shuffle-cleanup.md) | **CELEBORN-2465 提案**：SQL query 结束时主动 unregister shuffle（opt-in 配置 + SQLExecutionEnd 监听） | 📝 仅提案，未落地 EN |
 
-### 1.5 社区贡献与 CI（1 篇）
+### 1.5 社区贡献与 CI（2 篇）
 
 | 文档 | 内容 |
 |---|---|
 | [celeborn-community-and-ci.md](celeborn-community-and-ci.md) | 合并篇：代码 TODO 6 项推荐（34 处全量评估）+ Metrics/Grafana 20 个可提交点（P0 5 / P1 9 / P2 6）+ Auth/SASL 11 个 PR 候选 + CI 问题台账（P1-P11）与 5 项优化提案；含跨方向提交顺序 |
+| [celeborn-community-backlog.md](celeborn-community-backlog.md) | 模块篇全量清单：从其余 21 篇文档抽取 166 个候选点（待提 78 / 需讨论 72 / 仅内部 14，Master/HA/Worker/Client/网络/Service/CLI/引擎/Spark 指标/配置/设计提案），去重既有 T/M/A/P/C，含状态台账、首批 8 条与提交顺序 |
 
 ### 1.6 配置参考（1 篇）
 
@@ -84,6 +85,6 @@
 1. **新增**：先在上表对应分类登记（文档名 + 内容一句话 + 基线/日期），再写正文；文件名统一 kebab-case。
 2. **头部必填**：每篇正文前 8 行内给出 `> 基线（版本/分支/commit）｜ 整理日期 ｜ 状态 ｜ 来源或合并说明`。
 3. **合并优先于新增**：新内容若属于既有文档主题，改写原文档而非新建；合并后删除源文件。
-4. **优先级单一来源**：P0/P1/P2 与阈值只在 `performance-optimization-analysis.md` §11 定义，其他文档引用不复述。
+4. **优先级单一来源**：P0/P1/P2 与阈值只在 `performance-optimization-analysis.md` §11 定义，其他文档引用不复述；`celeborn-community-backlog.md` 只用“首批 / 体量 / 状态”，不另立优先级。
 5. **行号必须带基线**：引用 `file:line` 时注明所在分支/commit；不同基线的文档禁止直接比对行号。
 6. **语言**：面向社区提案的英文文档（`EN`）保持英文，其余用中文；术语与代码标识符保留原文。

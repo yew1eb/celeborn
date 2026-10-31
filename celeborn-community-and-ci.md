@@ -15,6 +15,8 @@
 
 **跨方向第一批 PR**：T1（真 bug）→ Metrics PR-1（3 个计数 bug）→ Auth PR-2（replicate SASL，必须先于 PR-1）→ CI C2（测试泄漏修复）。
 
+> 本文只覆盖代码 TODO / Metrics / Auth / CI；Master/HA/Worker/Client/网络/Service/CLI/引擎/Spark 指标/设计提案等其余方向见 [celeborn-community-backlog.md](celeborn-community-backlog.md)。两文按代码位置去重，不重复计数。
+
 ---
 
 ## 2. 代码 TODO：34 处，6 项推荐
