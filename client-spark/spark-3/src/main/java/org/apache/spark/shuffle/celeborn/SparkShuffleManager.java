@@ -99,7 +99,7 @@ public class SparkShuffleManager implements ShuffleManager {
   // either be "{appId}_{appAttemptId}" or "{appId}"
   private String appUniqueId;
 
-  private LifecycleManager lifecycleManager;
+  private volatile LifecycleManager lifecycleManager;
   private ShuffleAssignmentListener shuffleAssignmentListener;
   private ShuffleClient shuffleClient;
   private volatile SortShuffleManager _sortShuffleManager;
@@ -248,6 +248,8 @@ public class SparkShuffleManager implements ShuffleManager {
           }
 
           if (celebornConf.getReducerFileGroupBroadcastEnabled()) {
+            lifecycleManager.registerCachedBroadcastGetReducerFileGroupResponseCallback(
+                SparkUtils::getCachedSerializedGetReducerFileGroupResponse);
             lifecycleManager.registerBroadcastGetReducerFileGroupResponseCallback(
                 (shuffleId, getReducerFileGroupResponse) ->
                     SparkUtils.serializeGetReducerFileGroupResponse(
@@ -574,7 +576,6 @@ public class SparkShuffleManager implements ShuffleManager {
     return shuffleAssignmentListener;
   }
 
-  // for testing
   public LifecycleManager getLifecycleManager() {
     return this.lifecycleManager;
   }

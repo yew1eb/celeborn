@@ -88,6 +88,10 @@ private[celeborn] class Dispatcher(nettyEnv: NettyRpcEnv, rpcSource: RpcSource) 
     endpointRef
   }
 
+  private[netty] def endpointRpcMetrics(endpointName: String): Option[RpcMetricsSnapshot] = {
+    Option(endpoints.get(endpointName)).flatMap(_.inbox.metrics.snapshot())
+  }
+
   def getRpcEndpointRef(endpoint: RpcEndpoint): RpcEndpointRef = endpointRefs.get(endpoint)
 
   def removeRpcEndpointRef(endpoint: RpcEndpoint): Unit = endpointRefs.remove(endpoint)
@@ -153,10 +157,10 @@ private[celeborn] class Dispatcher(nettyEnv: NettyRpcEnv, rpcSource: RpcSource) 
   }
 
   /** Posts a one-way message. */
-  def postOneWayMessage(message: RequestMessage): Unit = {
+  def postOneWayMessage(message: RequestMessage, origin: RpcMessageOrigin): Unit = {
     postMessage(
       message.receiver.name,
-      OneWayMessage(message.senderAddress, message.content),
+      OneWayMessage(message.senderAddress, message.content, origin),
       e => throw e)
   }
 

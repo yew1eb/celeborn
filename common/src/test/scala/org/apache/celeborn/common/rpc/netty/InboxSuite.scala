@@ -26,7 +26,8 @@ import org.scalatest.BeforeAndAfter
 import org.apache.celeborn.CelebornFunSuite
 import org.apache.celeborn.common.CelebornConf
 import org.apache.celeborn.common.metrics.source.Role
-import org.apache.celeborn.common.rpc.{RpcAddress, RpcMetricsTracker, RpcSource, TestRpcEndpoint}
+import org.apache.celeborn.common.protocol.RpcNameConstants
+import org.apache.celeborn.common.rpc.{RpcAddress, RpcMessageOrigin, RpcMetricsTracker, RpcSource, TestRpcEndpoint}
 import org.apache.celeborn.common.util.ThreadUtils
 
 class InboxSuite extends CelebornFunSuite with BeforeAndAfter {
@@ -67,7 +68,7 @@ class InboxSuite extends CelebornFunSuite with BeforeAndAfter {
   test("post") {
     val dispatcher = mock(classOf[Dispatcher])
 
-    val message = OneWayMessage(null, "hi")
+    val message = OneWayMessage(null, "hi", RpcMessageOrigin.local())
     inbox.post(message)
     inbox.process(dispatcher)
     assert(inbox.isEmpty)
@@ -79,6 +80,36 @@ class InboxSuite extends CelebornFunSuite with BeforeAndAfter {
     assert(inbox.isEmpty)
     endpoint.verifyStarted()
     endpoint.verifyStopped()
+  }
+
+  test("rpc metrics snapshot") {
+    val conf = new CelebornConf()
+    val source = new RpcSource(conf, Role.CLIENT)
+    val histogramTracker =
+      new RpcMetricsTracker(RpcNameConstants.LIFECYCLE_MANAGER_EP, source, conf)
+    val plainTracker = new RpcMetricsTracker("testRpc", source, conf)
+
+    assert(plainTracker.snapshot().isEmpty)
+    assert(histogramTracker.snapshot().exists(_.methods.isEmpty))
+
+    histogramTracker.record("hi", 100L, 200L)
+
+    val snapshot = histogramTracker.snapshot().get
+    assert(snapshot.endpointName == RpcNameConstants.LIFECYCLE_MANAGER_EP)
+    val names = snapshot.methods.map(_.name)
+    assert(names.contains(RpcSource.QUEUE_TIME))
+    assert(names.contains(RpcSource.PROCESS_TIME))
+    assert(names.contains("unknown"))
+
+    val processTime = snapshot.methods.find(_.name == RpcSource.PROCESS_TIME).get
+    assert(processTime.count == 1L)
+    assert(processTime.min == 200L)
+    assert(processTime.max == 200L)
+    val queueTime = snapshot.methods.find(_.name == RpcSource.QUEUE_TIME).get
+    assert(queueTime.min == 100L)
+
+    histogramTracker.close()
+    assert(histogramTracker.snapshot().exists(_.methods.isEmpty))
   }
 
   test("post: with reply") {
@@ -110,7 +141,7 @@ class InboxSuite extends CelebornFunSuite with BeforeAndAfter {
         new Runnable {
           override def run(): Unit = {
             for (_ <- 0 until 100) {
-              val message = OneWayMessage(null, "hi")
+              val message = OneWayMessage(null, "hi", RpcMessageOrigin.local())
               inbox.post(message)
             }
             exitLatch.countDown()
@@ -171,7 +202,7 @@ class InboxSuite extends CelebornFunSuite with BeforeAndAfter {
     when(endpoint.receive).thenThrow(new OutOfMemoryError())
     val dispatcher = mock(classOf[Dispatcher])
     val inbox = initInbox(endpoint, None)
-    inbox.post(OneWayMessage(null, "hi"))
+    inbox.post(OneWayMessage(null, "hi", RpcMessageOrigin.local()))
     intercept[OutOfMemoryError] {
       inbox.process(dispatcher)
     }
